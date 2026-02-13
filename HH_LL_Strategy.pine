@@ -19,9 +19,9 @@ strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overla
 //        + safety guard confirms structure (lower low below recent guard low)
 //        + Supertrend confirms downtrend (optional filter)
 //
-// R:R:   5:10 (1:2) risk-reward ratio enforced on every trade.
+// R:R:   1:10 (default) or 1:5 risk-reward ratio enforced on every trade.
 // Session: New York only (09:30-16:00 ET).
-// Exits: SL/TP (5:10 R:R), lower low breakdown, or Supertrend flip.
+// Exits: SL/TP (1:10 R:R), lower low breakdown, or Supertrend flip.
 // --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
@@ -55,13 +55,13 @@ mode_group    = "== Trading Mode =="
 allow_longs   = input.bool(true, "Allow Long Entries", group=mode_group)
 allow_shorts  = input.bool(true, "Allow Short Entries", group=mode_group)
 
-// -- Risk Management (5:10 R:R) --
+// -- Risk Management (1:5 / 1:10 R:R) --
 risk_group  = "== Risk Management =="
-sl_pct      = input.float(5.0,   "Stop Loss %",        minval=0.5, step=0.5, group=risk_group,
-     tooltip="Risk per trade. Take profit is automatically set to 2x this value (5:10 ratio)")
-rr_ratio    = input.float(2.0,   "Reward:Risk Ratio",  minval=1.0, step=0.5, group=risk_group,
-     tooltip="Take profit = Stop Loss x this ratio. Default 2.0 gives 5:10 (1:2) R:R")
-tp_pct      = sl_pct * rr_ratio  // TP auto-calculated from SL x R:R ratio
+sl_pct      = input.float(1.0,   "Stop Loss %",        minval=0.1, step=0.1, group=risk_group,
+     tooltip="Risk per trade. Keep small -- TP is a multiple of this (1:5 = 5%, 1:10 = 10%)")
+rr_ratio    = input.float(10.0,  "Reward:Risk Ratio",  minval=1.0, step=1.0, group=risk_group,
+     tooltip="TP = SL x ratio. Use 10 for 1:10 R:R or 5 for 1:5 R:R")
+tp_pct      = sl_pct * rr_ratio  // TP auto-calculated: 1% SL x 10 = 10% TP (1:10 R:R)
 
 // -- New York Session Filter --
 sess_group  = "== Session Filter =="
@@ -242,19 +242,19 @@ if barstate.islast
 // |           | + Guard confirms higher high structure        |
 // |           | + Supertrend in uptrend (optional)            |
 // |           | + NY session active (09:30-16:00 ET)          |
-// |           | SL = 5%, TP = 10% (1:2 R:R)                  |
+// |           | SL = 1%, TP = 10% (1:10 R:R default)         |
 // +-----------+-----------------------------------------------+
 // | SELL SHORT| Price breaks below lowest low (41 bars)      |
 // |           | + Guard confirms lower low structure          |
 // |           | + Supertrend in downtrend (optional)          |
 // |           | + NY session active (09:30-16:00 ET)          |
-// |           | SL = 5%, TP = 10% (1:2 R:R)                  |
+// |           | SL = 1%, TP = 10% (1:10 R:R default)         |
 // +-----------+-----------------------------------------------+
-// | EXIT LONG | Hit TP (10%) or SL (5%)                      |
+// | EXIT LONG | Hit TP (10%) or SL (1%)                      |
 // |           | OR lower low breakdown (reversal)             |
 // |           | OR Supertrend flips to downtrend (optional)   |
 // +-----------+-----------------------------------------------+
-// | EXIT SHORT| Hit TP (10%) or SL (5%)                      |
+// | EXIT SHORT| Hit TP (10%) or SL (1%)                      |
 // |           | OR higher high breakout (reversal)            |
 // |           | OR Supertrend flips to uptrend (optional)     |
 // +-----------+-----------------------------------------------+
