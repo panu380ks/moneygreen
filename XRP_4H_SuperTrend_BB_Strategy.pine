@@ -193,7 +193,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
 // INFO TABLE
 // ──────────────────────────────────────────────────────────────────────────────
 
-var table info = table.new(position.top_right, 2, 7, border_width=1)
+var info = table.new(position.top_right, 2, 7, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",  bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Signal",     bgcolor=color.new(color.gray, 80), text_color=color.white)
