@@ -1,8 +1,7 @@
+//@version=5
 // This Pine Script code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 // (c) moneygreen
-
-//@version=5
 strategy("XRP 4H | MACD + RSI + Bollinger Bands", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      initial_capital=10000, commission_type=strategy.commission.percent,
