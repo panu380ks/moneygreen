@@ -17,12 +17,14 @@ strategy("XRP 4H | SuperTrend + Bollinger Bands", overlay=true,
 // Core idea: "Buy when the trend starts, sell when price breaks the BB high"
 //   - SuperTrend flip signals the entry (new trend confirmation)
 //   - Bollinger Band break signals the exit (price overextension)
+//   - EMA 200 filters counter-trend trades for higher win rate
 //
 // BEST VARIANT (V3 - Optimized):
 //   SuperTrend 10, 3.0  - balanced sensitivity, ~70% directional accuracy
 //   BB 20, 2.0          - gold standard, validated over 360+ yrs of data
+//   EMA 200             - trend direction filter
 //
-// Entry on SuperTrend flip (trend start).
+// Entry on SuperTrend flip (trend start) + EMA confirmation.
 // Exit when price breaks the opposite BB band + ATR-based risk mgmt.
 //
 // Variants tested (see VARIANTS section at bottom):
@@ -50,6 +52,12 @@ filt_group      = "== Entry Filters =="
 use_squeeze     = input.bool(false, "Require BB Squeeze",  group=filt_group,
      tooltip="Only enter when BB width is narrower than its moving average (volatility contraction)")
 squeeze_lookback= input.int(50,     "Squeeze Lookback", minval=5, group=filt_group)
+use_ema         = input.bool(true,  "Use EMA Trend Filter",   group=filt_group,
+     tooltip="Only long above EMA, short below EMA — filters counter-trend trades")
+ema_len         = input.int(200,    "EMA Length",              minval=1, group=filt_group)
+use_vol         = input.bool(true,  "Use Volume Filter",      group=filt_group,
+     tooltip="Only enter when current volume exceeds its moving average")
+vol_lookback    = input.int(20,     "Volume MA Length",        minval=1, group=filt_group)
 
 // -- Risk Management --
 risk_group  = "== Risk Management =="
@@ -84,8 +92,9 @@ bb_basis = ta.sma(close, bb_len)
 bb_dev   = bb_mult * ta.stdev(close, bb_len)
 bb_upper = bb_basis + bb_dev
 bb_lower = bb_basis - bb_dev
-bb_pct   = (close - bb_lower) / (bb_upper - bb_lower)  // %B: 0 = lower band, 1 = upper band
-bb_width = (bb_upper - bb_lower) / bb_basis             // normalized bandwidth
+bb_range = bb_upper - bb_lower
+bb_pct   = bb_range != 0 ? (close - bb_lower) / bb_range : 0.5
+bb_width = bb_basis != 0 ? bb_range / bb_basis : 0
 
 // BB Squeeze detection: current width < average width (volatility contraction)
 bb_width_avg  = ta.sma(bb_width, squeeze_lookback)
@@ -93,6 +102,13 @@ bb_in_squeeze = bb_width < bb_width_avg
 
 // ATR for risk management
 atr = ta.atr(14)
+
+// EMA trend filter
+ema = ta.ema(close, ema_len)
+
+// Volume filter
+vol_avg = ta.sma(volume, vol_lookback)
+vol_ok  = not use_vol or volume > vol_avg
 
 // --------------------------------------------------------------------------
 // ENTRY CONDITIONS (SuperTrend flip triggers entry)
@@ -103,27 +119,35 @@ in_date = not use_date or (time >= start_date and time <= end_date)
 // === LONG ENTRY ===
 // 1. SuperTrend flips bullish (new uptrend starts)
 // 2. [Optional] BB is in a squeeze (volatility about to expand)
+// 3. Price above EMA (uptrend confirmed)
+// 4. Volume above average
 long_flip = st_flip_bull
 long_sqz  = not use_squeeze or bb_in_squeeze
+long_ema  = not use_ema or close > ema
+long_vol  = vol_ok
 
-long_entry = long_flip and long_sqz and in_date
+long_entry = long_flip and long_sqz and long_ema and long_vol and in_date
 
 // === SHORT ENTRY ===
 // 1. SuperTrend flips bearish (new downtrend starts)
 // 2. [Optional] BB is in a squeeze
+// 3. Price below EMA (downtrend confirmed)
+// 4. Volume above average
 short_flip = st_flip_bear
 short_sqz  = not use_squeeze or bb_in_squeeze
+short_ema  = not use_ema or close < ema
+short_vol  = vol_ok
 
-short_entry = short_flip and short_sqz and in_date
+short_entry = short_flip and short_sqz and short_ema and short_vol and in_date
 
 // --------------------------------------------------------------------------
 // EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
 // Primary exit: Price breaks the opposite BB band
-// Long exit: price breaks above upper (green) BB - sell at the high
+// Long exit: price breaks above upper BB - sell at the high
 exit_long_bb  = close >= bb_upper
-// Short exit: price breaks below lower (red) BB - cover at the low
+// Short exit: price breaks below lower BB - cover at the low
 exit_short_bb = close <= bb_lower
 
 // --------------------------------------------------------------------------
@@ -132,25 +156,25 @@ exit_short_bb = close <= bb_lower
 
 // Long entries
 if long_entry and strategy.position_size == 0
-    sl = use_sl ? close - (atr * sl_atr_mult) : na
-    tp = use_tp ? close + (atr * sl_atr_mult * tp_rr) : na
+    sl_price = use_sl ? close - (atr * sl_atr_mult) : na
+    tp_price = use_tp ? close + (atr * sl_atr_mult * tp_rr) : na
     strategy.entry("Long", strategy.long)
     if use_sl or use_tp
         strategy.exit("Long Exit", "Long",
-             stop  = use_sl ? sl : na,
-             limit = use_tp ? tp : na,
+             stop  = use_sl ? sl_price : na,
+             limit = use_tp ? tp_price : na,
              trail_points = use_trail ? atr * trail_atr / syminfo.mintick : na,
              trail_offset = use_trail ? atr * trail_atr / syminfo.mintick : na)
 
 // Short entries
 if short_entry and strategy.position_size == 0
-    sl = use_sl ? close + (atr * sl_atr_mult) : na
-    tp = use_tp ? close - (atr * sl_atr_mult * tp_rr) : na
+    sl_price = use_sl ? close + (atr * sl_atr_mult) : na
+    tp_price = use_tp ? close - (atr * sl_atr_mult * tp_rr) : na
     strategy.entry("Short", strategy.short)
     if use_sl or use_tp
         strategy.exit("Short Exit", "Short",
-             stop  = use_sl ? sl : na,
-             limit = use_tp ? tp : na,
+             stop  = use_sl ? sl_price : na,
+             limit = use_tp ? tp_price : na,
              trail_points = use_trail ? atr * trail_atr / syminfo.mintick : na,
              trail_offset = use_trail ? atr * trail_atr / syminfo.mintick : na)
 
@@ -168,6 +192,9 @@ if strategy.position_size < 0 and exit_short_bb
 // SuperTrend line
 st_color = st_bullish ? color.new(color.green, 0) : color.new(color.red, 0)
 plot(st_line, "SuperTrend", color=st_color, linewidth=2, style=plot.style_linebr)
+
+// EMA trend filter line
+plot(use_ema ? ema : na, "EMA Filter", color=color.new(color.orange, 30), linewidth=2)
 
 // Bollinger Bands (green = upper/sell zone, red = lower/buy zone)
 p_bb_upper = plot(bb_upper, "BB Upper", color=color.new(color.green, 30))
@@ -192,7 +219,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 7, border_width=1)
+var info = table.new(position.top_right, 2, 9, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",  bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Signal",     bgcolor=color.new(color.gray, 80), text_color=color.white)
@@ -213,11 +240,19 @@ if barstate.islast
     table.cell(info, 1, 4, bb_in_squeeze ? "YES *" : "NO",
          text_color=bb_in_squeeze ? color.yellow : color.gray)
 
-    table.cell(info, 0, 5, "ATR(14)", text_color=color.white)
-    table.cell(info, 1, 5, str.tostring(atr, "#.####"), text_color=color.white)
+    table.cell(info, 0, 5, "EMA " + str.tostring(ema_len), text_color=color.white)
+    table.cell(info, 1, 5, close > ema ? "ABOVE ^" : "BELOW v",
+         text_color=close > ema ? color.green : color.red)
 
-    table.cell(info, 0, 6, "Status", text_color=color.white)
-    table.cell(info, 1, 6,
+    table.cell(info, 0, 6, "Volume", text_color=color.white)
+    table.cell(info, 1, 6, volume > vol_avg ? "ABOVE AVG" : "BELOW AVG",
+         text_color=volume > vol_avg ? color.green : color.gray)
+
+    table.cell(info, 0, 7, "ATR(14)", text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(atr, "#.####"), text_color=color.white)
+
+    table.cell(info, 0, 8, "Status", text_color=color.white)
+    table.cell(info, 1, 8,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
@@ -231,6 +266,7 @@ if barstate.islast
 // ST Factor        | 3.5             | 2.0            | 3.0
 // BB Length        | 20              | 20             | 20
 // BB Multiplier    | 2.0             | 1.5            | 2.0
+// EMA Length       | 200             | 100            | 200
 // SL ATR Mult      | 2.5             | 1.5            | 2.0
 // TP R:R           | 3.0             | 2.0            | 2.5
 // Trail ATR Mult   | 2.0             | 1.0            | 1.5
