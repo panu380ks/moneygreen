@@ -15,9 +15,9 @@ strategy("XRP 4H | SuperTrend + Bollinger Bands", overlay=true,
 // ══════════════════════════════════════════════════════════════════════════════
 // Dual-indicator confluence strategy for XRPUSDT on the 4H timeframe.
 //
-// Core idea: "Buy pullbacks in uptrends, sell rallies in downtrends"
+// Core idea: "Buy at the lower (red) BB band, sell at the upper (green) BB band"
 //   - SuperTrend identifies the prevailing trend direction
-//   - Bollinger Bands define the value zone for entries
+//   - Bollinger Bands define exact entry/exit levels (band touches)
 //
 // BEST VARIANT (V3 - Optimized):
 //   SuperTrend 10, 3.0  — balanced sensitivity, ~70% directional accuracy
@@ -48,10 +48,6 @@ bb_mult    = input.float(2.0,  "BB Multiplier",minval=0.1, step=0.1, group=bb_gr
 
 // — Entry Filters —
 filt_group      = "══ Entry Filters ══"
-long_bb_max     = input.float(0.50, "Long: Max BB %B",  minval=0.0, maxval=1.0, step=0.05, group=filt_group,
-     tooltip="Price must be below this %B level to enter long (0.50 = below BB basis)")
-short_bb_min    = input.float(0.50, "Short: Min BB %B", minval=0.0, maxval=1.0, step=0.05, group=filt_group,
-     tooltip="Price must be above this %B level to enter short (0.50 = above BB basis)")
 use_squeeze     = input.bool(false, "Require BB Squeeze",  group=filt_group,
      tooltip="Only enter when BB width is narrower than its moving average (volatility contraction)")
 squeeze_lookback= input.int(50,     "Squeeze Lookback", minval=5, group=filt_group)
@@ -107,22 +103,20 @@ in_date = not use_date or (time >= start_date and time <= end_date)
 
 // ═══ LONG ENTRY ═══
 // 1. SuperTrend is bullish (trend is up)
-// 2. Price is in the lower portion of BB range (%B < threshold) — buying at a discount
-// 3. Price is above BB lower band (not in freefall)
-// 4. [Optional] BB is in a squeeze (volatility about to expand)
+// 2. Price touches or crosses below the lower (red) BB band — buying the dip
+// 3. [Optional] BB is in a squeeze (volatility about to expand)
 long_st  = st_bullish
-long_bb  = bb_pct < long_bb_max and close > bb_lower
+long_bb  = close <= bb_lower
 long_sqz = not use_squeeze or bb_in_squeeze
 
 long_entry = long_st and long_bb and long_sqz and in_date
 
 // ═══ SHORT ENTRY ═══
 // 1. SuperTrend is bearish (trend is down)
-// 2. Price is in the upper portion of BB range (%B > threshold) — selling at a premium
-// 3. Price is below BB upper band (not in a squeeze breakout)
-// 4. [Optional] BB is in a squeeze
+// 2. Price touches or crosses above the upper (green) BB band — selling the rally
+// 3. [Optional] BB is in a squeeze
 short_st  = st_bearish
-short_bb  = bb_pct > short_bb_min and close < bb_upper
+short_bb  = close >= bb_upper
 short_sqz = not use_squeeze or bb_in_squeeze
 
 short_entry = short_st and short_bb and short_sqz and in_date
@@ -135,13 +129,11 @@ short_entry = short_st and short_bb and short_sqz and in_date
 exit_long_st  = st_flip_bear
 exit_short_st = st_flip_bull
 
-// Secondary exit: Price closes beyond opposite BB for 2 consecutive bars
-exit_long_bb  = close > bb_upper and close[1] > bb_upper
-exit_short_bb = close < bb_lower and close[1] < bb_lower
-
-// Tertiary exit: Price crosses BB basis against the trade (mean reversion complete)
-exit_long_basis  = ta.crossunder(close, bb_basis) and bb_pct[1] > 0.8
-exit_short_basis = ta.crossover(close, bb_basis)  and bb_pct[1] < 0.2
+// Secondary exit: Price reaches the opposite BB band
+// Long exit: price touches/crosses upper (green) BB — sell at the top
+exit_long_bb  = close >= bb_upper
+// Short exit: price touches/crosses lower (red) BB — cover at the bottom
+exit_short_bb = close <= bb_lower
 
 // ──────────────────────────────────────────────────────────────────────────────
 // STRATEGY EXECUTION
@@ -172,13 +164,13 @@ if short_entry and strategy.position_size == 0
              trail_offset = use_trail ? atr * trail_atr / syminfo.mintick : na)
 
 // Signal-based exits
-if strategy.position_size > 0 and (exit_long_st or exit_long_bb or exit_long_basis)
+if strategy.position_size > 0 and (exit_long_st or exit_long_bb)
     strategy.close("Long",
-         comment = exit_long_st ? "ST Reversal" : exit_long_bb ? "BB Upper 2x" : "BB Basis Cross")
+         comment = exit_long_st ? "ST Reversal" : "BB Upper Hit")
 
-if strategy.position_size < 0 and (exit_short_st or exit_short_bb or exit_short_basis)
+if strategy.position_size < 0 and (exit_short_st or exit_short_bb)
     strategy.close("Short",
-         comment = exit_short_st ? "ST Reversal" : exit_short_bb ? "BB Lower 2x" : "BB Basis Cross")
+         comment = exit_short_st ? "ST Reversal" : "BB Lower Hit")
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PLOTS
@@ -188,11 +180,11 @@ if strategy.position_size < 0 and (exit_short_st or exit_short_bb or exit_short_
 st_color = st_bullish ? color.new(color.green, 0) : color.new(color.red, 0)
 plot(st_line, "SuperTrend", color=st_color, linewidth=2, style=plot.style_linebr)
 
-// Bollinger Bands
-p_bb_upper = plot(bb_upper, "BB Upper", color=color.new(color.blue, 70))
-p_bb_lower = plot(bb_lower, "BB Lower", color=color.new(color.blue, 70))
-plot(bb_basis, "BB Basis", color=color.new(color.blue, 50), linewidth=1)
-fill(p_bb_upper, p_bb_lower, color=color.new(color.blue, 92))
+// Bollinger Bands (green = upper/sell zone, red = lower/buy zone)
+p_bb_upper = plot(bb_upper, "BB Upper", color=color.new(color.green, 30))
+p_bb_lower = plot(bb_lower, "BB Lower", color=color.new(color.red, 30))
+plot(bb_basis, "BB Basis", color=color.new(color.gray, 50), linewidth=1)
+fill(p_bb_upper, p_bb_lower, color=color.new(color.gray, 92))
 
 // Entry signals
 plotshape(long_entry and strategy.position_size == 0, "Long Signal",
@@ -236,8 +228,8 @@ if barstate.islast
     table.cell(info, 1, 5, str.tostring(atr, "#.####"), text_color=color.white)
 
     table.cell(info, 0, 6, "Confluence", text_color=color.white)
-    l = (st_bullish ? 1 : 0) + (bb_pct < long_bb_max and close > bb_lower ? 1 : 0)
-    s = (st_bearish ? 1 : 0) + (bb_pct > short_bb_min and close < bb_upper ? 1 : 0)
+    l = (st_bullish ? 1 : 0) + (close <= bb_lower ? 1 : 0)
+    s = (st_bearish ? 1 : 0) + (close >= bb_upper ? 1 : 0)
     table.cell(info, 1, 6, "L:" + str.tostring(l) + "/2 | S:" + str.tostring(s) + "/2",
          text_color=color.white)
 
@@ -252,8 +244,8 @@ if barstate.islast
 // │ ST Factor        │ 3.5              │ 2.0              │ 3.0                  │
 // │ BB Length        │ 20               │ 20               │ 20                   │
 // │ BB Multiplier    │ 2.0              │ 1.5              │ 2.0                  │
-// │ Long Max %B      │ 0.35             │ 0.60             │ 0.50                 │
-// │ Short Min %B     │ 0.65             │ 0.40             │ 0.50                 │
+// │ Long Entry       │ close<=BB lower  │ close<=BB lower  │ close<=BB lower      │
+// │ Short Entry      │ close>=BB upper  │ close>=BB upper  │ close>=BB upper      │
 // │ BB Squeeze       │ OFF              │ OFF              │ OFF                  │
 // │ SL ATR Mult      │ 2.5              │ 1.5              │ 2.0                  │
 // │ TP R:R           │ 3.0              │ 2.0              │ 2.5                  │
@@ -277,13 +269,12 @@ if barstate.islast
 //    the optimal setting. Tighter bands (1.5 mult) produce too many false
 //    touches on volatile XRP.
 //
-// 3. The %B threshold of 0.50 (BB basis) splits the channel at the mean:
-//    - Longs enter only when price is BELOW the 20-SMA in an uptrend
-//      (buying the pullback at a discount)
-//    - Shorts enter only when price is ABOVE the 20-SMA in a downtrend
-//      (selling the rally at a premium)
-//    This "buy the dip / sell the rip" approach in the direction of the
-//    SuperTrend yields better entries than chasing breakouts.
+// 3. Band-touch entries use the actual BB bands as triggers:
+//    - Longs enter only when price touches/crosses the lower (red) BB
+//      in an uptrend (buying at maximum discount)
+//    - Shorts enter only when price touches/crosses the upper (green) BB
+//      in a downtrend (selling at maximum premium)
+//    This band-to-band approach captures the full BB range as profit.
 //
 // 4. ATR-based risk management with 2.5:1 R:R provides positive expectancy
 //    even at a 29% win rate (breakeven). With the expected ~50-56% WR,
