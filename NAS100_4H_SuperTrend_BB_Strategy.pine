@@ -2,7 +2,7 @@
 // This Pine Script code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 // (c) moneygreen
-strategy("NAS100 4H | SuperTrend + Bollinger Bands", overlay=true,
+strategy("NAS100 4H | SuperTrend + BOS", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=75,
      initial_capital=10000, commission_type=strategy.commission.percent,
      commission_value=0.04, slippage=3, pyramiding=0,
@@ -12,31 +12,21 @@ strategy("NAS100 4H | SuperTrend + Bollinger Bands", overlay=true,
 // --------------------------------------------------------------------------
 // STRATEGY OVERVIEW
 // --------------------------------------------------------------------------
-// Dual-indicator trend-following strategy for NAS100 on the 4H timeframe.
+// SuperTrend + Break of Structure (BOS) strategy for NAS100 on 4H.
 //
-// Core idea: "Buy when the trend starts, sell when price breaks the BB high"
-//   - SuperTrend flip signals the entry (new trend confirmation)
-//   - Bollinger Band break signals the exit (price overextension)
-//   - EMA 200 filters counter-trend trades (institutional trend line)
+// Core logic:
+//   BUY  → SuperTrend is GREEN + Bullish BOS (price breaks above last swing high)
+//   SELL → SuperTrend turns RED  OR  Bearish BOS (price breaks below last swing low)
 //
-// NAS100 CHARACTERISTICS:
-//   - Strong sustained trends, especially during earnings/Fed events
-//   - EMA 200 is THE trend line institutions watch on equity indices
-//   - SuperTrend 10,3.0 provides ~70% directional accuracy on 4H indices
-//   - Lower volatility than crypto = tighter ATR-based stops
+// Break of Structure (BOS) — Smart Money concept:
+//   Bullish BOS:  Close breaks above the most recent swing high
+//                 → confirms buyers are in control, structure shifts up
+//   Bearish BOS:  Close breaks below the most recent swing low
+//                 → confirms sellers are in control, structure shifts down
 //
-// BEST VARIANT (V3 - Optimized for NAS100):
-//   SuperTrend 10, 3.0  - balanced sensitivity for index trends
-//   BB 20, 2.0          - gold standard, validated across all markets
-//   EMA 200             - institutional trend confirmation
-//
-// Entry on SuperTrend flip + EMA confirmation.
-// Exit when price breaks the opposite BB band + ATR-based risk mgmt.
-//
-// Variants:
-//   V1 - Conservative (smooth ST, wide stops)   - highest WR, fewest trades
-//   V2 - Aggressive   (fast ST, tight BB)        - most trades, lower WR
-//   V3 - Optimized    (balanced, value entries)   - best risk-adjusted *
+// SuperTrend acts as the trend filter, BOS acts as the structure trigger.
+// Combining them avoids buying into bearish trends (ST red) and catches
+// early exits before the trend fully reverses (BOS breaks structure first).
 // --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
@@ -48,6 +38,17 @@ st_group   = "== SuperTrend =="
 st_atr     = input.int(10,     "ATR Period",  minval=1,    group=st_group)
 st_factor  = input.float(3.0,  "Factor",      minval=0.01, step=0.1, group=st_group)
 
+// -- Break of Structure --
+bos_group      = "== Break of Structure =="
+bos_lookback   = input.int(5,  "Pivot Lookback (bars each side)", minval=2, maxval=20, group=bos_group,
+     tooltip="Number of bars on each side to confirm a swing high/low. Higher = fewer but more significant pivots. 5 = ~20 hours on 4H")
+bos_close_only = input.bool(true, "BOS on Close Only", group=bos_group,
+     tooltip="Only trigger BOS when the candle CLOSES beyond the swing level (stronger confirmation)")
+use_bos_entry  = input.bool(true, "Require Bullish BOS to Enter Long", group=bos_group,
+     tooltip="When ON: buy requires ST green + bullish BOS. When OFF: buy on ST flip green only")
+use_bos_exit   = input.bool(true, "Exit Long on Bearish BOS", group=bos_group,
+     tooltip="When ON: exit longs when price breaks below last swing low, even if ST is still green")
+
 // -- Bollinger Bands --
 bb_group   = "== Bollinger Bands =="
 bb_len     = input.int(20,     "BB Length",    minval=1,    group=bb_group)
@@ -55,30 +56,26 @@ bb_mult    = input.float(2.0,  "BB Multiplier",minval=0.1, step=0.1, group=bb_gr
 
 // -- Entry Filters --
 filt_group      = "== Entry Filters =="
-use_squeeze     = input.bool(false, "Require BB Squeeze",  group=filt_group,
-     tooltip="Only enter when BB width is narrower than its moving average (volatility contraction before expansion)")
-squeeze_lookback= input.int(50,     "Squeeze Lookback", minval=5, group=filt_group)
 use_ema         = input.bool(true,  "Use EMA Trend Filter",   group=filt_group,
-     tooltip="Only long above EMA, short below — the #1 institutional trend filter for indices")
+     tooltip="Only long above EMA — the #1 institutional trend filter for indices")
 ema_len         = input.int(200,    "EMA Length",              minval=1, group=filt_group)
 use_vol         = input.bool(true,  "Use Volume Filter",      group=filt_group,
-     tooltip="Only enter when current volume exceeds its moving average — confirms real moves")
+     tooltip="Only enter when current volume exceeds its moving average")
 vol_lookback    = input.int(20,     "Volume MA Length",        minval=1, group=filt_group)
 use_session     = input.bool(false, "US Session Only",         group=filt_group,
-     tooltip="Only enter trades during US session (09:30-16:00 exchange time). Disable for 24H CFD charts")
+     tooltip="Only enter during US session (09:30-16:00 exchange time)")
 session_str     = input.session("0930-1600", "Session Window", group=filt_group)
+allow_shorts    = input.bool(true,  "Allow Short Entries",     group=filt_group,
+     tooltip="When ON: enter short on ST red + bearish BOS. When OFF: only exit longs, never go short")
 
 // -- Risk Management --
 risk_group  = "== Risk Management =="
 use_sl      = input.bool(true,   "Use Stop Loss",         group=risk_group)
-sl_atr_mult = input.float(1.5,   "SL ATR Multiplier",    minval=0.5, step=0.1, group=risk_group,
-     tooltip="Stop loss = ATR(14) x this (tighter than crypto — NAS100 has lower % volatility)")
+sl_atr_mult = input.float(1.5,   "SL ATR Multiplier",    minval=0.5, step=0.1, group=risk_group)
 use_tp      = input.bool(true,   "Use Take Profit",       group=risk_group)
-tp_rr       = input.float(2.0,   "Risk:Reward Ratio",    minval=0.5, step=0.1, group=risk_group,
-     tooltip="Take profit = SL distance x this ratio")
+tp_rr       = input.float(2.0,   "Risk:Reward Ratio",    minval=0.5, step=0.1, group=risk_group)
 use_trail   = input.bool(true,   "Use Trailing Stop",     group=risk_group)
-trail_atr   = input.float(1.0,   "Trail ATR Multiplier", minval=0.5, step=0.1, group=risk_group,
-     tooltip="Tighter trail for NAS100 — locks in profits during sustained index moves")
+trail_atr   = input.float(1.0,   "Trail ATR Multiplier", minval=0.5, step=0.1, group=risk_group)
 
 // -- Date Filter --
 date_group  = "== Date Filter =="
@@ -92,8 +89,8 @@ end_date    = input.time(timestamp("2026-12-31"), "End Date",   group=date_group
 
 // SuperTrend
 [st_line, st_dir] = ta.supertrend(st_factor, st_atr)
-st_bullish   = st_dir < 0   // price above SuperTrend = bullish
-st_bearish   = st_dir > 0   // price below SuperTrend = bearish
+st_bullish   = st_dir < 0   // price above SuperTrend = GREEN
+st_bearish   = st_dir > 0   // price below SuperTrend = RED
 st_flip_bull = st_bullish and not st_bullish[1]
 st_flip_bear = st_bearish and not st_bearish[1]
 
@@ -102,13 +99,6 @@ bb_basis = ta.sma(close, bb_len)
 bb_dev   = bb_mult * ta.stdev(close, bb_len)
 bb_upper = bb_basis + bb_dev
 bb_lower = bb_basis - bb_dev
-bb_range = bb_upper - bb_lower
-bb_pct   = bb_range != 0 ? (close - bb_lower) / bb_range : 0.5
-bb_width = bb_basis != 0 ? bb_range / bb_basis : 0
-
-// BB Squeeze detection
-bb_width_avg  = ta.sma(bb_width, squeeze_lookback)
-bb_in_squeeze = bb_width < bb_width_avg
 
 // ATR for risk management
 atr = ta.atr(14)
@@ -124,137 +114,193 @@ vol_ok  = not use_vol or volume > vol_avg
 in_session = not use_session or not na(time(timeframe.period, session_str))
 
 // --------------------------------------------------------------------------
-// ENTRY CONDITIONS (SuperTrend flip triggers entry)
+// BREAK OF STRUCTURE (BOS) DETECTION
+// --------------------------------------------------------------------------
+
+// Detect swing highs and swing lows using pivot points
+// ta.pivothigh/low returns the value at the pivot, offset by bos_lookback bars
+pivot_high = ta.pivothigh(high, bos_lookback, bos_lookback)
+pivot_low  = ta.pivotlow(low,   bos_lookback, bos_lookback)
+
+// Track the most recent swing high and swing low levels
+var float last_swing_high = na
+var float last_swing_low  = na
+
+// Update swing levels when new pivots are confirmed
+if not na(pivot_high)
+    last_swing_high := pivot_high
+
+if not na(pivot_low)
+    last_swing_low := pivot_low
+
+// Detect Break of Structure
+// Bullish BOS: price breaks ABOVE the last swing high → structure shifts UP
+// Bearish BOS: price breaks BELOW the last swing low  → structure shifts DOWN
+bullish_bos = not na(last_swing_high) and (bos_close_only ? close > last_swing_high : high > last_swing_high) and (bos_close_only ? close[1] <= last_swing_high : high[1] <= last_swing_high)
+bearish_bos = not na(last_swing_low)  and (bos_close_only ? close < last_swing_low  : low  < last_swing_low)  and (bos_close_only ? close[1] >= last_swing_low  : low[1]  >= last_swing_low)
+
+// --------------------------------------------------------------------------
+// ENTRY CONDITIONS
 // --------------------------------------------------------------------------
 
 in_date = not use_date or (time >= start_date and time <= end_date)
 
 // === LONG ENTRY ===
-// 1. SuperTrend flips bullish (new uptrend starts)
-// 2. [Optional] BB is in a squeeze (volatility about to expand)
-// 3. Price above EMA (uptrend confirmed by institutions)
-// 4. Volume above average (real participation, not low-volume chop)
-// 5. Within trading session (optional)
-long_flip = st_flip_bull
-long_sqz  = not use_squeeze or bb_in_squeeze
+// SuperTrend must be GREEN (bullish)
+// + Bullish BOS (price breaks above last swing high) — confirms structure
+// + EMA / Volume / Session filters
+long_st   = st_bullish
+long_bos  = not use_bos_entry or bullish_bos
 long_ema  = not use_ema or close > ema
 long_vol  = vol_ok
 
-long_entry = long_flip and long_sqz and long_ema and long_vol and in_session and in_date
+// Entry triggers:
+// Option A (BOS required): ST green + bullish BOS on this bar
+// Option B (BOS not required): ST flips green (original behavior)
+long_trigger = use_bos_entry ? (long_st and bullish_bos) : st_flip_bull
 
-// === SHORT ENTRY ===
-// 1. SuperTrend flips bearish (new downtrend starts)
-// 2. [Optional] BB is in a squeeze
-// 3. Price below EMA (downtrend confirmed)
-// 4. Volume above average
-// 5. Within trading session (optional)
-short_flip = st_flip_bear
-short_sqz  = not use_squeeze or bb_in_squeeze
+long_entry = long_trigger and long_ema and long_vol and in_session and in_date
+
+// === SHORT ENTRY (optional) ===
+// SuperTrend must be RED (bearish)
+// + Bearish BOS (price breaks below last swing low) — confirms structure
+short_st   = st_bearish
+short_bos  = not use_bos_entry or bearish_bos
 short_ema  = not use_ema or close < ema
 short_vol  = vol_ok
 
-short_entry = short_flip and short_sqz and short_ema and short_vol and in_session and in_date
+short_trigger = use_bos_entry ? (short_st and bearish_bos) : st_flip_bear
+
+short_entry = allow_shorts and short_trigger and short_ema and short_vol and in_session and in_date
 
 // --------------------------------------------------------------------------
 // EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
-// Primary exit: Price breaks the opposite BB band
+// Exit LONG when:
+// 1. SuperTrend flips RED (trend over)
+// 2. OR Bearish BOS (structure breaks down before ST flips)
+// 3. OR Price hits upper BB (overextended)
+exit_long_st  = st_flip_bear
+exit_long_bos = use_bos_exit and bearish_bos
 exit_long_bb  = close >= bb_upper
-exit_short_bb = close <= bb_lower
+
+// Exit SHORT when:
+// 1. SuperTrend flips GREEN (trend over)
+// 2. OR Bullish BOS (structure breaks up before ST flips)
+// 3. OR Price hits lower BB (oversold)
+exit_short_st  = st_flip_bull
+exit_short_bos = use_bos_exit and bullish_bos
+exit_short_bb  = close <= bb_lower
 
 // --------------------------------------------------------------------------
 // STRATEGY EXECUTION
 // --------------------------------------------------------------------------
 
-// Long entries
+// Long entries — only when SuperTrend is GREEN
 if long_entry and strategy.position_size == 0
     sl_price = use_sl ? close - (atr * sl_atr_mult) : na
     tp_price = use_tp ? close + (atr * sl_atr_mult * tp_rr) : na
     strategy.entry("Long", strategy.long)
     if use_sl or use_tp
-        strategy.exit("Long Exit", "Long",
+        strategy.exit("Long TP/SL", "Long",
              stop  = use_sl ? sl_price : na,
              limit = use_tp ? tp_price : na,
              trail_points = use_trail ? atr * trail_atr / syminfo.mintick : na,
              trail_offset = use_trail ? atr * trail_atr / syminfo.mintick : na)
 
-// Short entries
+// Short entries — only when SuperTrend is RED + allowed
 if short_entry and strategy.position_size == 0
     sl_price = use_sl ? close + (atr * sl_atr_mult) : na
     tp_price = use_tp ? close - (atr * sl_atr_mult * tp_rr) : na
     strategy.entry("Short", strategy.short)
     if use_sl or use_tp
-        strategy.exit("Short Exit", "Short",
+        strategy.exit("Short TP/SL", "Short",
              stop  = use_sl ? sl_price : na,
              limit = use_tp ? tp_price : na,
              trail_points = use_trail ? atr * trail_atr / syminfo.mintick : na,
              trail_offset = use_trail ? atr * trail_atr / syminfo.mintick : na)
 
 // Signal-based exits
-if strategy.position_size > 0 and exit_long_bb
-    strategy.close("Long", comment = "BB Upper Break")
+if strategy.position_size > 0 and (exit_long_st or exit_long_bos or exit_long_bb)
+    exit_reason = exit_long_st ? "ST Red" : exit_long_bos ? "Bearish BOS" : "BB Upper"
+    strategy.close("Long", comment=exit_reason)
 
-if strategy.position_size < 0 and exit_short_bb
-    strategy.close("Short", comment = "BB Lower Break")
+if strategy.position_size < 0 and (exit_short_st or exit_short_bos or exit_short_bb)
+    exit_reason = exit_short_st ? "ST Green" : exit_short_bos ? "Bullish BOS" : "BB Lower"
+    strategy.close("Short", comment=exit_reason)
 
 // --------------------------------------------------------------------------
 // PLOTS
 // --------------------------------------------------------------------------
 
-// SuperTrend line
+// SuperTrend line (GREEN = buy zone, RED = sell zone)
 st_color = st_bullish ? color.new(color.green, 0) : color.new(color.red, 0)
 plot(st_line, "SuperTrend", color=st_color, linewidth=2, style=plot.style_linebr)
 
-// EMA trend filter line
+// EMA trend filter
 plot(use_ema ? ema : na, "EMA 200", color=color.new(color.orange, 30), linewidth=2)
 
 // Bollinger Bands
-p_bb_upper = plot(bb_upper, "BB Upper", color=color.new(color.green, 30))
-p_bb_lower = plot(bb_lower, "BB Lower", color=color.new(color.red, 30))
+p_bb_upper = plot(bb_upper, "BB Upper", color=color.new(color.green, 50))
+p_bb_lower = plot(bb_lower, "BB Lower", color=color.new(color.red, 50))
 plot(bb_basis, "BB Basis", color=color.new(color.gray, 50), linewidth=1)
-fill(p_bb_upper, p_bb_lower, color=color.new(color.gray, 92))
+fill(p_bb_upper, p_bb_lower, color=color.new(color.gray, 93))
 
-// Entry signals
-plotshape(long_entry and strategy.position_size == 0, "Long Signal",
-     shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
-plotshape(short_entry and strategy.position_size == 0, "Short Signal",
-     shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+// Swing levels (horizontal lines showing current structure)
+plot(last_swing_high, "Swing High", color=color.new(color.teal, 40),
+     linewidth=1, style=plot.style_stepline_diamond)
+plot(last_swing_low,  "Swing Low",  color=color.new(color.purple, 40),
+     linewidth=1, style=plot.style_stepline_diamond)
 
-// BB Squeeze highlight
-bgcolor(bb_in_squeeze ? color.new(color.yellow, 92) : na, title="Squeeze BG")
+// Pivot markers (where swing highs/lows were detected)
+plotshape(not na(pivot_high), "Pivot High", shape.diamond, location.abovebar,
+     color.new(color.teal, 30), size=size.tiny, offset=-bos_lookback)
+plotshape(not na(pivot_low),  "Pivot Low",  shape.diamond, location.belowbar,
+     color.new(color.purple, 30), size=size.tiny, offset=-bos_lookback)
+
+// BOS signals
+plotshape(bullish_bos, "Bullish BOS", shape.labelup, location.belowbar,
+     color.new(color.green, 0), size=size.small, text="BOS", textcolor=color.white)
+plotshape(bearish_bos, "Bearish BOS", shape.labeldown, location.abovebar,
+     color.new(color.red, 0), size=size.small, text="BOS", textcolor=color.white)
+
+// Entry signals (only fires when all conditions met)
+plotshape(long_entry and strategy.position_size == 0, "Buy Signal",
+     shape.triangleup, location.belowbar, color.new(#00FF00, 0), size=size.normal)
+plotshape(short_entry and strategy.position_size == 0, "Sell Signal",
+     shape.triangledown, location.abovebar, color.new(#FF0000, 0), size=size.normal)
+
+// SuperTrend zone background
+bgcolor(st_bullish ? color.new(color.green, 96) : color.new(color.red, 96), title="ST Zone BG")
 
 // Session background
-bgcolor(use_session and in_session ? color.new(color.blue, 96) : na, title="Session BG")
-
-// Position background
-bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
-     strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position BG")
+bgcolor(use_session and in_session ? color.new(color.blue, 95) : na, title="Session BG")
 
 // --------------------------------------------------------------------------
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 9, border_width=1)
+var info = table.new(position.top_right, 2, 10, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",  bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Signal",     bgcolor=color.new(color.gray, 80), text_color=color.white)
 
     table.cell(info, 0, 1, "SuperTrend", text_color=color.white)
-    table.cell(info, 1, 1, st_bullish ? "BULL ^" : "BEAR v",
+    table.cell(info, 1, 1, st_bullish ? "GREEN ^" : "RED v",
          text_color=st_bullish ? color.green : color.red)
 
-    table.cell(info, 0, 2, "BB %B", text_color=color.white)
-    table.cell(info, 1, 2, str.tostring(bb_pct * 100, "#.0") + "%",
-         text_color=bb_pct > 0.8 ? color.red : bb_pct < 0.2 ? color.green : color.orange)
+    table.cell(info, 0, 2, "Swing High", text_color=color.white)
+    table.cell(info, 1, 2, not na(last_swing_high) ? str.tostring(last_swing_high, "#.##") : "N/A",
+         text_color=color.teal)
 
-    table.cell(info, 0, 3, "BB Width", text_color=color.white)
-    table.cell(info, 1, 3, str.tostring(bb_width * 100, "#.00") + "%",
-         text_color=bb_in_squeeze ? color.yellow : color.white)
+    table.cell(info, 0, 3, "Swing Low", text_color=color.white)
+    table.cell(info, 1, 3, not na(last_swing_low) ? str.tostring(last_swing_low, "#.##") : "N/A",
+         text_color=color.purple)
 
-    table.cell(info, 0, 4, "Squeeze", text_color=color.white)
-    table.cell(info, 1, 4, bb_in_squeeze ? "YES *" : "NO",
-         text_color=bb_in_squeeze ? color.yellow : color.gray)
+    table.cell(info, 0, 4, "Last BOS", text_color=color.white)
+    table.cell(info, 1, 4, bullish_bos ? "BULLISH ^" : bearish_bos ? "BEARISH v" : "—",
+         text_color=bullish_bos ? color.green : bearish_bos ? color.red : color.gray)
 
     table.cell(info, 0, 5, "EMA " + str.tostring(ema_len), text_color=color.white)
     table.cell(info, 1, 5, close > ema ? "ABOVE ^" : "BELOW v",
@@ -267,38 +313,46 @@ if barstate.islast
     table.cell(info, 0, 7, "ATR(14)", text_color=color.white)
     table.cell(info, 1, 7, str.tostring(atr, "#.##"), text_color=color.white)
 
-    table.cell(info, 0, 8, "Status", text_color=color.white)
-    table.cell(info, 1, 8,
+    table.cell(info, 0, 8, "BB %B", text_color=color.white)
+    bb_range_val = bb_upper - bb_lower
+    bb_pct_val   = bb_range_val != 0 ? (close - bb_lower) / bb_range_val : 0.5
+    table.cell(info, 1, 8, str.tostring(bb_pct_val * 100, "#.0") + "%",
+         text_color=bb_pct_val > 0.8 ? color.red : bb_pct_val < 0.2 ? color.green : color.orange)
+
+    table.cell(info, 0, 9, "Position", text_color=color.white)
+    table.cell(info, 1, 9,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
 // --------------------------------------------------------------------------
-// VARIANT REFERENCE (NAS100 4H)
+// STRATEGY LOGIC SUMMARY
 // --------------------------------------------------------------------------
 //
-// Parameter        | V1 Conservative | V2 Aggressive  | V3 Optimized (default)
-// -----------------+-----------------+----------------+-----------------------
-// ST ATR Period    | 14              | 7              | 10
-// ST Factor        | 3.5             | 2.0            | 3.0
-// BB Length        | 20              | 20             | 20
-// BB Multiplier    | 2.0             | 1.5            | 2.0
-// EMA Length       | 200             | 100            | 200
-// SL ATR Mult      | 2.0             | 1.0            | 1.5
-// TP R:R           | 2.5             | 1.5            | 2.0
-// Trail ATR Mult   | 1.5             | 0.75           | 1.0
-// -----------------+-----------------+----------------+-----------------------
-// Trade Style      | Rare, high-conv | Frequent, fast | Balanced
-// Expected WR      | 58-65%          | 42-50%         | 50-58%
-// Expected PF      | 1.4-1.7         | 1.1-1.3        | 1.3-1.6
+// +-----------+-----------------------------------------------+
+// | BUY LONG  | SuperTrend GREEN + Bullish BOS               |
+// |           | (+ EMA above + Volume above avg)              |
+// +-----------+-----------------------------------------------+
+// | SELL/EXIT | SuperTrend flips RED                          |
+// |           | OR Bearish BOS (structure breaks down)        |
+// |           | OR Price hits upper BB (overextended)         |
+// +-----------+-----------------------------------------------+
+// | GO SHORT  | SuperTrend RED + Bearish BOS (if enabled)    |
+// |           | (+ EMA below + Volume above avg)              |
+// +-----------+-----------------------------------------------+
+// | COVER     | SuperTrend flips GREEN                        |
+// |           | OR Bullish BOS (structure breaks up)          |
+// |           | OR Price hits lower BB (oversold)             |
+// +-----------+-----------------------------------------------+
 //
-// KEY DIFFERENCES FROM XRP VERSION:
-// 1. SL 1.5x ATR instead of 2.0x — NAS100 has lower % volatility
-// 2. Trail 1.0x ATR instead of 1.5x — tighter trailing for index moves
-// 3. TP 2.0 R:R instead of 2.5 — more achievable on equity indices
-// 4. Commission 0.04% instead of 0.2% — CFD/index fees are much lower
-// 5. Position size 75% instead of 75% — same conservative sizing
-// 6. Optional US session filter — NAS100 moves mainly during NYSE hours
-// 7. ATR formatting uses "#.##" instead of "#.####" (larger tick values)
+// Break of Structure (BOS):
+//   - Uses pivot highs/lows with configurable lookback (default: 5 bars each side)
+//   - Bullish BOS = close breaks above the most recent swing high
+//   - Bearish BOS = close breaks below the most recent swing low
+//   - BOS fires on close by default (stronger signal) — can switch to wick-based
 //
-// To switch variants, change the input values in TradingView's settings panel.
+// Key settings to adjust:
+//   Pivot Lookback  → higher = fewer, bigger swings (try 3-7)
+//   BOS on Close    → ON = fewer false BOS, OFF = earlier detection
+//   Allow Shorts    → OFF for long-only mode (NAS100 bullish bias)
+//   Require BOS     → OFF to use original ST-flip-only entries
 // --------------------------------------------------------------------------
