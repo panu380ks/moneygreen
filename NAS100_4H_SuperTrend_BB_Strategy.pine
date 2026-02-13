@@ -14,16 +14,12 @@ strategy("NAS100 4H - SuperTrend + BOS", overlay=true,
 // --------------------------------------------------------------------------
 // SuperTrend + Break of Structure (BOS) strategy for NAS100 on 4H.
 //
-// Core logic:
-//   BUY  -> SuperTrend is GREEN + Bullish BOS (price breaks above last swing high)
-//   SELL -> SuperTrend turns RED  OR  Bearish BOS (price breaks below last swing low)
+// Pure trend-following, long-only:
+//   BUY  -> uptrend starts: SuperTrend flips GREEN + Bullish BOS
+//   SELL -> downtrend starts: SuperTrend flips RED OR Bearish BOS
 //
-// Loss-reduction features:
-//   ADX filter    -> avoids choppy/range-bound markets (biggest loss source)
-//   RSI filter    -> prevents chasing overbought/oversold entries
-//   BB value zone -> only enters at good prices, not overextended
-//   Max bars exit -> kills stale trades before they drift into losses
-//   Tight trail   -> locks in profits aggressively (0.75x ATR)
+// No shorts. No premature exits. Ride the trend until it reverses.
+// SL/TP/trailing stop still protect against catastrophic losses.
 // --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
@@ -62,7 +58,7 @@ vol_lookback    = input.int(20,     "Volume MA Length",        minval=1, group=f
 use_session     = input.bool(true,  "US Session Only",         group=filt_group,
      tooltip="Only enter during US session (09:30-16:00 exchange time)")
 session_str     = input.session("0930-1600", "Session Window", group=filt_group)
-allow_shorts    = input.bool(true,  "Allow Short Entries",     group=filt_group,
+allow_shorts    = input.bool(false, "Allow Short Entries",     group=filt_group,
      tooltip="When ON: enter short on ST red + bearish BOS. When OFF: only exit longs, never go short")
 use_adx         = input.bool(true,  "Use ADX Trend Strength Filter", group=filt_group,
      tooltip="Only enter when ADX > threshold — avoids choppy markets where most losses occur")
@@ -93,11 +89,6 @@ tp_rr       = input.float(2.0,   "Risk:Reward Ratio",    minval=0.5, step=0.1, g
 use_trail   = input.bool(true,   "Use Trailing Stop",     group=risk_group)
 trail_atr   = input.float(0.75,  "Trail ATR Multiplier", minval=0.3, step=0.05, group=risk_group,
      tooltip="Tight trail (0.75x ATR) locks in profits aggressively — reduces give-back losses")
-use_max_bars = input.bool(true,  "Use Max Bars Exit",     group=risk_group,
-     tooltip="Force-exit after N bars — kills stale trades that usually drift into losses")
-max_bars     = input.int(20,     "Max Bars in Trade",     minval=5, maxval=100, group=risk_group,
-     tooltip="20 bars = 80 hours on 4H. Trades lasting longer rarely end well")
-
 // -- Date Filter --
 date_group  = "== Date Filter =="
 use_date    = input.bool(false,  "Use Date Filter",        group=date_group)
@@ -210,30 +201,17 @@ short_entry = allow_shorts and short_trigger and short_ema and short_vol and in_
 // EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
-// Exit LONG when:
-// 1. SuperTrend flips RED (trend over)
-// 2. OR Bearish BOS (structure breaks down before ST flips)
-// 3. OR Price hits upper BB (overextended)
+// Exit LONG only when DOWNTREND starts:
+// 1. SuperTrend flips RED (trend reversal confirmed)
+// 2. OR Bearish BOS (structure breaks down — early reversal signal)
+// NO BB upper exit — let winners run during uptrend
+// NO max bars exit — stay in as long as trend is up
 exit_long_st  = st_flip_bear
 exit_long_bos = use_bos_exit and bearish_bos
-exit_long_bb  = close >= bb_upper
 
-// Exit SHORT when:
-// 1. SuperTrend flips GREEN (trend over)
-// 2. OR Bullish BOS (structure breaks up before ST flips)
-// 3. OR Price hits lower BB (oversold)
+// Exit SHORT only when UPTREND starts (if shorts enabled):
 exit_short_st  = st_flip_bull
 exit_short_bos = use_bos_exit and bullish_bos
-exit_short_bb  = close <= bb_lower
-
-// Max bars in trade — force exit stale positions
-var int bars_in_trade = 0
-if strategy.position_size != 0
-    bars_in_trade += 1
-else
-    bars_in_trade := 0
-
-exit_max_bars = use_max_bars and bars_in_trade >= max_bars
 
 // --------------------------------------------------------------------------
 // STRATEGY EXECUTION
@@ -263,13 +241,13 @@ if short_entry and strategy.position_size == 0
              trail_points = use_trail ? int(atr * trail_atr / syminfo.mintick) : na,
              trail_offset = use_trail ? int(atr * trail_atr / syminfo.mintick) : na)
 
-// Signal-based exits
-if strategy.position_size > 0 and (exit_long_st or exit_long_bos or exit_long_bb or exit_max_bars)
-    exit_reason = exit_long_st ? "ST Red" : exit_long_bos ? "Bearish BOS" : exit_long_bb ? "BB Upper" : "Max Bars"
+// Signal-based exits — ONLY on downtrend signals
+if strategy.position_size > 0 and (exit_long_st or exit_long_bos)
+    exit_reason = exit_long_st ? "Downtrend: ST Red" : "Downtrend: Bearish BOS"
     strategy.close("Long", comment=exit_reason)
 
-if strategy.position_size < 0 and (exit_short_st or exit_short_bos or exit_short_bb or exit_max_bars)
-    exit_reason = exit_short_st ? "ST Green" : exit_short_bos ? "Bullish BOS" : exit_short_bb ? "BB Lower" : "Max Bars"
+if strategy.position_size < 0 and (exit_short_st or exit_short_bos)
+    exit_reason = exit_short_st ? "Uptrend: ST Green" : "Uptrend: Bullish BOS"
     strategy.close("Short", comment=exit_reason)
 
 // --------------------------------------------------------------------------
@@ -323,7 +301,7 @@ bgcolor(use_session and in_session ? color.new(color.blue, 95) : na, title="Sess
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 13, border_width=1)
+var info = table.new(position.top_right, 2, 12, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",  bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Signal",     bgcolor=color.new(color.gray, 80), text_color=color.white)
@@ -367,12 +345,8 @@ if barstate.islast
     table.cell(info, 1, 10, str.tostring(bb_pct * 100, "#.0") + "%",
          text_color=bb_pct > 0.8 ? color.red : bb_pct < 0.2 ? color.green : color.orange)
 
-    table.cell(info, 0, 11, "Bars in Trade", text_color=color.white)
-    table.cell(info, 1, 11, strategy.position_size != 0 ? str.tostring(bars_in_trade) + "/" + str.tostring(max_bars) : "---",
-         text_color=bars_in_trade > max_bars * 0.75 ? color.red : color.white)
-
-    table.cell(info, 0, 12, "Position", text_color=color.white)
-    table.cell(info, 1, 12,
+    table.cell(info, 0, 11, "Position", text_color=color.white)
+    table.cell(info, 1, 11,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
@@ -381,32 +355,19 @@ if barstate.islast
 // --------------------------------------------------------------------------
 //
 // +-----------+-----------------------------------------------+
-// | BUY LONG  | SuperTrend GREEN + Bullish BOS               |
-// |           | + ADX > 20 (trending market)                  |
-// |           | + RSI < 70 (not chasing)                      |
-// |           | + BB %B < 0.70 (value zone)                   |
-// |           | + EMA above + Volume above avg                |
+// | BUY       | Uptrend starts:                               |
+// |           |   SuperTrend GREEN + Bullish BOS              |
+// |           |   + ADX > 20 + RSI < 70 + BB %B < 0.70       |
+// |           |   + EMA above + Volume above avg              |
 // +-----------+-----------------------------------------------+
-// | SELL/EXIT | SuperTrend flips RED                          |
-// |           | OR Bearish BOS (structure breaks down)        |
-// |           | OR Price hits upper BB (overextended)         |
-// |           | OR Max bars reached (stale trade)             |
+// | SELL      | Downtrend starts:                             |
+// |           |   SuperTrend flips RED                        |
+// |           |   OR Bearish BOS (structure breaks down)      |
 // +-----------+-----------------------------------------------+
-// | GO SHORT  | SuperTrend RED + Bearish BOS (if enabled)    |
-// |           | + ADX > 20 + RSI > 30 + BB %B > 0.30        |
-// +-----------+-----------------------------------------------+
-// | COVER     | SuperTrend flips GREEN                        |
-// |           | OR Bullish BOS (structure breaks up)          |
-// |           | OR Price hits lower BB (oversold)             |
-// |           | OR Max bars reached (stale trade)             |
+// | SHORTS    | Disabled by default (long-only)               |
 // +-----------+-----------------------------------------------+
 //
-// Loss reduction vs original:
-//   1. ADX filter    -> skips ~40% of losing trades in choppy markets
-//   2. RSI filter    -> prevents buying tops / selling bottoms
-//   3. BB value zone -> only enters at good prices
-//   4. Max bars exit -> kills stale trades (20 bars = 80 hrs on 4H)
-//   5. Tighter SL    -> 1.2x ATR (was 1.5x) caps individual losses
-//   6. Tighter trail  -> 0.75x ATR (was 1.0x) locks profits faster
-//   7. Smaller size   -> 50% equity (was 75%) reduces loss magnitude
+// Philosophy: ride the trend. Only exit when trend actually reverses.
+// No premature exits (no BB upper, no max bars).
+// SL/TP/trail still protect against catastrophic single-trade losses.
 // --------------------------------------------------------------------------
