@@ -19,8 +19,9 @@ strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overla
 //        + safety guard confirms structure (lower low below recent guard low)
 //        + Supertrend confirms downtrend (optional filter)
 //
-// Exits: Long closes on lower low breakdown or Supertrend flip to downtrend.
-//        Short closes on higher high breakout or Supertrend flip to uptrend.
+// R:R:   5:10 (1:2) risk-reward ratio enforced on every trade.
+// Session: New York only (09:30-16:00 ET).
+// Exits: SL/TP (5:10 R:R), lower low breakdown, or Supertrend flip.
 // --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
@@ -54,14 +55,20 @@ mode_group    = "== Trading Mode =="
 allow_longs   = input.bool(true, "Allow Long Entries", group=mode_group)
 allow_shorts  = input.bool(true, "Allow Short Entries", group=mode_group)
 
-// -- Risk Management --
+// -- Risk Management (5:10 R:R) --
 risk_group  = "== Risk Management =="
-use_sl      = input.bool(true,   "Use Stop Loss",      group=risk_group)
-sl_pct      = input.float(2.0,   "Stop Loss %",        minval=0.5, step=0.5, group=risk_group,
-     tooltip="Percentage below entry (longs) or above entry (shorts) for stop loss")
-use_tp      = input.bool(false,  "Use Take Profit",    group=risk_group)
-tp_pct      = input.float(4.0,   "Take Profit %",      minval=0.5, step=0.5, group=risk_group,
-     tooltip="Percentage above entry (longs) or below entry (shorts) for take profit")
+sl_pct      = input.float(5.0,   "Stop Loss %",        minval=0.5, step=0.5, group=risk_group,
+     tooltip="Risk per trade. Take profit is automatically set to 2x this value (5:10 ratio)")
+rr_ratio    = input.float(2.0,   "Reward:Risk Ratio",  minval=1.0, step=0.5, group=risk_group,
+     tooltip="Take profit = Stop Loss x this ratio. Default 2.0 gives 5:10 (1:2) R:R")
+tp_pct      = sl_pct * rr_ratio  // TP auto-calculated from SL x R:R ratio
+
+// -- New York Session Filter --
+sess_group  = "== Session Filter =="
+use_session = input.bool(true,   "NY Session Only",    group=sess_group,
+     tooltip="Only enter trades during the New York session (09:30-16:00 ET)")
+ny_session  = input.session("0930-1600", "NY Session (ET)", group=sess_group,
+     tooltip="New York trading session in Eastern Time")
 
 // -- Date Filter --
 date_group  = "== Date Filter =="
@@ -100,6 +107,9 @@ guard_short = breakout_down and lo[1] < lo_guard[guard_delay]
 // Date filter
 in_date = not use_date or (time >= start_date and time <= end_date)
 
+// New York session filter (uses exchange timezone by default)
+in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "America/New_York"))
+
 // --------------------------------------------------------------------------
 // ENTRY / EXIT CONDITIONS
 // --------------------------------------------------------------------------
@@ -108,8 +118,8 @@ in_date = not use_date or (time >= start_date and time <= end_date)
 st_long_ok  = not use_st or st_uptrend
 st_short_ok = not use_st or st_downtrend
 
-long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date
-short_entry = allow_shorts and guard_short and st_short_ok and in_date
+long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session
+short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session
 
 // Exit long when price breaks down (lower low) or Supertrend flips to downtrend
 exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
@@ -120,21 +130,19 @@ exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
 // STRATEGY EXECUTION
 // --------------------------------------------------------------------------
 
-// Long entries
+// Long entries -- SL and TP always active (5:10 R:R enforced)
 if long_entry
     strategy.entry("Long", strategy.long)
-    if use_sl or use_tp
-        sl_price = use_sl ? close * (1 - sl_pct / 100) : na
-        tp_price = use_tp ? close * (1 + tp_pct / 100) : na
-        strategy.exit("Long SL/TP", "Long", stop=sl_price, limit=tp_price)
+    sl_price_l = close * (1 - sl_pct / 100)
+    tp_price_l = close * (1 + tp_pct / 100)
+    strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l)
 
-// Short entries
+// Short entries -- SL and TP always active (5:10 R:R enforced)
 if short_entry
     strategy.entry("Short", strategy.short)
-    if use_sl or use_tp
-        sl_price = use_sl ? close * (1 + sl_pct / 100) : na
-        tp_price = use_tp ? close * (1 - tp_pct / 100) : na
-        strategy.exit("Short SL/TP", "Short", stop=sl_price, limit=tp_price)
+    sl_price_s = close * (1 + sl_pct / 100)
+    tp_price_s = close * (1 - tp_pct / 100)
+    strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s)
 
 // Signal-based exits -- trend reversal
 if strategy.position_size > 0 and exit_long
@@ -171,6 +179,9 @@ plotshape(long_entry and strategy.position_size <= 0,  "Buy Signal",
 plotshape(short_entry and strategy.position_size >= 0, "Sell Signal",
      shape.triangledown, location.abovebar, color.red, size=size.normal)
 
+// NY session background
+bgcolor(use_session and in_ny_session ? color.new(color.blue, 95) : na, title="NY Session BG")
+
 // Background color for position
 bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
      strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position BG")
@@ -179,7 +190,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 9, border_width=1)
+var info = table.new(position.top_right, 2, 11, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",    bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Value",        bgcolor=color.new(color.gray, 80), text_color=color.white)
@@ -205,12 +216,20 @@ if barstate.islast
     table.cell(info, 1, 6, use_st ? str.tostring(supertrend, "#.##") : "---",
          text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
 
-    table.cell(info, 0, 7, "Breakout", text_color=color.white)
-    table.cell(info, 1, 7, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
+    table.cell(info, 0, 7, "R:R Ratio", text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(sl_pct, "#.#") + " : " + str.tostring(tp_pct, "#.#"),
+         text_color=color.yellow)
+
+    table.cell(info, 0, 8, "NY Session", text_color=color.white)
+    table.cell(info, 1, 8, in_ny_session ? "ACTIVE" : "CLOSED",
+         text_color=in_ny_session ? color.lime : color.gray)
+
+    table.cell(info, 0, 9, "Breakout", text_color=color.white)
+    table.cell(info, 1, 9, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
          text_color=breakout_up ? color.green : breakout_down ? color.red : color.gray)
 
-    table.cell(info, 0, 8, "Position", text_color=color.white)
-    table.cell(info, 1, 8,
+    table.cell(info, 0, 10, "Position", text_color=color.white)
+    table.cell(info, 1, 10,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
@@ -222,15 +241,21 @@ if barstate.islast
 // | BUY LONG  | Price breaks above highest high (41 bars)    |
 // |           | + Guard confirms higher high structure        |
 // |           | + Supertrend in uptrend (optional)            |
+// |           | + NY session active (09:30-16:00 ET)          |
+// |           | SL = 5%, TP = 10% (1:2 R:R)                  |
 // +-----------+-----------------------------------------------+
 // | SELL SHORT| Price breaks below lowest low (41 bars)      |
 // |           | + Guard confirms lower low structure          |
 // |           | + Supertrend in downtrend (optional)          |
+// |           | + NY session active (09:30-16:00 ET)          |
+// |           | SL = 5%, TP = 10% (1:2 R:R)                  |
 // +-----------+-----------------------------------------------+
-// | EXIT LONG | Price breaks below lowest low (reversal)     |
+// | EXIT LONG | Hit TP (10%) or SL (5%)                      |
+// |           | OR lower low breakdown (reversal)             |
 // |           | OR Supertrend flips to downtrend (optional)   |
 // +-----------+-----------------------------------------------+
-// | EXIT SHORT| Price breaks above highest high (reversal)   |
+// | EXIT SHORT| Hit TP (10%) or SL (5%)                      |
+// |           | OR higher high breakout (reversal)            |
 // |           | OR Supertrend flips to uptrend (optional)     |
 // +-----------+-----------------------------------------------+
 // --------------------------------------------------------------------------
