@@ -3,7 +3,7 @@
 // https://mozilla.org/MPL/2.0/
 // (c) moneygreen
 strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overlay=true,
-     calc_on_order_fills=true, initial_capital=100000,
+     process_orders_on_close=true, initial_capital=100000,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      currency=currency.USD, pyramiding=0)
 
