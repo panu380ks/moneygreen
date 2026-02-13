@@ -2,7 +2,7 @@
 // This Pine Script code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 // (c) moneygreen
-strategy("Higher High Lower Low Strategy", shorttitle="HH LL Strategy", overlay=true,
+strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overlay=true,
      calc_on_order_fills=true, initial_capital=100000,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      currency=currency.USD, pyramiding=0)
@@ -14,10 +14,13 @@ strategy("Higher High Lower Low Strategy", shorttitle="HH LL Strategy", overlay=
 //
 // LONG:  Price closes above the highest high of the lookback period
 //        + safety guard confirms structure (higher high above recent guard high)
+//        + Supertrend confirms uptrend (optional filter)
 // SHORT: Price closes below the lowest low of the lookback period
 //        + safety guard confirms structure (lower low below recent guard low)
+//        + Supertrend confirms downtrend (optional filter)
 //
-// Exits: Long closes on lower low breakdown, Short closes on higher high breakout.
+// Exits: Long closes on lower low breakdown or Supertrend flip to downtrend.
+//        Short closes on higher high breakout or Supertrend flip to uptrend.
 // --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
@@ -36,6 +39,15 @@ guard_len   = input.int(10, "Guard Length", minval=2, maxval=100, group=guard_gr
      tooltip="Secondary lookback to confirm the breakout is genuine -- filters false breakouts")
 guard_delay = input.int(1, "Guard Delay (bars)", minval=1, maxval=10, group=guard_group,
      tooltip="How many bars back to compare the guard level. 1 = compare to previous bar's guard")
+
+// -- Supertrend Filter --
+st_group    = "== Supertrend Filter =="
+use_st      = input.bool(true,  "Use Supertrend Filter", group=st_group,
+     tooltip="When enabled, only take longs in Supertrend uptrend and shorts in Supertrend downtrend")
+st_atr_len  = input.int(10,    "ATR Length",  minval=1, group=st_group)
+st_factor   = input.float(3.0, "Factor",      minval=0.01, step=0.01, group=st_group)
+use_st_exit = input.bool(true,  "Exit on Supertrend Flip", group=st_group,
+     tooltip="Close position when Supertrend direction reverses")
 
 // -- Mode --
 mode_group    = "== Trading Mode =="
@@ -69,6 +81,13 @@ lo = ta.lowest(low, lookback)
 hi_guard = ta.highest(high, guard_len)
 lo_guard = ta.lowest(low, guard_len)
 
+// Supertrend calculation
+[supertrend, st_direction] = ta.supertrend(st_factor, st_atr_len)
+st_uptrend   = st_direction < 0   // direction < 0 means price is above supertrend (uptrend)
+st_downtrend = st_direction > 0   // direction > 0 means price is below supertrend (downtrend)
+st_flip_up   = st_direction < 0 and st_direction[1] > 0  // just flipped to uptrend
+st_flip_down = st_direction > 0 and st_direction[1] < 0  // just flipped to downtrend
+
 // Breakout detection
 breakout_up   = price > hi[1]
 breakout_down = price < lo[1]
@@ -85,13 +104,17 @@ in_date = not use_date or (time >= start_date and time <= end_date)
 // ENTRY / EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
-long_entry  = allow_longs  and guard_long  and in_date
-short_entry = allow_shorts and guard_short and in_date
+// Supertrend trend filter (bypassed when use_st is false)
+st_long_ok  = not use_st or st_uptrend
+st_short_ok = not use_st or st_downtrend
 
-// Exit long when price breaks down (lower low) -- downtrend starts
-exit_long  = breakout_down
-// Exit short when price breaks up (higher high) -- uptrend starts
-exit_short = breakout_up
+long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date
+short_entry = allow_shorts and guard_short and st_short_ok and in_date
+
+// Exit long when price breaks down (lower low) or Supertrend flips to downtrend
+exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
+// Exit short when price breaks up (higher high) or Supertrend flips to uptrend
+exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
 
 // --------------------------------------------------------------------------
 // STRATEGY EXECUTION
@@ -132,6 +155,16 @@ plot(lo, "Lowest Low",   color=color.new(color.red, 30),   linewidth=2)
 plot(hi_guard, "Guard High", color=color.new(color.green, 70), linewidth=1, style=plot.style_stepline)
 plot(lo_guard, "Guard Low",  color=color.new(color.red, 70),   linewidth=1, style=plot.style_stepline)
 
+// Supertrend
+st_plot_up   = plot(use_st and st_direction < 0 ? supertrend : na, "ST Up Trend",
+     color=color.green, style=plot.style_linebr, linewidth=2)
+st_plot_down = plot(use_st and st_direction < 0 ? na : (use_st ? supertrend : na), "ST Down Trend",
+     color=color.red, style=plot.style_linebr, linewidth=2)
+body_mid     = plot(use_st and not barstate.isfirst ? (open + close) / 2 : na, "Body Middle",
+     display=display.none)
+fill(body_mid, st_plot_up,   title="ST Uptrend BG",   color=color.new(color.green, 90), fillgaps=false)
+fill(body_mid, st_plot_down, title="ST Downtrend BG",  color=color.new(color.red,   90), fillgaps=false)
+
 // Entry signals
 plotshape(long_entry and strategy.position_size <= 0,  "Buy Signal",
      shape.triangleup, location.belowbar, color.lime, size=size.normal)
@@ -146,7 +179,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 7, border_width=1)
+var info = table.new(position.top_right, 2, 9, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",    bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Value",        bgcolor=color.new(color.gray, 80), text_color=color.white)
@@ -163,12 +196,21 @@ if barstate.islast
     table.cell(info, 0, 4, "Guard Low", text_color=color.white)
     table.cell(info, 1, 4, str.tostring(lo_guard, "#.##"), text_color=color.red)
 
-    table.cell(info, 0, 5, "Breakout", text_color=color.white)
-    table.cell(info, 1, 5, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
+    table.cell(info, 0, 5, "Supertrend", text_color=color.white)
+    table.cell(info, 1, 5,
+         use_st ? (st_uptrend ? "UPTREND" : "DOWNTREND") : "OFF",
+         text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
+
+    table.cell(info, 0, 6, "ST Value", text_color=color.white)
+    table.cell(info, 1, 6, use_st ? str.tostring(supertrend, "#.##") : "---",
+         text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
+
+    table.cell(info, 0, 7, "Breakout", text_color=color.white)
+    table.cell(info, 1, 7, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
          text_color=breakout_up ? color.green : breakout_down ? color.red : color.gray)
 
-    table.cell(info, 0, 6, "Position", text_color=color.white)
-    table.cell(info, 1, 6,
+    table.cell(info, 0, 8, "Position", text_color=color.white)
+    table.cell(info, 1, 8,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
@@ -179,11 +221,16 @@ if barstate.islast
 // +-----------+-----------------------------------------------+
 // | BUY LONG  | Price breaks above highest high (41 bars)    |
 // |           | + Guard confirms higher high structure        |
+// |           | + Supertrend in uptrend (optional)            |
 // +-----------+-----------------------------------------------+
 // | SELL SHORT| Price breaks below lowest low (41 bars)      |
 // |           | + Guard confirms lower low structure          |
+// |           | + Supertrend in downtrend (optional)          |
 // +-----------+-----------------------------------------------+
 // | EXIT LONG | Price breaks below lowest low (reversal)     |
+// |           | OR Supertrend flips to downtrend (optional)   |
+// +-----------+-----------------------------------------------+
 // | EXIT SHORT| Price breaks above highest high (reversal)   |
+// |           | OR Supertrend flips to uptrend (optional)     |
 // +-----------+-----------------------------------------------+
 // --------------------------------------------------------------------------
