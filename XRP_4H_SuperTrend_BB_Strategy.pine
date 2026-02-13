@@ -270,7 +270,7 @@ if barstate.islast
 //
 // 1. SuperTrend (10, 3.0) is the standard baseline with ~70% directional
 //    accuracy on major crypto pairs. It balances signal speed vs noise —
-//    AT 14 is too slow for XRP's shorter trend cycles on 4H, while ATR 7
+//    ATR 14 is too slow for XRP's shorter trend cycles on 4H, while ATR 7
 //    produces excessive whipsaws.
 //
 // 2. BB (20, 2.0) is validated across 360+ years of backtested data as
