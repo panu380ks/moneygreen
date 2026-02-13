@@ -1,12 +1,12 @@
-//@version=5
+//@version=6
 // This Pine Script code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 // (c) moneygreen
-strategy("NAS100 4H | MACD + RSI + Bollinger Bands", overlay=true,
+strategy("NAS100 4H - MACD + RSI + Bollinger Bands", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=75,
      initial_capital=10000, commission_type=strategy.commission.percent,
      commission_value=0.04, slippage=3, pyramiding=0,
-     calc_on_every_tick=false, process_orders_on_close=true,
+     calc_on_every_tick=false, margin_long=0, margin_short=0,
      currency=currency.USD)
 
 // --------------------------------------------------------------------------
