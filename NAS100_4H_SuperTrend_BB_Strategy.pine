@@ -62,7 +62,7 @@ ema_len         = input.int(200,    "EMA Length",              minval=1, group=f
 use_vol         = input.bool(true,  "Use Volume Filter",      group=filt_group,
      tooltip="Only enter when current volume exceeds its moving average")
 vol_lookback    = input.int(20,     "Volume MA Length",        minval=1, group=filt_group)
-use_session     = input.bool(false, "US Session Only",         group=filt_group,
+use_session     = input.bool(true,  "US Session Only",         group=filt_group,
      tooltip="Only enter during US session (09:30-16:00 exchange time)")
 session_str     = input.session("0930-1600", "Session Window", group=filt_group)
 allow_shorts    = input.bool(true,  "Allow Short Entries",     group=filt_group,
