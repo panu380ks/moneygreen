@@ -2,11 +2,11 @@
 // This Pine Script code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 // (c) moneygreen
-strategy("NAS100 4H | SuperTrend + BOS", overlay=true,
+strategy("NAS100 4H - SuperTrend + BOS", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=75,
      initial_capital=10000, commission_type=strategy.commission.percent,
      commission_value=0.04, slippage=3, pyramiding=0,
-     calc_on_every_tick=false, process_orders_on_close=true,
+     calc_on_every_tick=false,
      currency=currency.USD)
 
 // --------------------------------------------------------------------------
@@ -267,9 +267,9 @@ plotshape(bearish_bos, "Bearish BOS", shape.labeldown, location.abovebar,
 
 // Entry signals (only fires when all conditions met)
 plotshape(long_entry and strategy.position_size == 0, "Buy Signal",
-     shape.triangleup, location.belowbar, color.new(#00FF00, 0), size=size.normal)
+     shape.triangleup, location.belowbar, color.lime, size=size.normal)
 plotshape(short_entry and strategy.position_size == 0, "Sell Signal",
-     shape.triangledown, location.abovebar, color.new(#FF0000, 0), size=size.normal)
+     shape.triangledown, location.abovebar, color.red, size=size.normal)
 
 // SuperTrend zone background
 bgcolor(st_bullish ? color.new(color.green, 96) : color.new(color.red, 96), title="ST Zone BG")
