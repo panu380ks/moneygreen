@@ -178,11 +178,77 @@ body_mid     = plot(use_st and not barstate.isfirst ? (open + close) / 2 : na, "
 fill(body_mid, st_plot_up,   title="ST Uptrend BG",   color=color.new(color.green, 90), fillgaps=false)
 fill(body_mid, st_plot_down, title="ST Downtrend BG",  color=color.new(color.red,   90), fillgaps=false)
 
-// Entry signals (gold-colored for long entries)
-plotshape(long_entry and strategy.position_size <= 0,  "Buy Signal",
-     shape.triangleup, location.belowbar, #FFD700, size=size.normal)
-plotshape(short_entry and strategy.position_size >= 0, "Sell Signal",
+// --------------------------------------------------------------------------
+// BUY / SELL SIGNAL VISUALS
+// --------------------------------------------------------------------------
+
+// Conditions (fire only on fresh entries, not while already in a position)
+buy_signal  = long_entry  and strategy.position_size <= 0
+sell_signal = short_entry and strategy.position_size >= 0
+
+// -- Triangle markers --
+plotshape(buy_signal,  "Buy Signal",
+     shape.triangleup,   location.belowbar, #FFD700, size=size.normal)
+plotshape(sell_signal, "Sell Signal",
      shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+// -- On-chart labels showing Entry, SL, TP --
+if buy_signal
+    sl_lbl = close * (1 - sl_pct / 100)
+    tp_lbl = close * (1 + tp_pct / 100)
+    label.new(bar_index, low,
+         "BUY @ " + str.tostring(close, "#.##") +
+         "\nSL: " + str.tostring(sl_lbl, "#.##") +
+         "\nTP: " + str.tostring(tp_lbl, "#.##"),
+         style=label.style_label_up, color=#FFD700,
+         textcolor=color.black, size=size.small)
+
+if sell_signal
+    sl_lbl = close * (1 + sl_pct / 100)
+    tp_lbl = close * (1 - tp_pct / 100)
+    label.new(bar_index, high,
+         "SELL @ " + str.tostring(close, "#.##") +
+         "\nSL: " + str.tostring(sl_lbl, "#.##") +
+         "\nTP: " + str.tostring(tp_lbl, "#.##"),
+         style=label.style_label_down, color=color.red,
+         textcolor=color.white, size=size.small)
+
+// -- SL / TP horizontal lines (visible until next signal) --
+var line sl_line = na
+var line tp_line = na
+
+if buy_signal
+    // Delete previous lines
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp_line)
+        line.delete(tp_line)
+    sl_line := line.new(bar_index, close * (1 - sl_pct / 100), bar_index + 20, close * (1 - sl_pct / 100),
+         color=color.red, style=line.style_dashed, width=1, extend=extend.none)
+    tp_line := line.new(bar_index, close * (1 + tp_pct / 100), bar_index + 20, close * (1 + tp_pct / 100),
+         color=color.green, style=line.style_dashed, width=1, extend=extend.none)
+
+if sell_signal
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp_line)
+        line.delete(tp_line)
+    sl_line := line.new(bar_index, close * (1 + sl_pct / 100), bar_index + 20, close * (1 + sl_pct / 100),
+         color=color.red, style=line.style_dashed, width=1, extend=extend.none)
+    tp_line := line.new(bar_index, close * (1 - tp_pct / 100), bar_index + 20, close * (1 - tp_pct / 100),
+         color=color.green, style=line.style_dashed, width=1, extend=extend.none)
+
+// -- Bar coloring on signal bars --
+barcolor(buy_signal ? #FFD700 : sell_signal ? color.red : na, title="Signal Bar Color")
+
+// -- Exit signal markers --
+exit_long_signal  = strategy.position_size > 0 and exit_long
+exit_short_signal = strategy.position_size < 0 and exit_short
+
+plotshape(exit_long_signal,  "Exit Long",
+     shape.xcross, location.abovebar, color.orange, size=size.small)
+plotshape(exit_short_signal, "Exit Short",
+     shape.xcross, location.belowbar, color.orange, size=size.small)
 
 // Session background
 bgcolor(use_session and in_session ? color.new(color.orange, 95) : na, title="Gold Session BG")
@@ -242,6 +308,15 @@ if barstate.islast
     table.cell(info, 1, 11,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
+
+// --------------------------------------------------------------------------
+// ALERTS
+// --------------------------------------------------------------------------
+
+alertcondition(buy_signal,  "Gold BUY Signal",  "GOLD BUY: HH breakout confirmed. Entry={{close}}")
+alertcondition(sell_signal, "Gold SELL Signal",  "GOLD SELL: LL breakout confirmed. Entry={{close}}")
+alertcondition(exit_long_signal,  "Gold Exit Long",  "GOLD EXIT LONG: Trend reversal detected")
+alertcondition(exit_short_signal, "Gold Exit Short", "GOLD EXIT SHORT: Trend reversal detected")
 
 // --------------------------------------------------------------------------
 // STRATEGY LOGIC SUMMARY (GOLD)
