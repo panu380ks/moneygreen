@@ -1,0 +1,350 @@
+//@version=6
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// (c) moneygreen
+strategy("HH LL + Supertrend Strategy [Silver/XAGUSD]", shorttitle="HH LL + ST [Silver]", overlay=true,
+     process_orders_on_close=true, initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     currency=currency.USD, pyramiding=0)
+
+// --------------------------------------------------------------------------
+// STRATEGY OVERVIEW
+// --------------------------------------------------------------------------
+// Silver-optimized breakout strategy based on Higher Highs and Lower Lows.
+// Tuned for XAGUSD with wider stops and faster signals vs the gold version.
+//
+// Silver characteristics vs gold:
+//   - ~2x more volatile in % terms (daily range often 2-3%)
+//   - Faster trend cycles, sharper reversals
+//   - Wider spreads -- needs more room on SL
+//   - Amplified moves (silver beta to gold ~1.5-2x)
+//
+// Apply to: XAGUSD / Silver Futures (SI) on 15m, 1H, or 4H timeframes.
+//
+// LONG:  Price closes above the highest high of the lookback period
+//        + safety guard confirms structure
+//        + Supertrend confirms uptrend (optional)
+// SHORT: Price closes below the lowest low of the lookback period
+//        + safety guard confirms structure
+//        + Supertrend confirms downtrend (optional)
+//
+// R:R:   1:4 (default -- tighter than gold due to silver's fast reversals)
+// Session: London + New York (08:00-17:00 ET)
+// Exits: SL/TP, lower low breakdown, or Supertrend flip.
+// --------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------
+// INPUTS
+// --------------------------------------------------------------------------
+
+// -- Breakout Detection --
+bo_group    = "== Breakout Detection =="
+price       = input.source(close, "Price Source", group=bo_group)
+lookback    = input.int(25, "Lookback Period", minval=5, maxval=200, group=bo_group,
+     tooltip="Shorter than gold (25 vs 30). Silver trends are faster and shorter-lived")
+
+// -- Safety Guard (false breakout filter) --
+guard_group = "== Safety Guard =="
+guard_len   = input.int(6, "Guard Length", minval=2, maxval=100, group=guard_group,
+     tooltip="Shorter guard (6 vs 8). Silver confirms structure faster but needs quick validation")
+guard_delay = input.int(1, "Guard Delay (bars)", minval=1, maxval=10, group=guard_group,
+     tooltip="How many bars back to compare the guard level. 1 = compare to previous bar's guard")
+
+// -- Supertrend Filter --
+st_group    = "== Supertrend Filter =="
+use_st      = input.bool(true,  "Use Supertrend Filter", group=st_group,
+     tooltip="When enabled, only take longs in Supertrend uptrend and shorts in Supertrend downtrend")
+st_atr_len  = input.int(12,    "ATR Length",  minval=1, group=st_group,
+     tooltip="12-period ATR -- slightly faster than gold to match silver's quicker cycles")
+st_factor   = input.float(2.0, "Factor",      minval=0.01, step=0.01, group=st_group,
+     tooltip="2.0 factor -- tighter than gold (2.5) to catch silver's rapid trend shifts")
+use_st_exit = input.bool(true,  "Exit on Supertrend Flip", group=st_group,
+     tooltip="Close position when Supertrend direction reverses")
+
+// -- Mode --
+mode_group    = "== Trading Mode =="
+allow_longs   = input.bool(true, "Allow Long Entries", group=mode_group)
+allow_shorts  = input.bool(true, "Allow Short Entries", group=mode_group)
+
+// -- Risk Management (1:4 R:R for silver) --
+risk_group  = "== Risk Management =="
+sl_pct      = input.float(1.2,   "Stop Loss %",        minval=0.1, step=0.1, group=risk_group,
+     tooltip="1.2% SL on silver (~$0.36 at $30). Wider than gold to survive silver's intraday noise")
+rr_ratio    = input.float(4.0,   "Reward:Risk Ratio",  minval=1.0, step=1.0, group=risk_group,
+     tooltip="TP = SL x ratio. 1:4 R:R -- silver trends exhaust faster than gold")
+tp_pct      = sl_pct * rr_ratio  // TP auto-calculated: 1.2% SL x 4 = 4.8% TP (1:4 R:R)
+
+// -- Session Filter (London + NY = peak silver volume) --
+sess_group  = "== Session Filter =="
+use_session = input.bool(true,   "Session Filter",     group=sess_group,
+     tooltip="Only enter trades during the selected session window")
+silver_session = input.session("0800-1700", "Silver Session (ET)", group=sess_group,
+     tooltip="London open through NY close (08:00-17:00 ET). Peak silver liquidity")
+
+// -- Date Filter --
+date_group  = "== Date Filter =="
+use_date    = input.bool(false,  "Use Date Filter",    group=date_group)
+start_date  = input.time(timestamp("2024-01-01"), "Start Date", group=date_group)
+end_date    = input.time(timestamp("2026-12-31"), "End Date",   group=date_group)
+
+// --------------------------------------------------------------------------
+// CALCULATIONS
+// --------------------------------------------------------------------------
+
+// Highest high and lowest low over the lookback period
+hi = ta.highest(high, lookback)
+lo = ta.lowest(low, lookback)
+
+// Safety guard -- secondary high/low to confirm breakout is real
+hi_guard = ta.highest(high, guard_len)
+lo_guard = ta.lowest(low, guard_len)
+
+// Supertrend calculation
+[supertrend, st_direction] = ta.supertrend(st_factor, st_atr_len)
+st_uptrend   = st_direction < 0
+st_downtrend = st_direction > 0
+st_flip_up   = st_direction < 0 and st_direction[1] > 0
+st_flip_down = st_direction > 0 and st_direction[1] < 0
+
+// Breakout detection
+breakout_up   = price > hi[1]
+breakout_down = price < lo[1]
+
+// Safety confirmation
+guard_long  = breakout_up  and hi[1] > hi_guard[guard_delay]
+guard_short = breakout_down and lo[1] < lo_guard[guard_delay]
+
+// Date filter
+in_date = not use_date or (time >= start_date and time <= end_date)
+
+// Session filter
+in_session = not use_session or not na(time(timeframe.period, silver_session, "America/New_York"))
+
+// --------------------------------------------------------------------------
+// ENTRY / EXIT CONDITIONS
+// --------------------------------------------------------------------------
+
+// Supertrend trend filter (bypassed when use_st is false)
+st_long_ok  = not use_st or st_uptrend
+st_short_ok = not use_st or st_downtrend
+
+long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_session
+short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_session
+
+// Exit long when price breaks down (lower low) or Supertrend flips to downtrend
+exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
+// Exit short when price breaks up (higher high) or Supertrend flips to uptrend
+exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
+
+// --------------------------------------------------------------------------
+// STRATEGY EXECUTION
+// --------------------------------------------------------------------------
+
+// Long entries -- SL and TP always active
+if long_entry
+    strategy.entry("Long", strategy.long)
+    sl_price_l = close * (1 - sl_pct / 100)
+    tp_price_l = close * (1 + tp_pct / 100)
+    strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l)
+
+// Short entries -- SL and TP always active
+if short_entry
+    strategy.entry("Short", strategy.short)
+    sl_price_s = close * (1 + sl_pct / 100)
+    tp_price_s = close * (1 - tp_pct / 100)
+    strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s)
+
+// Signal-based exits -- trend reversal
+if strategy.position_size > 0 and exit_long
+    strategy.close("Long", comment="Lower Low Breakdown")
+
+if strategy.position_size < 0 and exit_short
+    strategy.close("Short", comment="Higher High Breakout")
+
+// --------------------------------------------------------------------------
+// PLOTS
+// --------------------------------------------------------------------------
+
+// Highest high / lowest low channels
+plot(hi, "Highest High", color=color.new(color.green, 30), linewidth=2)
+plot(lo, "Lowest Low",   color=color.new(color.red, 30),   linewidth=2)
+
+// Guard levels
+plot(hi_guard, "Guard High", color=color.new(color.green, 70), linewidth=1, style=plot.style_stepline)
+plot(lo_guard, "Guard Low",  color=color.new(color.red, 70),   linewidth=1, style=plot.style_stepline)
+
+// Supertrend
+st_plot_up   = plot(use_st and st_direction < 0 ? supertrend : na, "ST Up Trend",
+     color=color.green, style=plot.style_linebr, linewidth=2)
+st_plot_down = plot(use_st and st_direction < 0 ? na : (use_st ? supertrend : na), "ST Down Trend",
+     color=color.red, style=plot.style_linebr, linewidth=2)
+body_mid     = plot(use_st and not barstate.isfirst ? (open + close) / 2 : na, "Body Middle",
+     display=display.none)
+fill(body_mid, st_plot_up,   title="ST Uptrend BG",   color=color.new(color.green, 90), fillgaps=false)
+fill(body_mid, st_plot_down, title="ST Downtrend BG",  color=color.new(color.red,   90), fillgaps=false)
+
+// --------------------------------------------------------------------------
+// BUY / SELL SIGNAL VISUALS
+// --------------------------------------------------------------------------
+
+// Conditions (fire only on fresh entries, not while already in a position)
+buy_signal  = long_entry  and strategy.position_size <= 0
+sell_signal = short_entry and strategy.position_size >= 0
+
+// -- Triangle markers (silver-colored for buy) --
+plotshape(buy_signal,  "Buy Signal",
+     shape.triangleup,   location.belowbar, #C0C0C0, size=size.normal)
+plotshape(sell_signal, "Sell Signal",
+     shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+// -- On-chart labels showing Entry, SL, TP --
+if buy_signal
+    sl_lbl = close * (1 - sl_pct / 100)
+    tp_lbl = close * (1 + tp_pct / 100)
+    label.new(bar_index, low,
+         "BUY @ " + str.tostring(close, "#.###") +
+         "\nSL: " + str.tostring(sl_lbl, "#.###") +
+         "\nTP: " + str.tostring(tp_lbl, "#.###"),
+         style=label.style_label_up, color=#C0C0C0,
+         textcolor=color.black, size=size.small)
+
+if sell_signal
+    sl_lbl = close * (1 + sl_pct / 100)
+    tp_lbl = close * (1 - tp_pct / 100)
+    label.new(bar_index, high,
+         "SELL @ " + str.tostring(close, "#.###") +
+         "\nSL: " + str.tostring(sl_lbl, "#.###") +
+         "\nTP: " + str.tostring(tp_lbl, "#.###"),
+         style=label.style_label_down, color=color.red,
+         textcolor=color.white, size=size.small)
+
+// -- SL / TP horizontal lines (visible until next signal) --
+var line sl_line = na
+var line tp_line = na
+
+if buy_signal
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp_line)
+        line.delete(tp_line)
+    sl_line := line.new(bar_index, close * (1 - sl_pct / 100), bar_index + 20, close * (1 - sl_pct / 100),
+         color=color.red, style=line.style_dashed, width=1, extend=extend.none)
+    tp_line := line.new(bar_index, close * (1 + tp_pct / 100), bar_index + 20, close * (1 + tp_pct / 100),
+         color=color.green, style=line.style_dashed, width=1, extend=extend.none)
+
+if sell_signal
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp_line)
+        line.delete(tp_line)
+    sl_line := line.new(bar_index, close * (1 + sl_pct / 100), bar_index + 20, close * (1 + sl_pct / 100),
+         color=color.red, style=line.style_dashed, width=1, extend=extend.none)
+    tp_line := line.new(bar_index, close * (1 - tp_pct / 100), bar_index + 20, close * (1 - tp_pct / 100),
+         color=color.green, style=line.style_dashed, width=1, extend=extend.none)
+
+// -- Bar coloring on signal bars --
+barcolor(buy_signal ? #C0C0C0 : sell_signal ? color.red : na, title="Signal Bar Color")
+
+// -- Exit signal markers --
+exit_long_signal  = strategy.position_size > 0 and exit_long
+exit_short_signal = strategy.position_size < 0 and exit_short
+
+plotshape(exit_long_signal,  "Exit Long",
+     shape.xcross, location.abovebar, color.orange, size=size.small)
+plotshape(exit_short_signal, "Exit Short",
+     shape.xcross, location.belowbar, color.orange, size=size.small)
+
+// Session background
+bgcolor(use_session and in_session ? color.new(#C0C0C0, 95) : na, title="Silver Session BG")
+
+// Background color for position
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
+     strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position BG")
+
+// --------------------------------------------------------------------------
+// INFO TABLE
+// --------------------------------------------------------------------------
+
+var info = table.new(position.top_right, 2, 12, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Silver Strategy", bgcolor=color.new(#C0C0C0, 40), text_color=color.black)
+    table.cell(info, 1, 0, "Value",           bgcolor=color.new(#C0C0C0, 40), text_color=color.black)
+
+    table.cell(info, 0, 1, "Highest (" + str.tostring(lookback) + ")", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(hi, "#.###"), text_color=color.green)
+
+    table.cell(info, 0, 2, "Lowest (" + str.tostring(lookback) + ")", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(lo, "#.###"), text_color=color.red)
+
+    table.cell(info, 0, 3, "Guard High", text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(hi_guard, "#.###"), text_color=color.green)
+
+    table.cell(info, 0, 4, "Guard Low", text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(lo_guard, "#.###"), text_color=color.red)
+
+    table.cell(info, 0, 5, "Supertrend", text_color=color.white)
+    table.cell(info, 1, 5,
+         use_st ? (st_uptrend ? "UPTREND" : "DOWNTREND") : "OFF",
+         text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
+
+    table.cell(info, 0, 6, "ST Value", text_color=color.white)
+    table.cell(info, 1, 6, use_st ? str.tostring(supertrend, "#.###") : "---",
+         text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
+
+    table.cell(info, 0, 7, "R:R Ratio", text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(sl_pct, "#.#") + " : " + str.tostring(tp_pct, "#.#"),
+         text_color=color.yellow)
+
+    table.cell(info, 0, 8, "SL / TP ($)", text_color=color.white)
+    table.cell(info, 1, 8,
+         str.tostring(close * sl_pct / 100, "#.###") + " / " + str.tostring(close * tp_pct / 100, "#.###"),
+         text_color=color.yellow)
+
+    table.cell(info, 0, 9, "Session", text_color=color.white)
+    table.cell(info, 1, 9, in_session ? "ACTIVE" : "CLOSED",
+         text_color=in_session ? color.lime : color.gray)
+
+    table.cell(info, 0, 10, "Breakout", text_color=color.white)
+    table.cell(info, 1, 10, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
+         text_color=breakout_up ? color.green : breakout_down ? color.red : color.gray)
+
+    table.cell(info, 0, 11, "Position", text_color=color.white)
+    table.cell(info, 1, 11,
+         strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
+
+// --------------------------------------------------------------------------
+// ALERTS
+// --------------------------------------------------------------------------
+
+alertcondition(buy_signal,  "Silver BUY Signal",  "SILVER BUY: HH breakout confirmed. Entry={{close}}")
+alertcondition(sell_signal, "Silver SELL Signal",  "SILVER SELL: LL breakout confirmed. Entry={{close}}")
+alertcondition(exit_long_signal,  "Silver Exit Long",  "SILVER EXIT LONG: Trend reversal detected")
+alertcondition(exit_short_signal, "Silver Exit Short", "SILVER EXIT SHORT: Trend reversal detected")
+
+// --------------------------------------------------------------------------
+// STRATEGY LOGIC SUMMARY (SILVER)
+// --------------------------------------------------------------------------
+//
+// +-----------+-----------------------------------------------+
+// | BUY LONG  | Price breaks above highest high (25 bars)    |
+// |           | + Guard confirms higher high structure        |
+// |           | + Supertrend in uptrend (optional)            |
+// |           | + Silver session active (08:00-17:00 ET)      |
+// |           | SL = 1.2%, TP = 4.8% (1:4 R:R default)       |
+// +-----------+-----------------------------------------------+
+// | SELL SHORT| Price breaks below lowest low (25 bars)      |
+// |           | + Guard confirms lower low structure          |
+// |           | + Supertrend in downtrend (optional)          |
+// |           | + Silver session active (08:00-17:00 ET)      |
+// |           | SL = 1.2%, TP = 4.8% (1:4 R:R default)       |
+// +-----------+-----------------------------------------------+
+// | EXIT LONG | Hit TP (4.8%) or SL (1.2%)                   |
+// |           | OR lower low breakdown (reversal)             |
+// |           | OR Supertrend flips to downtrend (optional)   |
+// +-----------+-----------------------------------------------+
+// | EXIT SHORT| Hit TP (4.8%) or SL (1.2%)                   |
+// |           | OR higher high breakout (reversal)            |
+// |           | OR Supertrend flips to uptrend (optional)     |
+// +-----------+-----------------------------------------------+
+// --------------------------------------------------------------------------
