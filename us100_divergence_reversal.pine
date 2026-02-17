@@ -1,0 +1,728 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=5
+strategy("US100 Divergence Reversal | BB Extreme Sniper | Jan 2026",
+     overlay        = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.02,
+     slippage       = 3,
+     pyramiding     = 0,
+     calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HOW DIVERGENCE REVERSAL WORKS ON US100
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NAS100/US100 is a momentum index. When it pushes to a Bollinger Band
+// extreme while RSI diverges (price makes new low but RSI doesn't),
+// institutional money is already rotating. The reversal is coming.
+//
+// This strategy ONLY trades divergence setups — the highest R:R pattern.
+// It uses 3 divergence detection methods at once:
+//
+//   1. CLASSIC RSI DIVERGENCE  — price vs RSI swing comparison
+//   2. HIDDEN DIVERGENCE       — continuation divergence in trends
+//   3. MULTI-TIMEFRAME DIV     — HTF divergence confirms LTF entry
+//
+// Each must occur at a Bollinger Band extreme with momentum shift.
+// SL goes at the structure pivot. TP scales out to 10R.
+//
+// US100 context: NAS trends hard and reverses hard. Divergences at
+// BB extremes catch the exact inflection points. The tight structure
+// stop + massive NAS moves = consistent 10R opportunities.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BACKTEST WINDOW — January 2026
+// ═══════════════════════════════════════════════════════════════════════════
+
+i_btStart  = input.time(timestamp("2026-01-01 00:00 +0000"), "Backtest Start", group = "Backtest Window")
+i_btEnd    = input.time(timestamp("2026-01-31 23:59 +0000"), "Backtest End",   group = "Backtest Window")
+inBacktest = time >= i_btStart and time <= i_btEnd
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS — TUNED FOR US100
+// ═══════════════════════════════════════════════════════════════════════════
+
+// US100 is a high-beta momentum index. These defaults are optimized for
+// its typical volatility profile on 15m-1H timeframes.
+
+// ── R:R Target ──
+i_rrRatio    = input.float(10.0, "Risk:Reward Ratio (R)",         step = 0.5, minval = 2.0, group = "R:R Target")
+i_minRisk    = input.float(0.3,  "Min Risk (ATR) — skip noise",  step = 0.1, group = "R:R Target")
+i_maxRisk    = input.float(2.5,  "Max Risk (ATR) — skip wide",   step = 0.1, group = "R:R Target")
+
+// ── Structure ──
+i_swingLen   = input.int(5,      "Swing Pivot Length",            group = "Structure")
+i_lookback   = input.int(20,     "Structure Lookback Bars",       group = "Structure")
+
+// ── RSI ──
+i_rsiLen     = input.int(14,     "RSI Length",                    group = "RSI Divergence")
+i_rsiOB      = input.int(70,     "RSI Overbought",               group = "RSI Divergence")
+i_rsiOS      = input.int(30,     "RSI Oversold",                  group = "RSI Divergence")
+i_divWindow  = input.int(5,      "Divergence Pivot Lookback",     group = "RSI Divergence")
+i_divMaxBars = input.int(50,     "Max Bars Between Pivots",       group = "RSI Divergence")
+
+// ── Bollinger Bands ──
+i_bbLen      = input.int(20,     "BB Length",                     group = "Bollinger Bands")
+i_bbMult     = input.float(2.0,  "BB StdDev",     step = 0.1,    group = "Bollinger Bands")
+i_bbTouch    = input.float(0.005,"BB Proximity (%)", step = 0.001, group = "Bollinger Bands",
+     tooltip = "How close price must be to BB band to count as 'at extreme'. 0.005 = within 0.5%.")
+
+// ── MACD Momentum Confirmation ──
+i_macdFast   = input.int(12,     "MACD Fast",                    group = "MACD")
+i_macdSlow   = input.int(26,     "MACD Slow",                    group = "MACD")
+i_macdSig    = input.int(9,      "MACD Signal",                  group = "MACD")
+
+// ── Volume ──
+i_volLen     = input.int(20,     "Volume MA Length",              group = "Volume")
+i_volMin     = input.float(1.0,  "Min Volume (x avg)",  step=0.1,group = "Volume",
+     tooltip = "Divergence entries require at least this volume. Default 1.0 (no filter). Raise to 1.3 for stricter.")
+
+// ── Trend EMAs ──
+i_emaFast    = input.int(9,      "EMA Fast",                     group = "Trend")
+i_emaSlow    = input.int(21,     "EMA Slow",                     group = "Trend")
+i_ema200     = input.int(200,    "EMA 200",                      group = "Trend")
+
+// ── HTF Divergence ──
+i_htfTF      = input.timeframe("60",  "HTF Timeframe",           group = "HTF Divergence")
+i_htfRSI     = input.int(14,    "HTF RSI Length",                group = "HTF Divergence")
+i_useHTFDiv  = input.bool(true,  "Require HTF Divergence Align", group = "HTF Divergence")
+
+// ── Session ──
+i_useSess    = input.bool(true,  "Enable Session Filter",        group = "Session")
+i_sess       = input.session("1300-2100", "US100 Session (UTC)", group = "Session",
+     tooltip = "US market hours: 13:30-20:00 UTC. Wider window for pre/post moves.")
+
+// ── Scale Out ──
+i_tp1R       = input.float(3.0,  "TP1 at R",       step = 0.5,  group = "Scaling Out")
+i_tp1Pct     = input.float(30,   "TP1 Close %",    step = 5,    group = "Scaling Out")
+i_tp2R       = input.float(5.0,  "TP2 at R",       step = 0.5,  group = "Scaling Out")
+i_tp2Pct     = input.float(20,   "TP2 Close %",    step = 5,    group = "Scaling Out")
+i_tp3R       = input.float(7.0,  "TP3 at R",       step = 0.5,  group = "Scaling Out")
+i_tp3Pct     = input.float(15,   "TP3 Close %",    step = 5,    group = "Scaling Out")
+
+// ── Cooldown ──
+i_cooldown   = input.int(5,      "Cooldown Bars After Loss",     group = "Cooldown")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+emaFast  = ta.ema(close, i_emaFast)
+emaSlow  = ta.ema(close, i_emaSlow)
+ema200   = ta.ema(close, i_ema200)
+atr      = ta.atr(14)
+rsi      = ta.rsi(close, i_rsiLen)
+
+[macdLine, signalLine, hist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+
+volMA    = ta.sma(volume, i_volLen)
+volOK    = volume >= volMA * i_volMin
+
+inSession = not i_useSess or not na(time(timeframe.period, i_sess))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOLLINGER BANDS
+// ═══════════════════════════════════════════════════════════════════════════
+
+bbBasis = ta.sma(close, i_bbLen)
+bbDev   = ta.stdev(close, i_bbLen) * i_bbMult
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+// Price at BB extreme
+atBBLower = close <= bbLower * (1.0 + i_bbTouch)
+atBBUpper = close >= bbUpper * (1.0 - i_bbTouch)
+
+// How deep into BB? (for scoring)
+bbPctB = (close - bbLower) / (bbUpper - bbLower)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SWING STRUCTURE — TIGHT STOP PLACEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+pivotLow  = ta.pivotlow(low, i_swingLen, i_swingLen)
+pivotHigh = ta.pivothigh(high, i_swingLen, i_swingLen)
+
+var float lastPivotLow  = na
+var float lastPivotHigh = na
+
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+
+recentLow  = ta.lowest(low, i_lookback)
+recentHigh = ta.highest(high, i_lookback)
+
+// Structure SL: tighter of pivot vs lookback
+slBuffer        = atr * 0.1
+structSL_long   = not na(lastPivotLow)  and lastPivotLow  > recentLow  ? lastPivotLow  : recentLow
+structSL_short  = not na(lastPivotHigh) and lastPivotHigh < recentHigh ? lastPivotHigh : recentHigh
+
+longSL    = structSL_long  - slBuffer
+shortSL   = structSL_short + slBuffer
+longRisk  = close - longSL
+shortRisk = shortSL - close
+
+longRiskOK  = longRisk  > atr * i_minRisk and longRisk  < atr * i_maxRisk
+shortRiskOK = shortRisk > atr * i_minRisk and shortRisk < atr * i_maxRisk
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIVERGENCE ENGINE — 3 METHODS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── RSI Pivot Detection ──
+rsiPivotLow  = ta.pivotlow(rsi, i_divWindow, i_divWindow)
+rsiPivotHigh = ta.pivothigh(rsi, i_divWindow, i_divWindow)
+
+// Track last 2 RSI pivots and their bar indices
+var float rsiPL1 = na    // most recent RSI pivot low
+var float rsiPL2 = na    // previous RSI pivot low
+var int   rsiPLbar1 = 0
+var int   rsiPLbar2 = 0
+
+var float rsiPH1 = na    // most recent RSI pivot high
+var float rsiPH2 = na    // previous RSI pivot high
+var int   rsiPHbar1 = 0
+var int   rsiPHbar2 = 0
+
+// Track price at RSI pivot points
+var float pxAtRsiPL1 = na
+var float pxAtRsiPL2 = na
+var float pxAtRsiPH1 = na
+var float pxAtRsiPH2 = na
+
+if not na(rsiPivotLow)
+    rsiPL2     := rsiPL1
+    rsiPLbar2  := rsiPLbar1
+    pxAtRsiPL2 := pxAtRsiPL1
+    rsiPL1     := rsiPivotLow
+    rsiPLbar1  := bar_index
+    pxAtRsiPL1 := low[i_divWindow]
+
+if not na(rsiPivotHigh)
+    rsiPH2     := rsiPH1
+    rsiPHbar2  := rsiPHbar1
+    pxAtRsiPH2 := pxAtRsiPH1
+    rsiPH1     := rsiPivotHigh
+    rsiPHbar1  := bar_index
+    pxAtRsiPH1 := high[i_divWindow]
+
+// ─────────────────────────────────────────────────────────────────────────
+// METHOD 1: CLASSIC (REGULAR) DIVERGENCE
+//
+// BULL: Price makes LOWER LOW but RSI makes HIGHER LOW
+//       → Selling pressure exhausted, reversal incoming
+// BEAR: Price makes HIGHER HIGH but RSI makes LOWER HIGH
+//       → Buying pressure exhausted, reversal incoming
+// ─────────────────────────────────────────────────────────────────────────
+
+classicBullDiv = not na(rsiPL2) and
+     (bar_index - rsiPLbar2) < i_divMaxBars and
+     pxAtRsiPL1 < pxAtRsiPL2 and
+     rsiPL1 > rsiPL2
+
+classicBearDiv = not na(rsiPH2) and
+     (bar_index - rsiPHbar2) < i_divMaxBars and
+     pxAtRsiPH1 > pxAtRsiPH2 and
+     rsiPH1 < rsiPH2
+
+// ─────────────────────────────────────────────────────────────────────────
+// METHOD 2: HIDDEN DIVERGENCE (trend continuation)
+//
+// BULL: Price makes HIGHER LOW but RSI makes LOWER LOW
+//       → Pullback in uptrend, about to resume
+// BEAR: Price makes LOWER HIGH but RSI makes HIGHER HIGH
+//       → Pullback in downtrend, about to resume
+// ─────────────────────────────────────────────────────────────────────────
+
+hiddenBullDiv = not na(rsiPL2) and
+     (bar_index - rsiPLbar2) < i_divMaxBars and
+     pxAtRsiPL1 > pxAtRsiPL2 and
+     rsiPL1 < rsiPL2 and
+     close > ema200  // must be in uptrend
+
+hiddenBearDiv = not na(rsiPH2) and
+     (bar_index - rsiPHbar2) < i_divMaxBars and
+     pxAtRsiPH1 < pxAtRsiPH2 and
+     rsiPH1 > rsiPH2 and
+     close < ema200  // must be in downtrend
+
+// ─────────────────────────────────────────────────────────────────────────
+// METHOD 3: QUICK DIVERGENCE (8-bar rolling comparison)
+//
+// Simpler/faster detection — compares recent windows directly.
+// Good for catching divergences between confirmed pivots.
+// ─────────────────────────────────────────────────────────────────────────
+
+qPriceLow1  = ta.lowest(low, 8)
+qPriceLow2  = ta.lowest(low, 8)[8]
+qRsiLow1    = ta.lowest(rsi, 8)
+qRsiLow2    = ta.lowest(rsi, 8)[8]
+quickBullDiv = qPriceLow1 < qPriceLow2 and qRsiLow1 > qRsiLow2 and rsi < i_rsiOS + 10
+
+qPriceHi1   = ta.highest(high, 8)
+qPriceHi2   = ta.highest(high, 8)[8]
+qRsiHi1     = ta.highest(rsi, 8)
+qRsiHi2     = ta.highest(rsi, 8)[8]
+quickBearDiv = qPriceHi1 > qPriceHi2 and qRsiHi1 < qRsiHi2 and rsi > i_rsiOB - 10
+
+// ── Combined divergence ──
+anyBullDiv = classicBullDiv or hiddenBullDiv or quickBullDiv
+anyBearDiv = classicBearDiv or hiddenBearDiv or quickBearDiv
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HTF DIVERGENCE — MULTI-TIMEFRAME CONFIRMATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+htfRSI       = request.security(syminfo.tickerid, i_htfTF, ta.rsi(close, i_htfRSI), lookahead = barmerge.lookahead_off)
+htfClose     = request.security(syminfo.tickerid, i_htfTF, close, lookahead = barmerge.lookahead_off)
+htfLow       = request.security(syminfo.tickerid, i_htfTF, low, lookahead = barmerge.lookahead_off)
+htfHigh      = request.security(syminfo.tickerid, i_htfTF, high, lookahead = barmerge.lookahead_off)
+
+// HTF quick divergence
+htfPxLo1  = request.security(syminfo.tickerid, i_htfTF, ta.lowest(low, 5), lookahead = barmerge.lookahead_off)
+htfPxLo2  = request.security(syminfo.tickerid, i_htfTF, ta.lowest(low, 5)[5], lookahead = barmerge.lookahead_off)
+htfRsiLo1 = request.security(syminfo.tickerid, i_htfTF, ta.lowest(ta.rsi(close, i_htfRSI), 5), lookahead = barmerge.lookahead_off)
+htfRsiLo2 = request.security(syminfo.tickerid, i_htfTF, ta.lowest(ta.rsi(close, i_htfRSI), 5)[5], lookahead = barmerge.lookahead_off)
+
+htfPxHi1  = request.security(syminfo.tickerid, i_htfTF, ta.highest(high, 5), lookahead = barmerge.lookahead_off)
+htfPxHi2  = request.security(syminfo.tickerid, i_htfTF, ta.highest(high, 5)[5], lookahead = barmerge.lookahead_off)
+htfRsiHi1 = request.security(syminfo.tickerid, i_htfTF, ta.highest(ta.rsi(close, i_htfRSI), 5), lookahead = barmerge.lookahead_off)
+htfRsiHi2 = request.security(syminfo.tickerid, i_htfTF, ta.highest(ta.rsi(close, i_htfRSI), 5)[5], lookahead = barmerge.lookahead_off)
+
+htfBullDiv = htfPxLo1 < htfPxLo2 and htfRsiLo1 > htfRsiLo2
+htfBearDiv = htfPxHi1 > htfPxHi2 and htfRsiHi1 < htfRsiHi2
+
+// Also count HTF as aligned if RSI is in OS/OB territory and turning
+htfBullAlign = htfBullDiv or htfRSI < 35 or (htfRSI > htfRSI[1] and htfRSI < 45)
+htfBearAlign = htfBearDiv or htfRSI > 65 or (htfRSI < htfRSI[1] and htfRSI > 55)
+
+htfOK_bull = not i_useHTFDiv or htfBullAlign
+htfOK_bear = not i_useHTFDiv or htfBearAlign
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MOMENTUM CONFIRMATION — THE TIMING TRIGGER
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Divergence tells us a reversal is FORMING.
+// Momentum tells us it's STARTING. We need both.
+
+// MACD histogram turning (momentum shifting)
+macdTurningBull = hist > hist[1] and hist[1] <= hist[2]  // histogram bottomed, now rising
+macdTurningBear = hist < hist[1] and hist[1] >= hist[2]  // histogram topped, now falling
+
+// MACD line cross
+macdCrossBull = ta.crossover(macdLine, signalLine)
+macdCrossBear = ta.crossunder(macdLine, signalLine)
+
+// RSI turning from extreme
+rsiTurningBull = rsi > rsi[1] and rsi[1] <= rsi[2] and rsi < i_rsiOS + 20
+rsiTurningBear = rsi < rsi[1] and rsi[1] >= rsi[2] and rsi > i_rsiOB - 20
+
+// Combined momentum confirmation
+momBull = (macdTurningBull or macdCrossBull) and rsi > rsi[1]
+momBear = (macdTurningBear or macdCrossBear) and rsi < rsi[1]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CANDLE CONFIRMATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+bodySize    = math.abs(close - open)
+bullEngulf  = close > open and bodySize > atr * 0.3
+bearEngulf  = close < open and bodySize > atr * 0.3
+
+// Rejection wick (for reversals at BB extreme)
+lowerWick   = math.min(open, close) - low
+upperWick   = high - math.max(open, close)
+bullReject  = lowerWick > bodySize * 1.5 and close > open  // hammer-like
+bearReject  = upperWick > bodySize * 1.5 and close < open  // shooting star
+
+bullCandle  = bullEngulf or bullReject
+bearCandle  = bearEngulf or bearReject
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIVERGENCE QUALITY SCORING
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Score 1-5 based on how many confirmations align.
+// Higher score = higher probability reversal.
+
+var int divScoreBull = 0
+var int divScoreBear = 0
+
+divScoreBull := 0
+if classicBullDiv
+    divScoreBull += 2   // classic is strongest
+if hiddenBullDiv
+    divScoreBull += 1
+if quickBullDiv
+    divScoreBull += 1
+if atBBLower
+    divScoreBull += 1
+if volOK
+    divScoreBull += 1
+
+divScoreBear := 0
+if classicBearDiv
+    divScoreBear += 2
+if hiddenBearDiv
+    divScoreBear += 1
+if quickBearDiv
+    divScoreBear += 1
+if atBBUpper
+    divScoreBear += 1
+if volOK
+    divScoreBear += 1
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOLDOWN
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int barsSinceSL = 999
+wasInTrade = strategy.position_size[1] != 0
+nowFlat    = strategy.position_size == 0
+gotClosed  = wasInTrade and nowFlat and strategy.closedtrades > 0
+
+if gotClosed
+    pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if pnl < 0
+        barsSinceSL := 0
+
+if barsSinceSL < 999
+    barsSinceSL += 1
+
+cooldownOK = barsSinceSL > i_cooldown
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY — DIVERGENCE AT BB EXTREME + MOMENTUM SHIFT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// All 4 must align:
+//   1. RSI divergence detected (any method)
+//   2. Price at Bollinger Band extreme
+//   3. Momentum confirming the turn (MACD + RSI turning)
+//   4. Structure stop is valid (not too tight, not too wide)
+
+longEntry  = anyBullDiv and atBBLower and momBull and bullCandle and longRiskOK and inSession and cooldownOK and htfOK_bull and inBacktest
+shortEntry = anyBearDiv and atBBUpper and momBear and bearCandle and shortRiskOK and inSession and cooldownOK and htfOK_bear and inBacktest
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY TYPE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+var string divType = ""
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float tp3Price   = na
+var float tp10RPrice = na
+var float riskDist   = na
+var float trailStop  = na
+var bool  tp1Hit     = false
+var bool  tp2Hit     = false
+var bool  tp3Hit     = false
+var int   entryScore = 0
+
+flat    = strategy.position_size == 0
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// ── Long Entry ──
+if longEntry and flat
+    entryPrice := close
+    riskDist   := longRisk
+    slPrice    := longSL
+    tp1Price   := close + longRisk * i_tp1R
+    tp2Price   := close + longRisk * i_tp2R
+    tp3Price   := close + longRisk * i_tp3R
+    tp10RPrice := close + longRisk * i_rrRatio
+    trailStop  := longSL
+    tp1Hit     := false
+    tp2Hit     := false
+    tp3Hit     := false
+    entryScore := divScoreBull
+    divType    := classicBullDiv ? "Classic" : hiddenBullDiv ? "Hidden" : "Quick"
+    strategy.entry("DivLong", strategy.long)
+
+// ── Short Entry ──
+if shortEntry and flat
+    entryPrice := close
+    riskDist   := shortRisk
+    slPrice    := shortSL
+    tp1Price   := close - shortRisk * i_tp1R
+    tp2Price   := close - shortRisk * i_tp2R
+    tp3Price   := close - shortRisk * i_tp3R
+    tp10RPrice := close - shortRisk * i_rrRatio
+    trailStop  := shortSL
+    tp1Hit     := false
+    tp2Hit     := false
+    tp3Hit     := false
+    entryScore := divScoreBear
+    divType    := classicBearDiv ? "Classic" : hiddenBearDiv ? "Hidden" : "Quick"
+    strategy.entry("DivShort", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC — SCALE OUT TO 10R
+//
+// TP1 at 3R  → close 30%, SL to breakeven
+// TP2 at 5R  → close 20%, SL to 2R profit
+// TP3 at 7R  → close 15%, SL to 4R profit
+// 10R target → close remaining 35% OR trail it
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── TP1: 3R ──
+if inLong and not tp1Hit
+    strategy.exit("TP1", "DivLong", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if high >= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+if inShort and not tp1Hit
+    strategy.exit("TP1", "DivShort", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if low <= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+// ── TP2: 5R ──
+if inLong and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "DivLong", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if high >= tp2Price
+        tp2Hit  := true
+        slPrice := entryPrice + riskDist * 2
+
+if inShort and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "DivShort", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if low <= tp2Price
+        tp2Hit  := true
+        slPrice := entryPrice - riskDist * 2
+
+// ── TP3: 7R ──
+if inLong and tp2Hit and not tp3Hit
+    strategy.exit("TP3", "DivLong", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
+    if high >= tp3Price
+        tp3Hit  := true
+        slPrice := entryPrice + riskDist * 4
+
+if inShort and tp2Hit and not tp3Hit
+    strategy.exit("TP3", "DivShort", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
+    if low <= tp3Price
+        tp3Hit  := true
+        slPrice := entryPrice - riskDist * 4
+
+// ── 10R Runner + Trail ──
+if inLong and tp3Hit
+    newTrail   = close - atr * 1.0
+    lockMin    = entryPrice + riskDist * 6
+    candidate  = math.max(newTrail, lockMin)
+    if candidate > trailStop
+        trailStop := candidate
+    effectiveStop = math.max(slPrice, trailStop)
+    strategy.exit("10R", "DivLong", limit = tp10RPrice, stop = effectiveStop)
+
+if inShort and tp3Hit
+    newTrail   = close + atr * 1.0
+    lockMin    = entryPrice - riskDist * 6
+    candidate  = math.min(newTrail, lockMin)
+    if candidate < trailStop
+        trailStop := candidate
+    effectiveStop = math.min(slPrice, trailStop)
+    strategy.exit("10R", "DivShort", limit = tp10RPrice, stop = effectiveStop)
+
+// ── Ratchet trail after TP1 ──
+if inLong and tp1Hit and not tp3Hit
+    newTrail = close - atr * 1.5
+    if newTrail > trailStop
+        trailStop := newTrail
+
+if inShort and tp1Hit and not tp3Hit
+    newTrail = close + atr * 1.5
+    if newTrail < trailStop
+        trailStop := newTrail
+
+// ── Session End ──
+if i_useSess and not inSession
+    if inLong
+        strategy.close("DivLong",  comment = "Session End")
+    if inShort
+        strategy.close("DivShort", comment = "Session End")
+
+// ── Backtest End ──
+if not inBacktest and (inLong or inShort)
+    strategy.close_all(comment = "Backtest End")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// R MULTIPLE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+currentR = 0.0
+if inLong  and riskDist > 0
+    currentR := (close - entryPrice) / riskDist
+if inShort and riskDist > 0
+    currentR := (entryPrice - close) / riskDist
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERFORMANCE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int   totalWins    = 0
+var int   totalLosses  = 0
+var float peakEq       = 100000.0
+var float maxDD        = 0.0
+
+if gotClosed and strategy.closedtrades > 0
+    lastPnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnl > 0
+        totalWins += 1
+    else
+        totalLosses += 1
+
+if strategy.equity > peakEq
+    peakEq := strategy.equity
+dd = (peakEq - strategy.equity) / peakEq * 100
+if dd > maxDD
+    maxDD := dd
+
+winRate     = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) * 100 : 0.0
+totalTrades = totalWins + totalLosses
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(emaFast,  "EMA 9",    color.new(#2962FF, 0),   1)
+plot(emaSlow,  "EMA 21",   color.new(#E91E63, 0),   1)
+plot(ema200,   "EMA 200",  color.new(#FFFFFF, 60),   2)
+
+// Bollinger Bands
+p_bbUp  = plot(bbUpper, "BB Upper", color.new(#787B86, 40), 1)
+p_bbLow = plot(bbLower, "BB Lower", color.new(#787B86, 40), 1)
+plot(bbBasis, "BB Mid", color.new(#787B86, 70), 1, plot.style_circles)
+fill(p_bbUp, p_bbLow, color.new(#787B86, 93))
+
+// BB Extreme Zones
+bgcolor(atBBLower ? color.new(#00E676, 92) : atBBUpper ? color.new(#FF1744, 92) : na)
+
+// Divergence markers — show all detected divergences, not just entries
+plotshape(classicBullDiv and atBBLower, "Classic Bull Div", shape.diamond, location.belowbar, color.new(#00E676, 0),  size = size.small, text = "CD")
+plotshape(classicBearDiv and atBBUpper, "Classic Bear Div", shape.diamond, location.abovebar, color.new(#FF1744, 0),  size = size.small, text = "CD")
+
+plotshape(hiddenBullDiv and atBBLower, "Hidden Bull Div",  shape.diamond, location.belowbar, color.new(#00BCD4, 0),  size = size.tiny, text = "HD")
+plotshape(hiddenBearDiv and atBBUpper, "Hidden Bear Div",  shape.diamond, location.abovebar, color.new(#FF9800, 0),  size = size.tiny, text = "HD")
+
+plotshape(quickBullDiv and atBBLower, "Quick Bull Div",   shape.diamond, location.belowbar, color.new(#7C4DFF, 30), size = size.tiny, text = "QD")
+plotshape(quickBearDiv and atBBUpper, "Quick Bear Div",   shape.diamond, location.abovebar, color.new(#E040FB, 30), size = size.tiny, text = "QD")
+
+// Entry arrows — confirmed entries only
+plotshape(longEntry  and flat, "DIV LONG",  shape.triangleup,   location.belowbar, color.new(#00E676, 0), size = size.normal, text = "DIV\nLONG")
+plotshape(shortEntry and flat, "DIV SHORT", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.normal, text = "DIV\nSHORT")
+
+// Trade levels
+plot(inLong or inShort ? slPrice : na,    "Stop",  color.new(#FF1744, 0), 2, plot.style_cross)
+plot(inLong or inShort ? tp1Price : na,   "3R",    color.new(#FFEB3B, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp2Price : na,   "5R",    color.new(#FF9800, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp3Price : na,   "7R",    color.new(#FF6D00, 0), 1, plot.style_circles)
+plot(inLong or inShort ? tp10RPrice : na, "10R",   color.new(#00E676, 0), 2, plot.style_circles)
+plot(tp1Hit and (inLong or inShort) ? trailStop : na, "Trail", color.new(#FFAB00, 40), 1, plot.style_stepline)
+
+// Structure pivots
+plot(lastPivotLow,  "Pivot Low",  color.new(#00E676, 50), 1, plot.style_circles)
+plot(lastPivotHigh, "Pivot High", color.new(#FF1744, 50), 1, plot.style_circles)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 22,
+     bgcolor      = color.new(#0D1117, 5),
+     border_color = color.new(#30363D, 0),
+     border_width = 1)
+
+f_row(tbl, r, lbl, val, clr) =>
+    table.cell(tbl, 0, r, lbl, text_color = color.new(#8B949E, 0), text_size = size.small)
+    table.cell(tbl, 1, r, val, text_color = clr, text_size = size.small)
+
+if barstate.islast
+    // ── Header ──
+    f_row(dash, 0, "DIV REVERSAL", "US100", color.aqua)
+    f_row(dash, 1, "Backtest",     "JAN 2026", color.new(#58A6FF, 0))
+
+    // ── Divergence Status ──
+    divStatus = anyBullDiv and atBBLower ? "BULL DIV" : anyBearDiv and atBBUpper ? "BEAR DIV" : "NONE"
+    divClr    = anyBullDiv and atBBLower ? color.green : anyBearDiv and atBBUpper ? color.red : color.gray
+    f_row(dash, 2, "Divergence", divStatus, divClr)
+
+    divMethods = (classicBullDiv or classicBearDiv ? "C" : "") +
+         (hiddenBullDiv or hiddenBearDiv ? "H" : "") +
+         (quickBullDiv or quickBearDiv ? "Q" : "")
+    f_row(dash, 3, "Methods",   divMethods != "" ? divMethods : "—", color.yellow)
+
+    scoreNow = anyBullDiv ? divScoreBull : anyBearDiv ? divScoreBear : 0
+    scoreStr = str.tostring(scoreNow) + "/6"
+    scoreClr = scoreNow >= 4 ? color.green : scoreNow >= 2 ? color.yellow : color.gray
+    f_row(dash, 4, "Score",     scoreStr, scoreClr)
+
+    // ── BB Status ──
+    bbStr = atBBLower ? "AT LOWER" : atBBUpper ? "AT UPPER" : str.tostring(bbPctB * 100, "#.0") + "%"
+    bbClr = atBBLower ? color.green : atBBUpper ? color.red : color.white
+    f_row(dash, 5, "BB %B",    bbStr, bbClr)
+
+    // ── RSI ──
+    rsiStr = str.tostring(rsi, "#.1")
+    rsiClr = rsi > i_rsiOB ? color.red : rsi < i_rsiOS ? color.green : color.white
+    f_row(dash, 6, "RSI",      rsiStr, rsiClr)
+
+    // ── HTF ──
+    htfStr = htfBullAlign ? "BULL ALIGN" : htfBearAlign ? "BEAR ALIGN" : "NEUTRAL"
+    htfClr = htfBullAlign ? color.green : htfBearAlign ? color.red : color.gray
+    f_row(dash, 7, "HTF Div",  htfStr, htfClr)
+    f_row(dash, 8, "HTF RSI",  str.tostring(htfRSI, "#.1"), htfRSI > 65 ? color.red : htfRSI < 35 ? color.green : color.white)
+
+    // ── MACD ──
+    macdStr = hist > hist[1] ? "RISING" : "FALLING"
+    macdClr = hist > hist[1] ? color.green : color.red
+    f_row(dash, 9, "MACD Hist", macdStr, macdClr)
+
+    // ── Momentum ──
+    momStr = momBull ? "BULL TURN" : momBear ? "BEAR TURN" : "FLAT"
+    momClr = momBull ? color.green : momBear ? color.red : color.gray
+    f_row(dash, 10, "Momentum", momStr, momClr)
+
+    // ── Position ──
+    posStr = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    posClr = inLong ? color.green : inShort ? color.red : color.gray
+    f_row(dash, 11, "Position",  posStr, posClr)
+
+    f_row(dash, 12, "Div Type",  inLong or inShort ? divType : "—", color.yellow)
+    f_row(dash, 13, "Entry Score", inLong or inShort ? str.tostring(entryScore) + "/6" : "—", entryScore >= 4 ? color.green : color.yellow)
+
+    // ── R Tracking ──
+    rStr = inLong or inShort ? str.tostring(currentR, "#.1") + "R" : "—"
+    rClr = currentR >= 10 ? color.lime : currentR >= 5 ? color.green : currentR >= 1 ? color.yellow : currentR >= 0 ? color.white : color.red
+    f_row(dash, 14, "Current R", rStr, rClr)
+
+    riskPts  = inLong or inShort ? str.tostring(riskDist, "#.1") : "—"
+    targPts  = inLong or inShort ? str.tostring(riskDist * i_rrRatio, "#.0") : "—"
+    f_row(dash, 15, "Risk (pts)", riskPts, color.white)
+    f_row(dash, 16, "Target (pts)", targPts, color.white)
+
+    // ── TP Status ──
+    f_row(dash, 17, "TP1 (3R)",  inLong or inShort ? (tp1Hit ? "HIT" : "...") : "—", tp1Hit ? color.green : color.orange)
+    f_row(dash, 18, "TP2 (5R)",  inLong or inShort ? (tp2Hit ? "HIT" : "...") : "—", tp2Hit ? color.green : color.orange)
+    f_row(dash, 19, "TP3 (7R)",  inLong or inShort ? (tp3Hit ? "HIT" : "...") : "—", tp3Hit ? color.green : color.orange)
+
+    // ── Performance ──
+    f_row(dash, 20, "Win Rate",  str.tostring(winRate, "#.1") + "% (" + str.tostring(totalWins) + "W/" + str.tostring(totalLosses) + "L)", winRate >= 15 ? color.green : color.red)
+    f_row(dash, 21, "Max DD",    str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)
