@@ -197,18 +197,18 @@ in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "Am
 st_long_ok  = not use_st or st_uptrend
 st_short_ok = not use_st or st_downtrend
 
-// LONG — all filters must align
-long_entry = allow_longs and guard_long and st_long_ok and vol_confirm and
+// LONG — Supertrend flips to uptrend + filters
+long_entry = allow_longs and st_flip_up and vol_confirm and
      rsi_long_ok and adx_ok and body_long_ok and in_date and in_ny_session
 
-// SHORT — all filters must align
-short_entry = allow_shorts and guard_short and st_short_ok and vol_confirm and
+// SHORT — Supertrend flips to downtrend + filters
+short_entry = allow_shorts and st_flip_down and vol_confirm and
      rsi_short_ok and adx_ok and body_short_ok and in_date and in_ny_session
 
-// Exit long when price breaks down (lower low) or Supertrend flips to downtrend
-exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
-// Exit short when price breaks up (higher high) or Supertrend flips to uptrend
-exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
+// Exit long when Supertrend flips to downtrend (or lower low breakdown)
+exit_long  = st_flip_down or breakout_down
+// Exit short when Supertrend flips to uptrend (or higher high breakout)
+exit_short = st_flip_up or breakout_up
 
 // --------------------------------------------------------------------------
 // STRATEGY EXECUTION
