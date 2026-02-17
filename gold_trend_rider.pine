@@ -2,7 +2,7 @@
 // https://mozilla.org/MPL/2.0/
 
 //@version=5
-strategy("Gold Trend Rider",
+strategy("Gold Trend Rider v2",
      overlay        = true,
      initial_capital = 100000,
      default_qty_type = strategy.percent_of_equity,
@@ -17,32 +17,41 @@ strategy("Gold Trend Rider",
 // INPUTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Trend Filter ──
-i_emaFast   = input.int(21,   "Fast EMA",           group = "Trend Filter")
-i_emaMid    = input.int(50,   "Mid EMA",            group = "Trend Filter")
-i_emaSlow   = input.int(200,  "Slow EMA",           group = "Trend Filter")
+// ── Trend Filter (faster EMAs for 3-month window) ──
+i_emaFast   = input.int(9,    "Fast EMA",            group = "Trend")
+i_emaMid    = input.int(21,   "Mid EMA",             group = "Trend")
+i_emaSlow   = input.int(50,   "Slow EMA",            group = "Trend")
 
-// ── Supertrend ──
-i_stFactor  = input.float(3.0, "Factor",   step = 0.1, group = "Supertrend")
-i_stPeriod  = input.int(10,    "ATR Period",           group = "Supertrend")
+// ── Supertrend (more sensitive for more signals) ──
+i_stFactor  = input.float(2.0, "Factor",    step = 0.1, group = "Supertrend")
+i_stPeriod  = input.int(7,     "ATR Period",            group = "Supertrend")
+
+// ── MACD (secondary entry trigger) ──
+i_useMACD   = input.bool(true, "Enable MACD Entries",   group = "MACD")
+i_macdFast  = input.int(12,    "MACD Fast",             group = "MACD")
+i_macdSlow  = input.int(26,    "MACD Slow",             group = "MACD")
+i_macdSig   = input.int(9,     "MACD Signal",           group = "MACD")
+
+// ── EMA Pullback Entries ──
+i_usePB     = input.bool(true,  "Enable Pullback Entries",  group = "Pullback")
+i_pbZone    = input.float(0.5,  "Pullback Zone (ATR)",      step = 0.1, group = "Pullback")
 
 // ── RSI Filter ──
-i_useRSI    = input.bool(true, "Enable RSI Filter",    group = "RSI Filter")
-i_rsiLen    = input.int(14,    "RSI Length",            group = "RSI Filter")
-i_rsiOB     = input.int(75,    "Overbought (no longs)", group = "RSI Filter")
-i_rsiOS     = input.int(25,    "Oversold (no shorts)",  group = "RSI Filter")
+i_useRSI    = input.bool(true, "Enable RSI Filter",     group = "RSI")
+i_rsiLen    = input.int(14,    "RSI Length",             group = "RSI")
+i_rsiOB     = input.int(80,    "Overbought (no longs)", group = "RSI")
+i_rsiOS     = input.int(20,    "Oversold (no shorts)",  group = "RSI")
 
 // ── Risk Management ──
-i_atrLen    = input.int(14,    "ATR Length",             group = "Risk")
-i_slMult    = input.float(2.0, "SL: ATR Multiplier",    step = 0.1, group = "Risk")
-i_beActive  = input.bool(true, "Move SL to Breakeven",  group = "Risk")
-i_beMult    = input.float(1.5, "BE Trigger: ATR Mult",  step = 0.1, group = "Risk")
+i_atrLen    = input.int(14,    "ATR Length",              group = "Risk")
+i_slMult    = input.float(1.5, "SL: ATR Multiplier",     step = 0.1, group = "Risk")
+i_tp1Mult   = input.float(2.0, "TP1: ATR Multiplier",    step = 0.1, group = "Risk")
+i_tp1Pct    = input.float(50,  "TP1: Close %",           step = 5,   group = "Risk")
+i_trailMult = input.float(1.5, "Trail: ATR Multiplier",  step = 0.1, group = "Risk")
 
-// ── Exit Mode ──
-i_exitMode  = input.string("Supertrend Flip", "Exit Method",
-                 options = ["Supertrend Flip", "ATR Trail", "Both (first hit)"],
-                 group = "Exit")
-i_trailMult = input.float(2.5, "Trail: ATR Multiplier", step = 0.1, group = "Exit")
+// ── Session Filter ──
+i_useSess   = input.bool(false, "Enable Session Filter",  group = "Session")
+i_sess      = input.session("0700-1700", "Session (UTC)", group = "Session")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CALCULATIONS
@@ -57,32 +66,61 @@ emaSlow  = ta.ema(close, i_emaSlow)
 rsi = ta.rsi(close, i_rsiLen)
 atr = ta.atr(i_atrLen)
 
+[macdLine, signalLine, hist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+
 // ═══════════════════════════════════════════════════════════════════════════
-// TREND DETECTION
+// TREND DETECTION (relaxed for 3-month window)
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Stacked EMAs = strong trend
-bullTrend = emaFast > emaMid and emaMid > emaSlow
-bearTrend = emaFast < emaMid and emaMid < emaSlow
+// Fast EMA above Mid + price above Slow = bullish
+bullTrend = emaFast > emaMid and close > emaSlow
+bearTrend = emaFast < emaMid and close < emaSlow
 
-// Supertrend direction
+// Supertrend state
 stBull = stDir < 0
 stBear = stDir > 0
 
-// Supertrend flips (entry trigger)
+// Supertrend flips
 stFlipBull = stBull and not stBull[1]
 stFlipBear = stBear and not stBear[1]
+
+// MACD crosses
+macdCrossBull = ta.crossover(macdLine, signalLine)
+macdCrossBear = ta.crossunder(macdLine, signalLine)
+
+// EMA pullback: price dips into EMA 21 zone and bounces
+pbBull = i_usePB and low <= emaMid + atr * i_pbZone and close > emaMid and stBull
+pbBear = i_usePB and high >= emaMid - atr * i_pbZone and close < emaMid and stBear
 
 // RSI filter
 rsiBullOK = not i_useRSI or rsi < i_rsiOB
 rsiBearOK = not i_useRSI or rsi > i_rsiOS
 
+// Session filter
+inSession = not i_useSess or not na(time(timeframe.period, i_sess))
+
 // ═══════════════════════════════════════════════════════════════════════════
-// ENTRY CONDITIONS
+// ENTRY CONDITIONS (3 trigger types)
 // ═══════════════════════════════════════════════════════════════════════════
 
-longEntry  = bullTrend and stFlipBull and rsiBullOK
-shortEntry = bearTrend and stFlipBear and rsiBearOK
+// Trigger 1: Supertrend flip in trend direction
+trig1Long  = bullTrend and stFlipBull
+trig1Short = bearTrend and stFlipBear
+
+// Trigger 2: MACD cross while Supertrend already confirms
+trig2Long  = i_useMACD and bullTrend and macdCrossBull and stBull
+trig2Short = i_useMACD and bearTrend and macdCrossBear and stBear
+
+// Trigger 3: EMA pullback bounce while Supertrend confirms
+trig3Long  = bullTrend and pbBull and not pbBull[1]
+trig3Short = bearTrend and pbBear and not pbBear[1]
+
+// Combined entry
+longEntry  = (trig1Long or trig2Long or trig3Long) and rsiBullOK and inSession
+shortEntry = (trig1Short or trig2Short or trig3Short) and rsiBearOK and inSession
+
+// Track which trigger fired (for info table)
+var string lastTrigger = ""
 
 // ═══════════════════════════════════════════════════════════════════════════
 // POSITION MANAGEMENT
@@ -90,146 +128,144 @@ shortEntry = bearTrend and stFlipBear and rsiBearOK
 
 var float entryPrice  = na
 var float slPrice     = na
-var bool  beMoved     = false
+var float tp1Price    = na
 var float trailStop   = na
+var bool  tp1Hit      = false
 
-flat = strategy.position_size == 0
+flat    = strategy.position_size == 0
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
 
 // ── New Long Entry ──
 if longEntry and flat
     entryPrice := close
     slPrice    := close - atr * i_slMult
-    beMoved    := false
+    tp1Price   := close + atr * i_tp1Mult
     trailStop  := close - atr * i_trailMult
+    tp1Hit     := false
+    lastTrigger := trig1Long ? "ST Flip" : trig2Long ? "MACD Cross" : "Pullback"
     strategy.entry("Long", strategy.long)
 
 // ── New Short Entry ──
 if shortEntry and flat
     entryPrice := close
     slPrice    := close + atr * i_slMult
-    beMoved    := false
+    tp1Price   := close - atr * i_tp1Mult
     trailStop  := close + atr * i_trailMult
+    tp1Hit     := false
+    lastTrigger := trig1Short ? "ST Flip" : trig2Short ? "MACD Cross" : "Pullback"
     strategy.entry("Short", strategy.short)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EXIT LOGIC
 // ═══════════════════════════════════════════════════════════════════════════
 
-inLong  = strategy.position_size > 0
-inShort = strategy.position_size < 0
+// ── TP1 Partial Close + Breakeven ──
+if inLong and not tp1Hit
+    // Set TP1 partial + SL
+    strategy.exit("TP1", "Long", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    // Detect TP1 reached
+    if high >= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice   // move to breakeven
 
-// ── Breakeven Logic ──
-if i_beActive and inLong and not beMoved
-    if high >= entryPrice + atr * i_beMult
+if inShort and not tp1Hit
+    strategy.exit("TP1", "Short", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if low <= tp1Price
+        tp1Hit  := true
         slPrice := entryPrice
-        beMoved := true
 
-if i_beActive and inShort and not beMoved
-    if low <= entryPrice - atr * i_beMult
-        slPrice := entryPrice
-        beMoved := true
-
-// ── ATR Trailing Stop ──
-if inLong
-    newTrail = close - atr * i_trailMult
+// ── Trailing Stop for Remaining Position (after TP1) ──
+if inLong and tp1Hit
+    newTrail  = close - atr * i_trailMult
     if newTrail > trailStop
         trailStop := newTrail
+    effectiveStop = math.max(slPrice, trailStop)
+    strategy.exit("Trail", "Long", stop = effectiveStop)
 
-if inShort
-    newTrail = close + atr * i_trailMult
+if inShort and tp1Hit
+    newTrail  = close + atr * i_trailMult
     if newTrail < trailStop
         trailStop := newTrail
+    effectiveStop = math.min(slPrice, trailStop)
+    strategy.exit("Trail", "Short", stop = effectiveStop)
 
-// ── Determine active stop ──
-var float activeStop = na
-
-if inLong
-    if i_exitMode == "ATR Trail"
-        activeStop := math.max(slPrice, trailStop)
-    else if i_exitMode == "Both (first hit)"
-        activeStop := math.max(slPrice, trailStop)
-    else
-        activeStop := slPrice
-
-if inShort
-    if i_exitMode == "ATR Trail"
-        activeStop := math.min(slPrice, trailStop)
-    else if i_exitMode == "Both (first hit)"
-        activeStop := math.min(slPrice, trailStop)
-    else
-        activeStop := slPrice
-
-// ── Stop Loss Exit ──
-if inLong
-    strategy.exit("SL", "Long", stop = activeStop)
-
-if inShort
-    strategy.exit("SL", "Short", stop = activeStop)
-
-// ── Supertrend Flip Exit ──
-useST = i_exitMode == "Supertrend Flip" or i_exitMode == "Both (first hit)"
-
-if useST and inLong and stFlipBear
+// ── Supertrend Flip Exit (closes everything) ──
+if inLong and stFlipBear
     strategy.close("Long", comment = "ST Flip")
 
-if useST and inShort and stFlipBull
+if inShort and stFlipBull
     strategy.close("Short", comment = "ST Flip")
 
-// ── Trend Structure Break Exit ──
-// Close if EMAs unstack (trend is over)
-if inLong and (emaFast < emaSlow)
+// ── Trend Break Exit ──
+if inLong and emaFast < emaSlow
     strategy.close("Long", comment = "Trend Break")
 
-if inShort and (emaFast > emaSlow)
+if inShort and emaFast > emaSlow
     strategy.close("Short", comment = "Trend Break")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PLOTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-plot(emaFast, "EMA 21",  color.new(#2962FF, 0), 1)
-plot(emaMid,  "EMA 50",  color.new(#FF6D00, 0), 1)
-plot(emaSlow, "EMA 200", color.new(#E91E63, 0), 2)
+plot(emaFast, "EMA 9",   color.new(#2962FF, 0), 1)
+plot(emaMid,  "EMA 21",  color.new(#FF6D00, 0), 1)
+plot(emaSlow, "EMA 50",  color.new(#E91E63, 0), 2)
 
 stColor = stBull ? color.new(#00E676, 20) : color.new(#FF1744, 20)
 plot(st, "Supertrend", stColor, 2, plot.style_linebr)
 
-// Entry signals
-plotshape(longEntry  and flat, "Long",  shape.triangleup,   location.belowbar, color.new(#00E676, 0), size = size.small)
-plotshape(shortEntry and flat, "Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.small)
+// Entry markers with trigger labels
+plotshape(trig1Long  and flat and rsiBullOK and inSession, "ST Long",  shape.triangleup,   location.belowbar, color.new(#00E676, 0), size = size.small, text = "ST")
+plotshape(trig1Short and flat and rsiBearOK and inSession, "ST Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.small, text = "ST")
+
+plotshape(trig2Long  and not trig1Long and flat and rsiBullOK and inSession,  "MACD Long",  shape.triangleup,   location.belowbar, color.new(#00BCD4, 0), size = size.small, text = "M")
+plotshape(trig2Short and not trig1Short and flat and rsiBearOK and inSession, "MACD Short", shape.triangledown, location.abovebar, color.new(#FF9800, 0), size = size.small, text = "M")
+
+plotshape(trig3Long  and not trig1Long and not trig2Long and flat and rsiBullOK and inSession,  "PB Long",  shape.triangleup,   location.belowbar, color.new(#7C4DFF, 0), size = size.small, text = "PB")
+plotshape(trig3Short and not trig1Short and not trig2Short and flat and rsiBearOK and inSession, "PB Short", shape.triangledown, location.abovebar, color.new(#FF5252, 0), size = size.small, text = "PB")
 
 // Trend background
 bgColor = bullTrend ? color.new(#00E676, 95) : bearTrend ? color.new(#FF1744, 95) : na
 bgcolor(bgColor)
 
-// Active stop level
-plot(inLong or inShort ? activeStop : na, "Stop", color.new(#FFAB00, 0), 1, plot.style_cross)
+// TP1 and stop levels while in trade
+plot(inLong or inShort ? slPrice : na,  "Stop",  color.new(#FF1744, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp1Price : na, "TP1",   color.new(#00E676, 0), 1, plot.style_cross)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════════════════
 
-var table infoTbl = table.new(position.top_right, 2, 6,
-     bgcolor = color.new(#1E1E1E, 10),
+var table infoTbl = table.new(position.top_right, 2, 8,
+     bgcolor     = color.new(#1E1E1E, 10),
      border_color = color.new(#333333, 0),
      border_width = 1)
 
 if barstate.islast
-    trendStr  = bullTrend ? "BULL" : bearTrend ? "BEAR" : "NEUTRAL"
-    trendClr  = bullTrend ? color.green : bearTrend ? color.red : color.gray
-    stStr     = stBull ? "BULL" : "BEAR"
-    stClr     = stBull ? color.green : color.red
+    trendStr = bullTrend ? "BULL" : bearTrend ? "BEAR" : "FLAT"
+    trendClr = bullTrend ? color.green : bearTrend ? color.red : color.gray
+    stStr    = stBull ? "BULL" : "BEAR"
+    stClr    = stBull ? color.green : color.red
+    macdStr  = hist > 0 ? "BULL" : "BEAR"
+    macdClr  = hist > 0 ? color.green : color.red
+    posStr   = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    posClr   = inLong ? color.green : inShort ? color.red : color.gray
 
-    table.cell(infoTbl, 0, 0, "Trend",      text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 1, 0, trendStr,      text_color = trendClr,   text_size = size.small)
-    table.cell(infoTbl, 0, 1, "Supertrend",  text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 1, 1, stStr,         text_color = stClr,       text_size = size.small)
-    table.cell(infoTbl, 0, 2, "RSI",         text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 1, 2, str.tostring(rsi, "#.0"), text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 0, 3, "ATR",         text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 1, 3, str.tostring(atr, "#.00"), text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 0, 4, "Exit Mode",   text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 1, 4, i_exitMode,    text_color = color.yellow, text_size = size.small)
-    table.cell(infoTbl, 0, 5, "Stop",        text_color = color.white, text_size = size.small)
-    table.cell(infoTbl, 1, 5, inLong or inShort ? str.tostring(activeStop, "#.00") : "—",
-               text_color = color.orange, text_size = size.small)
+    table.cell(infoTbl, 0, 0, "Trend",      text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 0, trendStr,      text_color = trendClr,    text_size = size.small)
+    table.cell(infoTbl, 0, 1, "Supertrend",  text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 1, stStr,         text_color = stClr,        text_size = size.small)
+    table.cell(infoTbl, 0, 2, "MACD",        text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 2, macdStr,       text_color = macdClr,      text_size = size.small)
+    table.cell(infoTbl, 0, 3, "RSI",         text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 3, str.tostring(rsi, "#.0"), text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 0, 4, "ATR",         text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 4, str.tostring(atr, "#.00"), text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 0, 5, "Position",    text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 5, posStr,        text_color = posClr,       text_size = size.small)
+    table.cell(infoTbl, 0, 6, "Entry Type",  text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 6, inLong or inShort ? lastTrigger : "—", text_color = color.yellow, text_size = size.small)
+    table.cell(infoTbl, 0, 7, "TP1 Hit",     text_color = color.white,  text_size = size.small)
+    table.cell(infoTbl, 1, 7, inLong or inShort ? (tp1Hit ? "YES" : "NO") : "—",
+               text_color = tp1Hit ? color.green : color.orange, text_size = size.small)
