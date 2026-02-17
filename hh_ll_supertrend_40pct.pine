@@ -128,9 +128,9 @@ ny_session  = input.session("0930-1600", "NY Session (ET)", group=sess_group,
 
 // -- Date Filter --
 date_group  = "== Date Filter =="
-use_date    = input.bool(false,  "Use Date Filter",    group=date_group)
-start_date  = input.time(timestamp("2024-01-01"), "Start Date", group=date_group)
-end_date    = input.time(timestamp("2026-12-31"), "End Date",   group=date_group)
+use_date    = input.bool(true,  "Use Date Filter",    group=date_group)
+start_date  = input.time(timestamp("2026-01-01"), "Start Date", group=date_group)
+end_date    = input.time(timestamp("2026-01-31"), "End Date",   group=date_group)
 
 // --------------------------------------------------------------------------
 // CALCULATIONS
