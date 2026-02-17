@@ -25,6 +25,10 @@ bos_confirm   = input.int(1, "BOS Confirmation Bars", minval=1, maxval=5, group=
 direction     = input.int(0, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group="Strategy")
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
 
+// Session Time Filter
+use_session   = input.bool(true, "Use Session Time Filter", group="Session")
+session_time  = input.session("0800-2359", "Trading Session", group="Session", tooltip="Only allow entries during this time window (exchange timezone)")
+
 // Risk Management
 use_sl        = input.bool(true, "Use Stop Loss", group="Risk Management")
 sl_mult       = input.float(1.0, "Stop Loss (BB dev multiplier)", minval=0.1, maxval=5.0, step=0.1, group="Risk Management", tooltip="SL distance as a fraction of BB deviation")
@@ -143,22 +147,28 @@ if bos_confirm > 1 and bearish_bos
     bearish_bos_confirmed := count >= (bos_confirm - 1)
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SESSION TIME FILTER
+// ──────────────────────────────────────────────────────────────────────────────
+
+in_session = not use_session or not na(time(timeframe.period, session_time))
+
+// ──────────────────────────────────────────────────────────────────────────────
 // ENTRY CONDITIONS
 // ──────────────────────────────────────────────────────────────────────────────
 
 // ── LONG ENTRY ──
 // Bullish BOS (Higher High confirmed) + price above basis (upper half of BB)
-// + Heiken Ashi bullish candle for momentum confirmation
+// + Heiken Ashi bullish candle for momentum confirmation + within session
 long_bb_filter   = close >= basis                          // price is above basis (only long above basis)
 long_ha_filter   = ha_bullish                              // HA candle is green
-long_signal      = bullish_bos_confirmed and long_bb_filter and long_ha_filter
+long_signal      = bullish_bos_confirmed and long_bb_filter and long_ha_filter and in_session
 
 // ── SHORT ENTRY ──
 // Bearish BOS (HL break or LL continuation) + price below basis (lower half of BB)
-// + Heiken Ashi bearish candle for momentum confirmation
+// + Heiken Ashi bearish candle for momentum confirmation + within session
 short_bb_filter  = close <= basis                          // price is below basis (only short below basis)
 short_ha_filter  = ha_bearish                              // HA candle is red
-short_signal     = bearish_bos_confirmed and short_bb_filter and short_ha_filter
+short_signal     = bearish_bos_confirmed and short_bb_filter and short_ha_filter and in_session
 
 // ──────────────────────────────────────────────────────────────────────────────
 // RISK MANAGEMENT: SL & TP CALCULATION
@@ -213,7 +223,7 @@ bgcolor(bullish_bos_confirmed ? color.new(color.green, 93) : bearish_bos_confirm
 // INFORMATION TABLE
 // ──────────────────────────────────────────────────────────────────────────────
 
-var table info = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+var table info = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
 
 if barstate.islast
     table.cell(info, 0, 0, "Metric", text_color=color.white, text_size=size.small)
@@ -236,3 +246,6 @@ if barstate.islast
 
     table.cell(info, 0, 5, "HA Trend", text_color=color.white, text_size=size.small)
     table.cell(info, 1, 5, ha_bullish ? "Bullish" : "Bearish", text_color=ha_bullish ? color.green : color.red, text_size=size.small)
+
+    table.cell(info, 0, 6, "Session", text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 6, in_session ? "Active" : "Closed", text_color=in_session ? color.green : color.gray, text_size=size.small)
