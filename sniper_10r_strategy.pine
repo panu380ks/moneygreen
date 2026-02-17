@@ -2,7 +2,7 @@
 // https://mozilla.org/MPL/2.0/
 
 //@version=5
-strategy("10R Sniper | 1:10 Risk-Reward Hunter",
+strategy("10R Sniper | 1:10 R:R | Jan 2026 Backtest",
      overlay        = true,
      initial_capital = 100000,
      default_qty_type = strategy.percent_of_equity,
@@ -96,6 +96,11 @@ i_tp3Pct     = input.float(15,   "TP3 Close %",         step = 5,   group = "Sca
 
 // ── Cooldown ──
 i_cooldownBars = input.int(5,    "Cooldown Bars After Loss",  group = "Cooldown")
+
+// ── Backtest Window ──
+i_btStart    = input.time(timestamp("2026-01-01 00:00 +0000"), "Backtest Start", group = "Backtest Window")
+i_btEnd      = input.time(timestamp("2026-01-31 23:59 +0000"), "Backtest End",   group = "Backtest Window")
+inBacktest   = time >= i_btStart and time <= i_btEnd
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CORE CALCULATIONS
@@ -293,8 +298,8 @@ trig4Short = bearDiv and close >= bbUpper * 0.995 and (macdCrossBear or hist < h
 // ─────────────────────────────────────────────────────────────────────────
 // Combined entry — all require valid structure stop + session + cooldown
 // ─────────────────────────────────────────────────────────────────────────
-longEntry  = (trig1Long or trig2Long or trig3Long or trig4Long) and longRiskOK and inSession and cooldownOK and htfBull
-shortEntry = (trig1Short or trig2Short or trig3Short or trig4Short) and shortRiskOK and inSession and cooldownOK and htfBear
+longEntry  = (trig1Long or trig2Long or trig3Long or trig4Long) and longRiskOK and inSession and cooldownOK and htfBull and inBacktest
+shortEntry = (trig1Short or trig2Short or trig3Short or trig4Short) and shortRiskOK and inSession and cooldownOK and htfBear and inBacktest
 
 var string lastTrigger = ""
 
@@ -436,6 +441,10 @@ if i_useSess and not inSession
     if inShort
         strategy.close("Short", comment = "Session End")
 
+// ── Backtest Window End — flatten everything ──
+if not inBacktest and (inLong or inShort)
+    strategy.close_all(comment = "Backtest End")
+
 // ═══════════════════════════════════════════════════════════════════════════
 // CURRENT R MULTIPLE TRACKING
 // ═══════════════════════════════════════════════════════════════════════════
@@ -534,7 +543,7 @@ plot(tp1Hit and (inLong or inShort) ? trailStop : na, "Trail", color.new(#FFAB00
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════════════════
 
-var table infoTbl = table.new(position.top_right, 2, 18,
+var table infoTbl = table.new(position.top_right, 2, 20,
      bgcolor      = color.new(#1E1E1E, 10),
      border_color = color.new(#333333, 0),
      border_width = 1)
@@ -586,3 +595,5 @@ if barstate.islast
     f_row(infoTbl, 15, "Trades",      str.tostring(totalTrades), color.white)
     f_row(infoTbl, 16, "W / L",       str.tostring(totalWins) + " / " + str.tostring(totalLosses), color.white)
     f_row(infoTbl, 17, "Max DD",      str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)
+    f_row(infoTbl, 18, "Backtest",    "JAN 2026", color.aqua)
+    f_row(infoTbl, 19, "Window",      inBacktest ? "ACTIVE" : "CLOSED", inBacktest ? color.green : color.gray)
