@@ -272,6 +272,212 @@ qRsiHi1     = ta.highest(rsi, 8)
 qRsiHi2     = ta.highest(rsi, 8)[8]
 quickBearDiv = qPriceHi1 > qPriceHi2 and qRsiHi1 < qRsiHi2 and rsi > i_rsiOB - 10
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CLASSIC DIVERGENCE VISUAL LINES
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Draw lines on chart connecting the two price pivots that form
+// the classic divergence. Green = bullish CD, Red = bearish CD.
+// This makes every CD visually obvious on the chart.
+
+// Track price pivot bars for drawing lines
+var int   pxPLbar1 = 0
+var int   pxPLbar2 = 0
+var int   pxPHbar1 = 0
+var int   pxPHbar2 = 0
+
+if not na(rsiPivotLow)
+    pxPLbar2 := pxPLbar1
+    pxPLbar1 := bar_index - i_divWindow
+
+if not na(rsiPivotHigh)
+    pxPHbar2 := pxPHbar1
+    pxPHbar1 := bar_index - i_divWindow
+
+// ── Draw Bullish CD Lines ──
+// Price line: connects the two lower lows (falling)
+// RSI is making higher lows — the divergence
+var line cdBullPriceLine = na
+var line cdBullSignalLine = na
+var label cdBullLabel = na
+
+if classicBullDiv and atBBLower
+    // Delete old lines if they exist
+    if not na(cdBullPriceLine)
+        line.delete(cdBullPriceLine)
+    if not na(cdBullSignalLine)
+        line.delete(cdBullSignalLine)
+    if not na(cdBullLabel)
+        label.delete(cdBullLabel)
+
+    // Price line: connects the two swing lows (price going DOWN)
+    cdBullPriceLine := line.new(
+         x1     = pxPLbar2,
+         y1     = pxAtRsiPL2,
+         x2     = pxPLbar1,
+         y2     = pxAtRsiPL1,
+         color  = color.new(#00E676, 20),
+         width  = 2,
+         style  = line.style_solid)
+
+    // Signal line: dashed line from entry point down to SL zone
+    cdBullSignalLine := line.new(
+         x1     = bar_index,
+         y1     = close,
+         x2     = bar_index,
+         y2     = structSL_long,
+         color  = color.new(#00E676, 50),
+         width  = 1,
+         style  = line.style_dashed)
+
+    // Label showing divergence strength
+    cdBullLabel := label.new(
+         x          = bar_index,
+         y          = low - atr * 0.5,
+         text       = "BULL CD\nRSI: " + str.tostring(rsiPL2, "#.0") + " → " + str.tostring(rsiPL1, "#.0") + "\nPx: " + str.tostring(pxAtRsiPL2, "#.0") + " → " + str.tostring(pxAtRsiPL1, "#.0"),
+         style      = label.style_label_up,
+         color      = color.new(#00E676, 20),
+         textcolor  = color.white,
+         size       = size.small)
+
+// ── Draw Bearish CD Lines ──
+var line cdBearPriceLine = na
+var line cdBearSignalLine = na
+var label cdBearLabel = na
+
+if classicBearDiv and atBBUpper
+    if not na(cdBearPriceLine)
+        line.delete(cdBearPriceLine)
+    if not na(cdBearSignalLine)
+        line.delete(cdBearSignalLine)
+    if not na(cdBearLabel)
+        label.delete(cdBearLabel)
+
+    // Price line: connects the two swing highs (price going UP)
+    cdBearPriceLine := line.new(
+         x1     = pxPHbar2,
+         y1     = pxAtRsiPH2,
+         x2     = pxPHbar1,
+         y2     = pxAtRsiPH1,
+         color  = color.new(#FF1744, 20),
+         width  = 2,
+         style  = line.style_solid)
+
+    // Signal line: dashed up to SL zone
+    cdBearSignalLine := line.new(
+         x1     = bar_index,
+         y1     = close,
+         x2     = bar_index,
+         y2     = structSL_short,
+         color  = color.new(#FF1744, 50),
+         width  = 1,
+         style  = line.style_dashed)
+
+    cdBearLabel := label.new(
+         x          = bar_index,
+         y          = high + atr * 0.5,
+         text       = "BEAR CD\nRSI: " + str.tostring(rsiPH2, "#.0") + " → " + str.tostring(rsiPH1, "#.0") + "\nPx: " + str.tostring(pxAtRsiPH2, "#.0") + " → " + str.tostring(pxAtRsiPH1, "#.0"),
+         style      = label.style_label_down,
+         color      = color.new(#FF1744, 20),
+         textcolor  = color.white,
+         size       = size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLASSIC DIVERGENCE DEPTH MEASUREMENT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Measures HOW STRONG the divergence is:
+// - RSI gap:   difference between the two RSI pivots (bigger = stronger)
+// - Price gap: difference between the two price pivots
+// - Depth ratio: RSI gap / Price gap normalized — higher = better setup
+
+cdBullRSIGap  = classicBullDiv ? rsiPL1 - rsiPL2 : 0.0
+cdBullPxGap   = classicBullDiv ? pxAtRsiPL2 - pxAtRsiPL1 : 0.0
+cdBullDepth   = classicBullDiv and cdBullPxGap > 0 ? cdBullRSIGap / (cdBullPxGap / atr) : 0.0
+
+cdBearRSIGap  = classicBearDiv ? rsiPH2 - rsiPH1 : 0.0
+cdBearPxGap   = classicBearDiv ? pxAtRsiPH1 - pxAtRsiPH2 : 0.0
+cdBearDepth   = classicBearDiv and cdBearPxGap > 0 ? cdBearRSIGap / (cdBearPxGap / atr) : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLASSIC DIVERGENCE HISTORY TRACKER
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Counts total classic divergences detected and how many led to reversals.
+// "Led to reversal" = price moved at least 3R in the divergence direction
+// within 20 bars of the CD signal.
+
+var int cdBullCount  = 0
+var int cdBearCount  = 0
+var int cdBullWins   = 0
+var int cdBearWins   = 0
+
+// Track active CD signals
+var bool  cdBullActive   = false
+var float cdBullEntryPx  = na
+var float cdBullTarget   = na
+var int   cdBullEntryBar = 0
+
+var bool  cdBearActive   = false
+var float cdBearEntryPx  = na
+var float cdBearTarget   = na
+var int   cdBearEntryBar = 0
+
+// New bullish CD detected at BB lower
+if classicBullDiv and atBBLower and not classicBullDiv[1]
+    cdBullCount  += 1
+    cdBullActive := true
+    cdBullEntryPx := close
+    cdBullTarget  := close + longRisk * 3
+    cdBullEntryBar := bar_index
+
+// Check if bullish CD hit target
+if cdBullActive
+    if high >= cdBullTarget
+        cdBullWins   += 1
+        cdBullActive := false
+    else if bar_index - cdBullEntryBar > 20
+        cdBullActive := false
+
+// New bearish CD detected at BB upper
+if classicBearDiv and atBBUpper and not classicBearDiv[1]
+    cdBearCount  += 1
+    cdBearActive := true
+    cdBearEntryPx := close
+    cdBearTarget  := close - shortRisk * 3
+    cdBearEntryBar := bar_index
+
+if cdBearActive
+    if low <= cdBearTarget
+        cdBearWins   += 1
+        cdBearActive := false
+    else if bar_index - cdBearEntryBar > 20
+        cdBearActive := false
+
+cdTotalSignals = cdBullCount + cdBearCount
+cdTotalWins    = cdBullWins + cdBearWins
+cdHitRate      = cdTotalSignals > 0 ? cdTotalWins / cdTotalSignals * 100 : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLASSIC DIVERGENCE ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+alertcondition(classicBullDiv and atBBLower and momBull,
+     title = "Bull CD at BB Lower",
+     message = "US100: Bullish Classic Divergence at BB Lower Band — RSI rising while price making lower lows. Momentum confirming turn.")
+
+alertcondition(classicBearDiv and atBBUpper and momBear,
+     title = "Bear CD at BB Upper",
+     message = "US100: Bearish Classic Divergence at BB Upper Band — RSI falling while price making higher highs. Momentum confirming turn.")
+
+alertcondition(classicBullDiv and atBBLower,
+     title = "Bull CD Detected (any)",
+     message = "US100: Bullish Classic Divergence detected at BB Lower. Waiting for momentum confirmation.")
+
+alertcondition(classicBearDiv and atBBUpper,
+     title = "Bear CD Detected (any)",
+     message = "US100: Bearish Classic Divergence detected at BB Upper. Waiting for momentum confirmation.")
+
 // ── Combined divergence ──
 anyBullDiv = classicBullDiv or hiddenBullDiv or quickBullDiv
 anyBearDiv = classicBearDiv or hiddenBearDiv or quickBearDiv
@@ -358,7 +564,7 @@ var int divScoreBear = 0
 
 divScoreBull := 0
 if classicBullDiv
-    divScoreBull += 2   // classic is strongest
+    divScoreBull += 3   // classic is strongest — weighted 3x
 if hiddenBullDiv
     divScoreBull += 1
 if quickBullDiv
@@ -367,10 +573,12 @@ if atBBLower
     divScoreBull += 1
 if volOK
     divScoreBull += 1
+if cdBullDepth >= 2.0
+    divScoreBull += 1   // deep CD = extra point
 
 divScoreBear := 0
 if classicBearDiv
-    divScoreBear += 2
+    divScoreBear += 3   // classic is strongest — weighted 3x
 if hiddenBearDiv
     divScoreBear += 1
 if quickBearDiv
@@ -379,6 +587,8 @@ if atBBUpper
     divScoreBear += 1
 if volOK
     divScoreBear += 1
+if cdBearDepth >= 2.0
+    divScoreBear += 1   // deep CD = extra point
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COOLDOWN
@@ -645,7 +855,7 @@ plot(lastPivotHigh, "Pivot High", color.new(#FF1744, 50), 1, plot.style_circles)
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════════════════
 
-var table dash = table.new(position.top_right, 2, 22,
+var table dash = table.new(position.top_right, 2, 30,
      bgcolor      = color.new(#0D1117, 5),
      border_color = color.new(#30363D, 0),
      border_width = 1)
@@ -670,7 +880,7 @@ if barstate.islast
     f_row(dash, 3, "Methods",   divMethods != "" ? divMethods : "—", color.yellow)
 
     scoreNow = anyBullDiv ? divScoreBull : anyBearDiv ? divScoreBear : 0
-    scoreStr = str.tostring(scoreNow) + "/6"
+    scoreStr = str.tostring(scoreNow) + "/8"
     scoreClr = scoreNow >= 4 ? color.green : scoreNow >= 2 ? color.yellow : color.gray
     f_row(dash, 4, "Score",     scoreStr, scoreClr)
 
@@ -706,7 +916,7 @@ if barstate.islast
     f_row(dash, 11, "Position",  posStr, posClr)
 
     f_row(dash, 12, "Div Type",  inLong or inShort ? divType : "—", color.yellow)
-    f_row(dash, 13, "Entry Score", inLong or inShort ? str.tostring(entryScore) + "/6" : "—", entryScore >= 4 ? color.green : color.yellow)
+    f_row(dash, 13, "Entry Score", inLong or inShort ? str.tostring(entryScore) + "/8" : "—", entryScore >= 4 ? color.green : color.yellow)
 
     // ── R Tracking ──
     rStr = inLong or inShort ? str.tostring(currentR, "#.1") + "R" : "—"
@@ -726,3 +936,31 @@ if barstate.islast
     // ── Performance ──
     f_row(dash, 20, "Win Rate",  str.tostring(winRate, "#.1") + "% (" + str.tostring(totalWins) + "W/" + str.tostring(totalLosses) + "L)", winRate >= 15 ? color.green : color.red)
     f_row(dash, 21, "Max DD",    str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)
+
+    // ── Classic Divergence Stats ──
+    f_row(dash, 22, "═══ CD STATS", "═══════", color.new(#58A6FF, 0))
+
+    cdNow = classicBullDiv and atBBLower ? "BULL CD" : classicBearDiv and atBBUpper ? "BEAR CD" : classicBullDiv ? "BULL (no BB)" : classicBearDiv ? "BEAR (no BB)" : "NONE"
+    cdNowClr = classicBullDiv and atBBLower ? color.lime : classicBearDiv and atBBUpper ? color.red : classicBullDiv or classicBearDiv ? color.yellow : color.gray
+    f_row(dash, 23, "CD Status",  cdNow, cdNowClr)
+
+    // CD depth / strength
+    cdDepthNow = classicBullDiv ? cdBullDepth : classicBearDiv ? cdBearDepth : 0.0
+    cdDepthStr = cdDepthNow > 0 ? str.tostring(cdDepthNow, "#.2") : "—"
+    cdDepthClr = cdDepthNow >= 3.0 ? color.lime : cdDepthNow >= 1.5 ? color.green : cdDepthNow > 0 ? color.yellow : color.gray
+    f_row(dash, 24, "CD Depth",   cdDepthStr, cdDepthClr)
+
+    // RSI pivot values
+    cdRsiStr = classicBullDiv ? str.tostring(rsiPL2, "#.0") + " → " + str.tostring(rsiPL1, "#.0") + " ↑" :
+         classicBearDiv ? str.tostring(rsiPH2, "#.0") + " → " + str.tostring(rsiPH1, "#.0") + " ↓" : "—"
+    f_row(dash, 25, "RSI Pivots", cdRsiStr, classicBullDiv ? color.green : classicBearDiv ? color.red : color.gray)
+
+    // Price pivot values
+    cdPxStr = classicBullDiv ? str.tostring(pxAtRsiPL2, "#.0") + " → " + str.tostring(pxAtRsiPL1, "#.0") + " ↓" :
+         classicBearDiv ? str.tostring(pxAtRsiPH2, "#.0") + " → " + str.tostring(pxAtRsiPH1, "#.0") + " ↑" : "—"
+    f_row(dash, 26, "Px Pivots",  cdPxStr, classicBullDiv ? color.green : classicBearDiv ? color.red : color.gray)
+
+    // CD signal history
+    f_row(dash, 27, "CD Signals", str.tostring(cdTotalSignals) + " (" + str.tostring(cdBullCount) + "B/" + str.tostring(cdBearCount) + "S)", color.white)
+    f_row(dash, 28, "CD Hit 3R",  str.tostring(cdTotalWins) + "/" + str.tostring(cdTotalSignals), cdHitRate >= 30 ? color.green : color.yellow)
+    f_row(dash, 29, "CD Hit Rate", str.tostring(cdHitRate, "#.0") + "%", cdHitRate >= 30 ? color.green : cdHitRate >= 15 ? color.yellow : color.red)
