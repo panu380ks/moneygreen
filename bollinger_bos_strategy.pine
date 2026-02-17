@@ -27,7 +27,7 @@ strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (directio
 
 // Session Time Filter
 use_session   = input.bool(true, "Use Session Time Filter", group="Session")
-session_time  = input.session("0800-2359", "Trading Session", group="Session", tooltip="Only allow entries during this time window (exchange timezone)")
+session_time  = input.session("0800-1200", "Trading Session", group="Session", tooltip="Only allow entries during this time window (exchange timezone)")
 
 // Risk Management
 use_sl        = input.bool(true, "Use Stop Loss", group="Risk Management")
@@ -150,7 +150,7 @@ if bos_confirm > 1 and bearish_bos
 // SESSION TIME FILTER
 // ──────────────────────────────────────────────────────────────────────────────
 
-in_session = not use_session or not na(time(timeframe.period, session_time))
+in_session = not use_session or not na(time("240", session_time))
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ENTRY CONDITIONS
