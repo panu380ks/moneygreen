@@ -114,17 +114,15 @@ in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "Am
 // ENTRY / EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
-// Supertrend trend filter (bypassed when use_st is false)
-st_long_ok  = not use_st or st_uptrend
-st_short_ok = not use_st or st_downtrend
+// Entry: Supertrend flips to green (uptrend) = open long
+// Exit:  Supertrend flips to red (downtrend) = close long
+long_entry  = allow_longs  and st_flip_up   and in_date and in_ny_session
+short_entry = allow_shorts and st_flip_down and in_date and in_ny_session
 
-long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session
-short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session
-
-// Exit long when price breaks down (lower low) or Supertrend flips to downtrend
-exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
-// Exit short when price breaks up (higher high) or Supertrend flips to uptrend
-exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
+// Exit long when Supertrend flips to downtrend (red)
+exit_long  = st_flip_down
+// Exit short when Supertrend flips to uptrend (green)
+exit_short = st_flip_up
 
 // --------------------------------------------------------------------------
 // STRATEGY EXECUTION
@@ -144,12 +142,12 @@ if short_entry
     tp_price_s = close * (1 - tp_pct / 100)
     strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s)
 
-// Signal-based exits -- trend reversal
+// Signal-based exits -- Supertrend flip
 if strategy.position_size > 0 and exit_long
-    strategy.close("Long", comment="Lower Low Breakdown")
+    strategy.close("Long", comment="ST Flip Down")
 
 if strategy.position_size < 0 and exit_short
-    strategy.close("Short", comment="Higher High Breakout")
+    strategy.close("Short", comment="ST Flip Up")
 
 // --------------------------------------------------------------------------
 // PLOTS
