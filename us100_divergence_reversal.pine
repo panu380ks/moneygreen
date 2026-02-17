@@ -1,17 +1,11 @@
-// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// This Pine Script™ indicator is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 
 //@version=5
-strategy("US100 Divergence Reversal | BB Extreme Sniper | Jan 2026",
-     overlay        = true,
-     initial_capital = 100000,
-     default_qty_type = strategy.percent_of_equity,
-     default_qty_value = 100,
-     commission_type = strategy.commission.percent,
-     commission_value = 0.02,
-     slippage       = 3,
-     pyramiding     = 0,
-     calc_on_every_tick = false)
+indicator("US100 Divergence Reversal | BB Extreme Sniper",
+     overlay          = true,
+     max_lines_count  = 500,
+     max_labels_count = 500)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HOW DIVERGENCE REVERSAL WORKS ON US100
@@ -21,7 +15,7 @@ strategy("US100 Divergence Reversal | BB Extreme Sniper | Jan 2026",
 // extreme while RSI diverges (price makes new low but RSI doesn't),
 // institutional money is already rotating. The reversal is coming.
 //
-// This strategy ONLY trades divergence setups — the highest R:R pattern.
+// This indicator ONLY signals divergence setups — the highest R:R pattern.
 // It uses 3 divergence detection methods at once:
 //
 //   1. CLASSIC RSI DIVERGENCE  — price vs RSI swing comparison
@@ -29,26 +23,11 @@ strategy("US100 Divergence Reversal | BB Extreme Sniper | Jan 2026",
 //   3. MULTI-TIMEFRAME DIV     — HTF divergence confirms LTF entry
 //
 // Each must occur at a Bollinger Band extreme with momentum shift.
-// SL goes at the structure pivot. TP scales out to 10R.
-//
-// US100 context: NAS trends hard and reverses hard. Divergences at
-// BB extremes catch the exact inflection points. The tight structure
-// stop + massive NAS moves = consistent 10R opportunities.
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BACKTEST WINDOW — January 2026
-// ═══════════════════════════════════════════════════════════════════════════
-
-i_btStart  = input.time(timestamp("2026-01-01 00:00 +0000"), "Backtest Start", group = "Backtest Window")
-i_btEnd    = input.time(timestamp("2026-01-31 23:59 +0000"), "Backtest End",   group = "Backtest Window")
-inBacktest = time >= i_btStart and time <= i_btEnd
+// SL goes at the structure pivot. TP levels scale out to 10R.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INPUTS — TUNED FOR US100
 // ═══════════════════════════════════════════════════════════════════════════
-
-// US100 is a high-beta momentum index. These defaults are optimized for
-// its typical volatility profile on 15m-1H timeframes.
 
 // ── R:R Target ──
 i_rrRatio    = input.float(10.0, "Risk:Reward Ratio (R)",         step = 0.5, minval = 2.0, group = "R:R Target")
@@ -72,15 +51,14 @@ i_bbMult     = input.float(2.0,  "BB StdDev",     step = 0.1,    group = "Bollin
 i_bbTouch    = input.float(0.005,"BB Proximity (%)", step = 0.001, group = "Bollinger Bands",
      tooltip = "How close price must be to BB band to count as 'at extreme'. 0.005 = within 0.5%.")
 
-// ── MACD Momentum Confirmation ──
+// ── MACD ──
 i_macdFast   = input.int(12,     "MACD Fast",                    group = "MACD")
 i_macdSlow   = input.int(26,     "MACD Slow",                    group = "MACD")
 i_macdSig    = input.int(9,      "MACD Signal",                  group = "MACD")
 
 // ── Volume ──
 i_volLen     = input.int(20,     "Volume MA Length",              group = "Volume")
-i_volMin     = input.float(1.0,  "Min Volume (x avg)",  step=0.1,group = "Volume",
-     tooltip = "Divergence entries require at least this volume. Default 1.0 (no filter). Raise to 1.3 for stricter.")
+i_volMin     = input.float(1.0,  "Min Volume (x avg)",  step=0.1,group = "Volume")
 
 // ── Trend EMAs ──
 i_emaFast    = input.int(9,      "EMA Fast",                     group = "Trend")
@@ -94,19 +72,15 @@ i_useHTFDiv  = input.bool(true,  "Require HTF Divergence Align", group = "HTF Di
 
 // ── Session ──
 i_useSess    = input.bool(true,  "Enable Session Filter",        group = "Session")
-i_sess       = input.session("1300-2100", "US100 Session (UTC)", group = "Session",
-     tooltip = "US market hours: 13:30-20:00 UTC. Wider window for pre/post moves.")
+i_sess       = input.session("1300-2100", "US100 Session (UTC)", group = "Session")
 
-// ── Scale Out ──
-i_tp1R       = input.float(3.0,  "TP1 at R",       step = 0.5,  group = "Scaling Out")
-i_tp1Pct     = input.float(30,   "TP1 Close %",    step = 5,    group = "Scaling Out")
-i_tp2R       = input.float(5.0,  "TP2 at R",       step = 0.5,  group = "Scaling Out")
-i_tp2Pct     = input.float(20,   "TP2 Close %",    step = 5,    group = "Scaling Out")
-i_tp3R       = input.float(7.0,  "TP3 at R",       step = 0.5,  group = "Scaling Out")
-i_tp3Pct     = input.float(15,   "TP3 Close %",    step = 5,    group = "Scaling Out")
+// ── Scale Out R Levels ──
+i_tp1R       = input.float(3.0,  "TP1 at R",       step = 0.5,  group = "R Levels")
+i_tp2R       = input.float(5.0,  "TP2 at R",       step = 0.5,  group = "R Levels")
+i_tp3R       = input.float(7.0,  "TP3 at R",       step = 0.5,  group = "R Levels")
 
 // ── Cooldown ──
-i_cooldown   = input.int(5,      "Cooldown Bars After Loss",     group = "Cooldown")
+i_cooldown   = input.int(5,      "Cooldown Bars After SL Hit",   group = "Cooldown")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CORE CALCULATIONS
@@ -134,12 +108,9 @@ bbDev   = ta.stdev(close, i_bbLen) * i_bbMult
 bbUpper = bbBasis + bbDev
 bbLower = bbBasis - bbDev
 
-// Price at BB extreme
 atBBLower = close <= bbLower * (1.0 + i_bbTouch)
 atBBUpper = close >= bbUpper * (1.0 - i_bbTouch)
-
-// How deep into BB? (for scoring)
-bbPctB = (close - bbLower) / (bbUpper - bbLower)
+bbPctB    = (close - bbLower) / (bbUpper - bbLower)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SWING STRUCTURE — TIGHT STOP PLACEMENT
@@ -159,10 +130,9 @@ if not na(pivotHigh)
 recentLow  = ta.lowest(low, i_lookback)
 recentHigh = ta.highest(high, i_lookback)
 
-// Structure SL: tighter of pivot vs lookback
-slBuffer        = atr * 0.1
-structSL_long   = not na(lastPivotLow)  and lastPivotLow  > recentLow  ? lastPivotLow  : recentLow
-structSL_short  = not na(lastPivotHigh) and lastPivotHigh < recentHigh ? lastPivotHigh : recentHigh
+slBuffer       = atr * 0.1
+structSL_long  = not na(lastPivotLow)  and lastPivotLow  > recentLow  ? lastPivotLow  : recentLow
+structSL_short = not na(lastPivotHigh) and lastPivotHigh < recentHigh ? lastPivotHigh : recentHigh
 
 longSL    = structSL_long  - slBuffer
 shortSL   = structSL_short + slBuffer
@@ -176,26 +146,16 @@ shortRiskOK = shortRisk > atr * i_minRisk and shortRisk < atr * i_maxRisk
 // DIVERGENCE ENGINE — 3 METHODS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── RSI Pivot Detection ──
 rsiPivotLow  = ta.pivotlow(rsi, i_divWindow, i_divWindow)
 rsiPivotHigh = ta.pivothigh(rsi, i_divWindow, i_divWindow)
 
-// Track last 2 RSI pivots and their bar indices
-var float rsiPL1 = na    // most recent RSI pivot low
-var float rsiPL2 = na    // previous RSI pivot low
-var int   rsiPLbar1 = 0
-var int   rsiPLbar2 = 0
+var float rsiPL1 = na,     var float rsiPL2 = na
+var int   rsiPLbar1 = 0,   var int   rsiPLbar2 = 0
+var float pxAtRsiPL1 = na, var float pxAtRsiPL2 = na
 
-var float rsiPH1 = na    // most recent RSI pivot high
-var float rsiPH2 = na    // previous RSI pivot high
-var int   rsiPHbar1 = 0
-var int   rsiPHbar2 = 0
-
-// Track price at RSI pivot points
-var float pxAtRsiPL1 = na
-var float pxAtRsiPL2 = na
-var float pxAtRsiPH1 = na
-var float pxAtRsiPH2 = na
+var float rsiPH1 = na,     var float rsiPH2 = na
+var int   rsiPHbar1 = 0,   var int   rsiPHbar2 = 0
+var float pxAtRsiPH1 = na, var float pxAtRsiPH2 = na
 
 if not na(rsiPivotLow)
     rsiPL2     := rsiPL1
@@ -213,78 +173,29 @@ if not na(rsiPivotHigh)
     rsiPHbar1  := bar_index
     pxAtRsiPH1 := high[i_divWindow]
 
-// ─────────────────────────────────────────────────────────────────────────
-// METHOD 1: CLASSIC (REGULAR) DIVERGENCE
-//
-// BULL: Price makes LOWER LOW but RSI makes HIGHER LOW
-//       → Selling pressure exhausted, reversal incoming
-// BEAR: Price makes HIGHER HIGH but RSI makes LOWER HIGH
-//       → Buying pressure exhausted, reversal incoming
-// ─────────────────────────────────────────────────────────────────────────
+// METHOD 1: CLASSIC DIVERGENCE
+classicBullDiv = not na(rsiPL2) and (bar_index - rsiPLbar2) < i_divMaxBars and pxAtRsiPL1 < pxAtRsiPL2 and rsiPL1 > rsiPL2
+classicBearDiv = not na(rsiPH2) and (bar_index - rsiPHbar2) < i_divMaxBars and pxAtRsiPH1 > pxAtRsiPH2 and rsiPH1 < rsiPH2
 
-classicBullDiv = not na(rsiPL2) and
-     (bar_index - rsiPLbar2) < i_divMaxBars and
-     pxAtRsiPL1 < pxAtRsiPL2 and
-     rsiPL1 > rsiPL2
+// METHOD 2: HIDDEN DIVERGENCE
+hiddenBullDiv = not na(rsiPL2) and (bar_index - rsiPLbar2) < i_divMaxBars and pxAtRsiPL1 > pxAtRsiPL2 and rsiPL1 < rsiPL2 and close > ema200
+hiddenBearDiv = not na(rsiPH2) and (bar_index - rsiPHbar2) < i_divMaxBars and pxAtRsiPH1 < pxAtRsiPH2 and rsiPH1 > rsiPH2 and close < ema200
 
-classicBearDiv = not na(rsiPH2) and
-     (bar_index - rsiPHbar2) < i_divMaxBars and
-     pxAtRsiPH1 > pxAtRsiPH2 and
-     rsiPH1 < rsiPH2
+// METHOD 3: QUICK DIVERGENCE
+qPriceLow1   = ta.lowest(low, 8),   qPriceLow2  = ta.lowest(low, 8)[8]
+qRsiLow1     = ta.lowest(rsi, 8),   qRsiLow2    = ta.lowest(rsi, 8)[8]
+quickBullDiv  = qPriceLow1 < qPriceLow2 and qRsiLow1 > qRsiLow2 and rsi < i_rsiOS + 10
 
-// ─────────────────────────────────────────────────────────────────────────
-// METHOD 2: HIDDEN DIVERGENCE (trend continuation)
-//
-// BULL: Price makes HIGHER LOW but RSI makes LOWER LOW
-//       → Pullback in uptrend, about to resume
-// BEAR: Price makes LOWER HIGH but RSI makes HIGHER HIGH
-//       → Pullback in downtrend, about to resume
-// ─────────────────────────────────────────────────────────────────────────
-
-hiddenBullDiv = not na(rsiPL2) and
-     (bar_index - rsiPLbar2) < i_divMaxBars and
-     pxAtRsiPL1 > pxAtRsiPL2 and
-     rsiPL1 < rsiPL2 and
-     close > ema200  // must be in uptrend
-
-hiddenBearDiv = not na(rsiPH2) and
-     (bar_index - rsiPHbar2) < i_divMaxBars and
-     pxAtRsiPH1 < pxAtRsiPH2 and
-     rsiPH1 > rsiPH2 and
-     close < ema200  // must be in downtrend
-
-// ─────────────────────────────────────────────────────────────────────────
-// METHOD 3: QUICK DIVERGENCE (8-bar rolling comparison)
-//
-// Simpler/faster detection — compares recent windows directly.
-// Good for catching divergences between confirmed pivots.
-// ─────────────────────────────────────────────────────────────────────────
-
-qPriceLow1  = ta.lowest(low, 8)
-qPriceLow2  = ta.lowest(low, 8)[8]
-qRsiLow1    = ta.lowest(rsi, 8)
-qRsiLow2    = ta.lowest(rsi, 8)[8]
-quickBullDiv = qPriceLow1 < qPriceLow2 and qRsiLow1 > qRsiLow2 and rsi < i_rsiOS + 10
-
-qPriceHi1   = ta.highest(high, 8)
-qPriceHi2   = ta.highest(high, 8)[8]
-qRsiHi1     = ta.highest(rsi, 8)
-qRsiHi2     = ta.highest(rsi, 8)[8]
-quickBearDiv = qPriceHi1 > qPriceHi2 and qRsiHi1 < qRsiHi2 and rsi > i_rsiOB - 10
+qPriceHi1    = ta.highest(high, 8), qPriceHi2   = ta.highest(high, 8)[8]
+qRsiHi1      = ta.highest(rsi, 8),  qRsiHi2     = ta.highest(rsi, 8)[8]
+quickBearDiv  = qPriceHi1 > qPriceHi2 and qRsiHi1 < qRsiHi2 and rsi > i_rsiOB - 10
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLASSIC DIVERGENCE VISUAL LINES
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// Draw lines on chart connecting the two price pivots that form
-// the classic divergence. Green = bullish CD, Red = bearish CD.
-// This makes every CD visually obvious on the chart.
 
-// Track price pivot bars for drawing lines
-var int   pxPLbar1 = 0
-var int   pxPLbar2 = 0
-var int   pxPHbar1 = 0
-var int   pxPHbar2 = 0
+var int pxPLbar1 = 0, var int pxPLbar2 = 0
+var int pxPHbar1 = 0, var int pxPHbar2 = 0
 
 if not na(rsiPivotLow)
     pxPLbar2 := pxPLbar1
@@ -294,15 +205,9 @@ if not na(rsiPivotHigh)
     pxPHbar2 := pxPHbar1
     pxPHbar1 := bar_index - i_divWindow
 
-// ── Draw Bullish CD Lines ──
-// Price line: connects the two lower lows (falling)
-// RSI is making higher lows — the divergence
-var line cdBullPriceLine = na
-var line cdBullSignalLine = na
-var label cdBullLabel = na
+var line cdBullPriceLine = na, var line cdBullSignalLine = na, var label cdBullLabel = na
 
 if classicBullDiv and atBBLower
-    // Delete old lines if they exist
     if not na(cdBullPriceLine)
         line.delete(cdBullPriceLine)
     if not na(cdBullSignalLine)
@@ -310,40 +215,13 @@ if classicBullDiv and atBBLower
     if not na(cdBullLabel)
         label.delete(cdBullLabel)
 
-    // Price line: connects the two swing lows (price going DOWN)
-    cdBullPriceLine := line.new(
-         x1     = pxPLbar2,
-         y1     = pxAtRsiPL2,
-         x2     = pxPLbar1,
-         y2     = pxAtRsiPL1,
-         color  = color.new(#00E676, 20),
-         width  = 2,
-         style  = line.style_solid)
+    cdBullPriceLine := line.new(pxPLbar2, pxAtRsiPL2, pxPLbar1, pxAtRsiPL1, color = color.new(#00E676, 20), width = 2, style = line.style_solid)
+    cdBullSignalLine := line.new(bar_index, close, bar_index, structSL_long, color = color.new(#00E676, 50), width = 1, style = line.style_dashed)
+    cdBullLabel := label.new(bar_index, low - atr * 0.5,
+         "BULL CD\nRSI: " + str.tostring(rsiPL2, "#.0") + " → " + str.tostring(rsiPL1, "#.0") + "\nPx: " + str.tostring(pxAtRsiPL2, "#.0") + " → " + str.tostring(pxAtRsiPL1, "#.0"),
+         style = label.style_label_up, color = color.new(#00E676, 20), textcolor = color.white, size = size.small)
 
-    // Signal line: dashed line from entry point down to SL zone
-    cdBullSignalLine := line.new(
-         x1     = bar_index,
-         y1     = close,
-         x2     = bar_index,
-         y2     = structSL_long,
-         color  = color.new(#00E676, 50),
-         width  = 1,
-         style  = line.style_dashed)
-
-    // Label showing divergence strength
-    cdBullLabel := label.new(
-         x          = bar_index,
-         y          = low - atr * 0.5,
-         text       = "BULL CD\nRSI: " + str.tostring(rsiPL2, "#.0") + " → " + str.tostring(rsiPL1, "#.0") + "\nPx: " + str.tostring(pxAtRsiPL2, "#.0") + " → " + str.tostring(pxAtRsiPL1, "#.0"),
-         style      = label.style_label_up,
-         color      = color.new(#00E676, 20),
-         textcolor  = color.white,
-         size       = size.small)
-
-// ── Draw Bearish CD Lines ──
-var line cdBearPriceLine = na
-var line cdBearSignalLine = na
-var label cdBearLabel = na
+var line cdBearPriceLine = na, var line cdBearSignalLine = na, var label cdBearLabel = na
 
 if classicBearDiv and atBBUpper
     if not na(cdBearPriceLine)
@@ -353,85 +231,40 @@ if classicBearDiv and atBBUpper
     if not na(cdBearLabel)
         label.delete(cdBearLabel)
 
-    // Price line: connects the two swing highs (price going UP)
-    cdBearPriceLine := line.new(
-         x1     = pxPHbar2,
-         y1     = pxAtRsiPH2,
-         x2     = pxPHbar1,
-         y2     = pxAtRsiPH1,
-         color  = color.new(#FF1744, 20),
-         width  = 2,
-         style  = line.style_solid)
-
-    // Signal line: dashed up to SL zone
-    cdBearSignalLine := line.new(
-         x1     = bar_index,
-         y1     = close,
-         x2     = bar_index,
-         y2     = structSL_short,
-         color  = color.new(#FF1744, 50),
-         width  = 1,
-         style  = line.style_dashed)
-
-    cdBearLabel := label.new(
-         x          = bar_index,
-         y          = high + atr * 0.5,
-         text       = "BEAR CD\nRSI: " + str.tostring(rsiPH2, "#.0") + " → " + str.tostring(rsiPH1, "#.0") + "\nPx: " + str.tostring(pxAtRsiPH2, "#.0") + " → " + str.tostring(pxAtRsiPH1, "#.0"),
-         style      = label.style_label_down,
-         color      = color.new(#FF1744, 20),
-         textcolor  = color.white,
-         size       = size.small)
+    cdBearPriceLine := line.new(pxPHbar2, pxAtRsiPH2, pxPHbar1, pxAtRsiPH1, color = color.new(#FF1744, 20), width = 2, style = line.style_solid)
+    cdBearSignalLine := line.new(bar_index, close, bar_index, structSL_short, color = color.new(#FF1744, 50), width = 1, style = line.style_dashed)
+    cdBearLabel := label.new(bar_index, high + atr * 0.5,
+         "BEAR CD\nRSI: " + str.tostring(rsiPH2, "#.0") + " → " + str.tostring(rsiPH1, "#.0") + "\nPx: " + str.tostring(pxAtRsiPH2, "#.0") + " → " + str.tostring(pxAtRsiPH1, "#.0"),
+         style = label.style_label_down, color = color.new(#FF1744, 20), textcolor = color.white, size = size.small)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CLASSIC DIVERGENCE DEPTH MEASUREMENT
+// CD DEPTH MEASUREMENT
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// Measures HOW STRONG the divergence is:
-// - RSI gap:   difference between the two RSI pivots (bigger = stronger)
-// - Price gap: difference between the two price pivots
-// - Depth ratio: RSI gap / Price gap normalized — higher = better setup
 
-cdBullRSIGap  = classicBullDiv ? rsiPL1 - rsiPL2 : 0.0
-cdBullPxGap   = classicBullDiv ? pxAtRsiPL2 - pxAtRsiPL1 : 0.0
-cdBullDepth   = classicBullDiv and cdBullPxGap > 0 ? cdBullRSIGap / (cdBullPxGap / atr) : 0.0
+cdBullRSIGap = classicBullDiv ? rsiPL1 - rsiPL2 : 0.0
+cdBullPxGap  = classicBullDiv ? pxAtRsiPL2 - pxAtRsiPL1 : 0.0
+cdBullDepth  = classicBullDiv and cdBullPxGap > 0 ? cdBullRSIGap / (cdBullPxGap / atr) : 0.0
 
-cdBearRSIGap  = classicBearDiv ? rsiPH2 - rsiPH1 : 0.0
-cdBearPxGap   = classicBearDiv ? pxAtRsiPH1 - pxAtRsiPH2 : 0.0
-cdBearDepth   = classicBearDiv and cdBearPxGap > 0 ? cdBearRSIGap / (cdBearPxGap / atr) : 0.0
+cdBearRSIGap = classicBearDiv ? rsiPH2 - rsiPH1 : 0.0
+cdBearPxGap  = classicBearDiv ? pxAtRsiPH1 - pxAtRsiPH2 : 0.0
+cdBearDepth  = classicBearDiv and cdBearPxGap > 0 ? cdBearRSIGap / (cdBearPxGap / atr) : 0.0
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CLASSIC DIVERGENCE HISTORY TRACKER
+// CD HISTORY TRACKER
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// Counts total classic divergences detected and how many led to reversals.
-// "Led to reversal" = price moved at least 3R in the divergence direction
-// within 20 bars of the CD signal.
 
-var int cdBullCount  = 0
-var int cdBearCount  = 0
-var int cdBullWins   = 0
-var int cdBearWins   = 0
+var int cdBullCount = 0, var int cdBearCount = 0
+var int cdBullWins  = 0, var int cdBearWins  = 0
 
-// Track active CD signals
-var bool  cdBullActive   = false
-var float cdBullEntryPx  = na
-var float cdBullTarget   = na
-var int   cdBullEntryBar = 0
+var bool  cdBullActive = false, var float cdBullTarget = na, var int cdBullEntryBar = 0
+var bool  cdBearActive = false, var float cdBearTarget = na, var int cdBearEntryBar = 0
 
-var bool  cdBearActive   = false
-var float cdBearEntryPx  = na
-var float cdBearTarget   = na
-var int   cdBearEntryBar = 0
-
-// New bullish CD detected at BB lower
 if classicBullDiv and atBBLower and not classicBullDiv[1]
     cdBullCount  += 1
     cdBullActive := true
-    cdBullEntryPx := close
-    cdBullTarget  := close + longRisk * 3
+    cdBullTarget := close + longRisk * 3
     cdBullEntryBar := bar_index
 
-// Check if bullish CD hit target
 if cdBullActive
     if high >= cdBullTarget
         cdBullWins   += 1
@@ -439,12 +272,10 @@ if cdBullActive
     else if bar_index - cdBullEntryBar > 20
         cdBullActive := false
 
-// New bearish CD detected at BB upper
 if classicBearDiv and atBBUpper and not classicBearDiv[1]
     cdBearCount  += 1
     cdBearActive := true
-    cdBearEntryPx := close
-    cdBearTarget  := close - shortRisk * 3
+    cdBearTarget := close - shortRisk * 3
     cdBearEntryBar := bar_index
 
 if cdBearActive
@@ -458,40 +289,16 @@ cdTotalSignals = cdBullCount + cdBearCount
 cdTotalWins    = cdBullWins + cdBearWins
 cdHitRate      = cdTotalSignals > 0 ? cdTotalWins / cdTotalSignals * 100 : 0.0
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CLASSIC DIVERGENCE ALERTS
-// ═══════════════════════════════════════════════════════════════════════════
-
-alertcondition(classicBullDiv and atBBLower and momBull,
-     title = "Bull CD at BB Lower",
-     message = "US100: Bullish Classic Divergence at BB Lower Band — RSI rising while price making lower lows. Momentum confirming turn.")
-
-alertcondition(classicBearDiv and atBBUpper and momBear,
-     title = "Bear CD at BB Upper",
-     message = "US100: Bearish Classic Divergence at BB Upper Band — RSI falling while price making higher highs. Momentum confirming turn.")
-
-alertcondition(classicBullDiv and atBBLower,
-     title = "Bull CD Detected (any)",
-     message = "US100: Bullish Classic Divergence detected at BB Lower. Waiting for momentum confirmation.")
-
-alertcondition(classicBearDiv and atBBUpper,
-     title = "Bear CD Detected (any)",
-     message = "US100: Bearish Classic Divergence detected at BB Upper. Waiting for momentum confirmation.")
-
 // ── Combined divergence ──
 anyBullDiv = classicBullDiv or hiddenBullDiv or quickBullDiv
 anyBearDiv = classicBearDiv or hiddenBearDiv or quickBearDiv
 
 // ═══════════════════════════════════════════════════════════════════════════
-// HTF DIVERGENCE — MULTI-TIMEFRAME CONFIRMATION
+// HTF DIVERGENCE
 // ═══════════════════════════════════════════════════════════════════════════
 
-htfRSI       = request.security(syminfo.tickerid, i_htfTF, ta.rsi(close, i_htfRSI), lookahead = barmerge.lookahead_off)
-htfClose     = request.security(syminfo.tickerid, i_htfTF, close, lookahead = barmerge.lookahead_off)
-htfLow       = request.security(syminfo.tickerid, i_htfTF, low, lookahead = barmerge.lookahead_off)
-htfHigh      = request.security(syminfo.tickerid, i_htfTF, high, lookahead = barmerge.lookahead_off)
+htfRSI    = request.security(syminfo.tickerid, i_htfTF, ta.rsi(close, i_htfRSI), lookahead = barmerge.lookahead_off)
 
-// HTF quick divergence
 htfPxLo1  = request.security(syminfo.tickerid, i_htfTF, ta.lowest(low, 5), lookahead = barmerge.lookahead_off)
 htfPxLo2  = request.security(syminfo.tickerid, i_htfTF, ta.lowest(low, 5)[5], lookahead = barmerge.lookahead_off)
 htfRsiLo1 = request.security(syminfo.tickerid, i_htfTF, ta.lowest(ta.rsi(close, i_htfRSI), 5), lookahead = barmerge.lookahead_off)
@@ -502,10 +309,8 @@ htfPxHi2  = request.security(syminfo.tickerid, i_htfTF, ta.highest(high, 5)[5], 
 htfRsiHi1 = request.security(syminfo.tickerid, i_htfTF, ta.highest(ta.rsi(close, i_htfRSI), 5), lookahead = barmerge.lookahead_off)
 htfRsiHi2 = request.security(syminfo.tickerid, i_htfTF, ta.highest(ta.rsi(close, i_htfRSI), 5)[5], lookahead = barmerge.lookahead_off)
 
-htfBullDiv = htfPxLo1 < htfPxLo2 and htfRsiLo1 > htfRsiLo2
-htfBearDiv = htfPxHi1 > htfPxHi2 and htfRsiHi1 < htfRsiHi2
-
-// Also count HTF as aligned if RSI is in OS/OB territory and turning
+htfBullDiv   = htfPxLo1 < htfPxLo2 and htfRsiLo1 > htfRsiLo2
+htfBearDiv   = htfPxHi1 > htfPxHi2 and htfRsiHi1 < htfRsiHi2
 htfBullAlign = htfBullDiv or htfRSI < 35 or (htfRSI > htfRSI[1] and htfRSI < 45)
 htfBearAlign = htfBearDiv or htfRSI > 65 or (htfRSI < htfRSI[1] and htfRSI > 55)
 
@@ -513,25 +318,14 @@ htfOK_bull = not i_useHTFDiv or htfBullAlign
 htfOK_bear = not i_useHTFDiv or htfBearAlign
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MOMENTUM CONFIRMATION — THE TIMING TRIGGER
+// MOMENTUM CONFIRMATION
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// Divergence tells us a reversal is FORMING.
-// Momentum tells us it's STARTING. We need both.
 
-// MACD histogram turning (momentum shifting)
-macdTurningBull = hist > hist[1] and hist[1] <= hist[2]  // histogram bottomed, now rising
-macdTurningBear = hist < hist[1] and hist[1] >= hist[2]  // histogram topped, now falling
+macdTurningBull = hist > hist[1] and hist[1] <= hist[2]
+macdTurningBear = hist < hist[1] and hist[1] >= hist[2]
+macdCrossBull   = ta.crossover(macdLine, signalLine)
+macdCrossBear   = ta.crossunder(macdLine, signalLine)
 
-// MACD line cross
-macdCrossBull = ta.crossover(macdLine, signalLine)
-macdCrossBear = ta.crossunder(macdLine, signalLine)
-
-// RSI turning from extreme
-rsiTurningBull = rsi > rsi[1] and rsi[1] <= rsi[2] and rsi < i_rsiOS + 20
-rsiTurningBear = rsi < rsi[1] and rsi[1] >= rsi[2] and rsi > i_rsiOB - 20
-
-// Combined momentum confirmation
 momBull = (macdTurningBull or macdCrossBull) and rsi > rsi[1]
 momBear = (macdTurningBear or macdCrossBear) and rsi < rsi[1]
 
@@ -539,32 +333,21 @@ momBear = (macdTurningBear or macdCrossBear) and rsi < rsi[1]
 // CANDLE CONFIRMATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-bodySize    = math.abs(close - open)
-bullEngulf  = close > open and bodySize > atr * 0.3
-bearEngulf  = close < open and bodySize > atr * 0.3
-
-// Rejection wick (for reversals at BB extreme)
-lowerWick   = math.min(open, close) - low
-upperWick   = high - math.max(open, close)
-bullReject  = lowerWick > bodySize * 1.5 and close > open  // hammer-like
-bearReject  = upperWick > bodySize * 1.5 and close < open  // shooting star
-
-bullCandle  = bullEngulf or bullReject
-bearCandle  = bearEngulf or bearReject
+bodySize   = math.abs(close - open)
+lowerWick  = math.min(open, close) - low
+upperWick  = high - math.max(open, close)
+bullCandle = (close > open and bodySize > atr * 0.3) or (lowerWick > bodySize * 1.5 and close > open)
+bearCandle = (close < open and bodySize > atr * 0.3) or (upperWick > bodySize * 1.5 and close < open)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DIVERGENCE QUALITY SCORING
+// DIVERGENCE QUALITY SCORING (max 8)
 // ═══════════════════════════════════════════════════════════════════════════
-//
-// Score 1-5 based on how many confirmations align.
-// Higher score = higher probability reversal.
 
-var int divScoreBull = 0
-var int divScoreBear = 0
+var int divScoreBull = 0, var int divScoreBear = 0
 
 divScoreBull := 0
 if classicBullDiv
-    divScoreBull += 3   // classic is strongest — weighted 3x
+    divScoreBull += 3
 if hiddenBullDiv
     divScoreBull += 1
 if quickBullDiv
@@ -574,11 +357,11 @@ if atBBLower
 if volOK
     divScoreBull += 1
 if cdBullDepth >= 2.0
-    divScoreBull += 1   // deep CD = extra point
+    divScoreBull += 1
 
 divScoreBear := 0
 if classicBearDiv
-    divScoreBear += 3   // classic is strongest — weighted 3x
+    divScoreBear += 3
 if hiddenBearDiv
     divScoreBear += 1
 if quickBearDiv
@@ -588,50 +371,13 @@ if atBBUpper
 if volOK
     divScoreBear += 1
 if cdBearDepth >= 2.0
-    divScoreBear += 1   // deep CD = extra point
+    divScoreBear += 1
 
 // ═══════════════════════════════════════════════════════════════════════════
-// COOLDOWN
+// MANUAL POSITION STATE (replaces strategy.*)
 // ═══════════════════════════════════════════════════════════════════════════
 
-var int barsSinceSL = 999
-wasInTrade = strategy.position_size[1] != 0
-nowFlat    = strategy.position_size == 0
-gotClosed  = wasInTrade and nowFlat and strategy.closedtrades > 0
-
-if gotClosed
-    pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
-    if pnl < 0
-        barsSinceSL := 0
-
-if barsSinceSL < 999
-    barsSinceSL += 1
-
-cooldownOK = barsSinceSL > i_cooldown
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ENTRY — DIVERGENCE AT BB EXTREME + MOMENTUM SHIFT
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// All 4 must align:
-//   1. RSI divergence detected (any method)
-//   2. Price at Bollinger Band extreme
-//   3. Momentum confirming the turn (MACD + RSI turning)
-//   4. Structure stop is valid (not too tight, not too wide)
-
-longEntry  = anyBullDiv and atBBLower and momBull and bullCandle and longRiskOK and inSession and cooldownOK and htfOK_bull and inBacktest
-shortEntry = anyBearDiv and atBBUpper and momBear and bearCandle and shortRiskOK and inSession and cooldownOK and htfOK_bear and inBacktest
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ENTRY TYPE TRACKING
-// ═══════════════════════════════════════════════════════════════════════════
-
-var string divType = ""
-
-// ═══════════════════════════════════════════════════════════════════════════
-// POSITION MANAGEMENT
-// ═══════════════════════════════════════════════════════════════════════════
-
+var int   posDir     = 0      // 0=flat, 1=long, -1=short
 var float entryPrice = na
 var float slPrice    = na
 var float tp1Price   = na
@@ -644,13 +390,28 @@ var bool  tp1Hit     = false
 var bool  tp2Hit     = false
 var bool  tp3Hit     = false
 var int   entryScore = 0
+var string divType   = ""
 
-flat    = strategy.position_size == 0
-inLong  = strategy.position_size > 0
-inShort = strategy.position_size < 0
+var int   totalWins   = 0
+var int   totalLosses = 0
+var int   barsSinceSL = 999
+
+flat    = posDir == 0
+inLong  = posDir == 1
+inShort = posDir == -1
+
+cooldownOK = barsSinceSL > i_cooldown
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+longSignal  = anyBullDiv and atBBLower and momBull and bullCandle and longRiskOK  and inSession and cooldownOK and htfOK_bull
+shortSignal = anyBearDiv and atBBUpper and momBear and bearCandle and shortRiskOK and inSession and cooldownOK and htfOK_bear
 
 // ── Long Entry ──
-if longEntry and flat
+if longSignal and flat
+    posDir     := 1
     entryPrice := close
     riskDist   := longRisk
     slPrice    := longSL
@@ -664,10 +425,10 @@ if longEntry and flat
     tp3Hit     := false
     entryScore := divScoreBull
     divType    := classicBullDiv ? "Classic" : hiddenBullDiv ? "Hidden" : "Quick"
-    strategy.entry("DivLong", strategy.long)
 
 // ── Short Entry ──
-if shortEntry and flat
+if shortSignal and flat
+    posDir     := -1
     entryPrice := close
     riskDist   := shortRisk
     slPrice    := shortSL
@@ -681,165 +442,164 @@ if shortEntry and flat
     tp3Hit     := false
     entryScore := divScoreBear
     divType    := classicBearDiv ? "Classic" : hiddenBearDiv ? "Hidden" : "Quick"
-    strategy.entry("DivShort", strategy.short)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// EXIT LOGIC — SCALE OUT TO 10R
-//
-// TP1 at 3R  → close 30%, SL to breakeven
-// TP2 at 5R  → close 20%, SL to 2R profit
-// TP3 at 7R  → close 15%, SL to 4R profit
-// 10R target → close remaining 35% OR trail it
+// EXIT TRACKING — TP hits & SL hits by price action
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── TP1: 3R ──
-if inLong and not tp1Hit
-    strategy.exit("TP1", "DivLong", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
-    if high >= tp1Price
-        tp1Hit  := true
-        slPrice := entryPrice
+// ── Long Position ──
+if inLong
+    // SL hit
+    if low <= slPrice
+        posDir      := 0
+        totalLosses += tp1Hit ? 0 : 1
+        totalWins   += tp1Hit ? 1 : 0
+        barsSinceSL := tp1Hit ? barsSinceSL : 0
 
-if inShort and not tp1Hit
-    strategy.exit("TP1", "DivShort", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
-    if low <= tp1Price
+    // TP1: 3R
+    if posDir == 1 and not tp1Hit and high >= tp1Price
         tp1Hit  := true
-        slPrice := entryPrice
+        slPrice := entryPrice  // breakeven
 
-// ── TP2: 5R ──
-if inLong and tp1Hit and not tp2Hit
-    strategy.exit("TP2", "DivLong", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
-    if high >= tp2Price
+    // TP2: 5R
+    if posDir == 1 and tp1Hit and not tp2Hit and high >= tp2Price
         tp2Hit  := true
         slPrice := entryPrice + riskDist * 2
 
-if inShort and tp1Hit and not tp2Hit
-    strategy.exit("TP2", "DivShort", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
-    if low <= tp2Price
-        tp2Hit  := true
-        slPrice := entryPrice - riskDist * 2
-
-// ── TP3: 7R ──
-if inLong and tp2Hit and not tp3Hit
-    strategy.exit("TP3", "DivLong", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
-    if high >= tp3Price
+    // TP3: 7R
+    if posDir == 1 and tp2Hit and not tp3Hit and high >= tp3Price
         tp3Hit  := true
         slPrice := entryPrice + riskDist * 4
 
-if inShort and tp2Hit and not tp3Hit
-    strategy.exit("TP3", "DivShort", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
-    if low <= tp3Price
+    // 10R target
+    if posDir == 1 and high >= tp10RPrice
+        posDir    := 0
+        totalWins += 1
+
+    // Ratchet trail
+    if posDir == 1 and tp3Hit
+        newTrail  = close - atr * 1.0
+        lockMin   = entryPrice + riskDist * 6
+        candidate = math.max(newTrail, lockMin)
+        if candidate > trailStop
+            trailStop := candidate
+        if low <= trailStop
+            posDir    := 0
+            totalWins += 1
+    else if posDir == 1 and tp1Hit
+        newTrail = close - atr * 1.5
+        if newTrail > trailStop
+            trailStop := newTrail
+
+// ── Short Position ──
+if inShort
+    // SL hit
+    if high >= slPrice
+        posDir      := 0
+        totalLosses += tp1Hit ? 0 : 1
+        totalWins   += tp1Hit ? 1 : 0
+        barsSinceSL := tp1Hit ? barsSinceSL : 0
+
+    // TP1
+    if posDir == -1 and not tp1Hit and low <= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+    // TP2
+    if posDir == -1 and tp1Hit and not tp2Hit and low <= tp2Price
+        tp2Hit  := true
+        slPrice := entryPrice - riskDist * 2
+
+    // TP3
+    if posDir == -1 and tp2Hit and not tp3Hit and low <= tp3Price
         tp3Hit  := true
         slPrice := entryPrice - riskDist * 4
 
-// ── 10R Runner + Trail ──
-if inLong and tp3Hit
-    newTrail   = close - atr * 1.0
-    lockMin    = entryPrice + riskDist * 6
-    candidate  = math.max(newTrail, lockMin)
-    if candidate > trailStop
-        trailStop := candidate
-    effectiveStop = math.max(slPrice, trailStop)
-    strategy.exit("10R", "DivLong", limit = tp10RPrice, stop = effectiveStop)
+    // 10R
+    if posDir == -1 and low <= tp10RPrice
+        posDir    := 0
+        totalWins += 1
 
-if inShort and tp3Hit
-    newTrail   = close + atr * 1.0
-    lockMin    = entryPrice - riskDist * 6
-    candidate  = math.min(newTrail, lockMin)
-    if candidate < trailStop
-        trailStop := candidate
-    effectiveStop = math.min(slPrice, trailStop)
-    strategy.exit("10R", "DivShort", limit = tp10RPrice, stop = effectiveStop)
+    // Trail
+    if posDir == -1 and tp3Hit
+        newTrail  = close + atr * 1.0
+        lockMin   = entryPrice - riskDist * 6
+        candidate = math.min(newTrail, lockMin)
+        if candidate < trailStop
+            trailStop := candidate
+        if high >= trailStop
+            posDir    := 0
+            totalWins += 1
+    else if posDir == -1 and tp1Hit
+        newTrail = close + atr * 1.5
+        if newTrail < trailStop
+            trailStop := newTrail
 
-// ── Ratchet trail after TP1 ──
-if inLong and tp1Hit and not tp3Hit
-    newTrail = close - atr * 1.5
-    if newTrail > trailStop
-        trailStop := newTrail
+// ── Session end close ──
+if i_useSess and not inSession and posDir != 0
+    if posDir == 1
+        totalWins += close > entryPrice ? 1 : 0
+        totalLosses += close <= entryPrice ? 1 : 0
+    else
+        totalWins += close < entryPrice ? 1 : 0
+        totalLosses += close >= entryPrice ? 1 : 0
+    posDir := 0
 
-if inShort and tp1Hit and not tp3Hit
-    newTrail = close + atr * 1.5
-    if newTrail < trailStop
-        trailStop := newTrail
+// Update flat/inLong/inShort after exits
+flat    := posDir == 0
+inLong  := posDir == 1
+inShort := posDir == -1
 
-// ── Session End ──
-if i_useSess and not inSession
-    if inLong
-        strategy.close("DivLong",  comment = "Session End")
-    if inShort
-        strategy.close("DivShort", comment = "Session End")
-
-// ── Backtest End ──
-if not inBacktest and (inLong or inShort)
-    strategy.close_all(comment = "Backtest End")
+if barsSinceSL < 999
+    barsSinceSL += 1
 
 // ═══════════════════════════════════════════════════════════════════════════
-// R MULTIPLE TRACKING
+// R MULTIPLE
 // ═══════════════════════════════════════════════════════════════════════════
 
 currentR = 0.0
-if inLong  and riskDist > 0
+if inLong and riskDist > 0
     currentR := (close - entryPrice) / riskDist
 if inShort and riskDist > 0
     currentR := (entryPrice - close) / riskDist
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PERFORMANCE TRACKING
-// ═══════════════════════════════════════════════════════════════════════════
-
-var int   totalWins    = 0
-var int   totalLosses  = 0
-var float peakEq       = 100000.0
-var float maxDD        = 0.0
-
-if gotClosed and strategy.closedtrades > 0
-    lastPnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
-    if lastPnl > 0
-        totalWins += 1
-    else
-        totalLosses += 1
-
-if strategy.equity > peakEq
-    peakEq := strategy.equity
-dd = (peakEq - strategy.equity) / peakEq * 100
-if dd > maxDD
-    maxDD := dd
 
 winRate     = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) * 100 : 0.0
 totalTrades = totalWins + totalLosses
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+alertcondition(longSignal and flat,  title = "DIV LONG Signal",  message = "US100: Bullish Divergence Reversal at BB Lower — all confirmations aligned.")
+alertcondition(shortSignal and flat, title = "DIV SHORT Signal", message = "US100: Bearish Divergence Reversal at BB Upper — all confirmations aligned.")
+alertcondition(classicBullDiv and atBBLower, title = "Bull CD at BB Lower", message = "US100: Classic Bullish Divergence at BB Lower Band detected.")
+alertcondition(classicBearDiv and atBBUpper, title = "Bear CD at BB Upper", message = "US100: Classic Bearish Divergence at BB Upper Band detected.")
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PLOTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// EMAs
-plot(emaFast,  "EMA 9",    color.new(#2962FF, 0),   1)
-plot(emaSlow,  "EMA 21",   color.new(#E91E63, 0),   1)
-plot(ema200,   "EMA 200",  color.new(#FFFFFF, 60),   2)
+plot(emaFast,  "EMA 9",   color.new(#2962FF, 0), 1)
+plot(emaSlow,  "EMA 21",  color.new(#E91E63, 0), 1)
+plot(ema200,   "EMA 200", color.new(#FFFFFF, 60), 2)
 
-// Bollinger Bands
 p_bbUp  = plot(bbUpper, "BB Upper", color.new(#787B86, 40), 1)
 p_bbLow = plot(bbLower, "BB Lower", color.new(#787B86, 40), 1)
 plot(bbBasis, "BB Mid", color.new(#787B86, 70), 1, plot.style_circles)
 fill(p_bbUp, p_bbLow, color.new(#787B86, 93))
 
-// BB Extreme Zones
 bgcolor(atBBLower ? color.new(#00E676, 92) : atBBUpper ? color.new(#FF1744, 92) : na)
 
-// Divergence markers — show all detected divergences, not just entries
-plotshape(classicBullDiv and atBBLower, "Classic Bull Div", shape.diamond, location.belowbar, color.new(#00E676, 0),  size = size.small, text = "CD")
-plotshape(classicBearDiv and atBBUpper, "Classic Bear Div", shape.diamond, location.abovebar, color.new(#FF1744, 0),  size = size.small, text = "CD")
+plotshape(classicBullDiv and atBBLower, "CD Bull", shape.diamond, location.belowbar, color.new(#00E676, 0), size = size.small, text = "CD")
+plotshape(classicBearDiv and atBBUpper, "CD Bear", shape.diamond, location.abovebar, color.new(#FF1744, 0), size = size.small, text = "CD")
+plotshape(hiddenBullDiv and atBBLower,  "HD Bull", shape.diamond, location.belowbar, color.new(#00BCD4, 0), size = size.tiny, text = "HD")
+plotshape(hiddenBearDiv and atBBUpper,  "HD Bear", shape.diamond, location.abovebar, color.new(#FF9800, 0), size = size.tiny, text = "HD")
+plotshape(quickBullDiv and atBBLower,   "QD Bull", shape.diamond, location.belowbar, color.new(#7C4DFF, 30), size = size.tiny, text = "QD")
+plotshape(quickBearDiv and atBBUpper,   "QD Bear", shape.diamond, location.abovebar, color.new(#E040FB, 30), size = size.tiny, text = "QD")
 
-plotshape(hiddenBullDiv and atBBLower, "Hidden Bull Div",  shape.diamond, location.belowbar, color.new(#00BCD4, 0),  size = size.tiny, text = "HD")
-plotshape(hiddenBearDiv and atBBUpper, "Hidden Bear Div",  shape.diamond, location.abovebar, color.new(#FF9800, 0),  size = size.tiny, text = "HD")
+plotshape(longSignal  and flat, "DIV LONG",  shape.triangleup,   location.belowbar, color.new(#00E676, 0), size = size.normal, text = "DIV\nLONG")
+plotshape(shortSignal and flat, "DIV SHORT", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.normal, text = "DIV\nSHORT")
 
-plotshape(quickBullDiv and atBBLower, "Quick Bull Div",   shape.diamond, location.belowbar, color.new(#7C4DFF, 30), size = size.tiny, text = "QD")
-plotshape(quickBearDiv and atBBUpper, "Quick Bear Div",   shape.diamond, location.abovebar, color.new(#E040FB, 30), size = size.tiny, text = "QD")
-
-// Entry arrows — confirmed entries only
-plotshape(longEntry  and flat, "DIV LONG",  shape.triangleup,   location.belowbar, color.new(#00E676, 0), size = size.normal, text = "DIV\nLONG")
-plotshape(shortEntry and flat, "DIV SHORT", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.normal, text = "DIV\nSHORT")
-
-// Trade levels
 plot(inLong or inShort ? slPrice : na,    "Stop",  color.new(#FF1744, 0), 2, plot.style_cross)
 plot(inLong or inShort ? tp1Price : na,   "3R",    color.new(#FFEB3B, 0), 1, plot.style_cross)
 plot(inLong or inShort ? tp2Price : na,   "5R",    color.new(#FF9800, 0), 1, plot.style_cross)
@@ -847,7 +607,6 @@ plot(inLong or inShort ? tp3Price : na,   "7R",    color.new(#FF6D00, 0), 1, plo
 plot(inLong or inShort ? tp10RPrice : na, "10R",   color.new(#00E676, 0), 2, plot.style_circles)
 plot(tp1Hit and (inLong or inShort) ? trailStop : na, "Trail", color.new(#FFAB00, 40), 1, plot.style_stepline)
 
-// Structure pivots
 plot(lastPivotLow,  "Pivot Low",  color.new(#00E676, 50), 1, plot.style_circles)
 plot(lastPivotHigh, "Pivot High", color.new(#FF1744, 50), 1, plot.style_circles)
 
@@ -856,111 +615,72 @@ plot(lastPivotHigh, "Pivot High", color.new(#FF1744, 50), 1, plot.style_circles)
 // ═══════════════════════════════════════════════════════════════════════════
 
 var table dash = table.new(position.top_right, 2, 30,
-     bgcolor      = color.new(#0D1117, 5),
-     border_color = color.new(#30363D, 0),
-     border_width = 1)
+     bgcolor = color.new(#0D1117, 5), border_color = color.new(#30363D, 0), border_width = 1)
 
 f_row(tbl, r, lbl, val, clr) =>
     table.cell(tbl, 0, r, lbl, text_color = color.new(#8B949E, 0), text_size = size.small)
     table.cell(tbl, 1, r, val, text_color = clr, text_size = size.small)
 
 if barstate.islast
-    // ── Header ──
     f_row(dash, 0, "DIV REVERSAL", "US100", color.aqua)
-    f_row(dash, 1, "Backtest",     "JAN 2026", color.new(#58A6FF, 0))
+    f_row(dash, 1, "Mode",         "INDICATOR", color.new(#58A6FF, 0))
 
-    // ── Divergence Status ──
     divStatus = anyBullDiv and atBBLower ? "BULL DIV" : anyBearDiv and atBBUpper ? "BEAR DIV" : "NONE"
     divClr    = anyBullDiv and atBBLower ? color.green : anyBearDiv and atBBUpper ? color.red : color.gray
     f_row(dash, 2, "Divergence", divStatus, divClr)
 
-    divMethods = (classicBullDiv or classicBearDiv ? "C" : "") +
-         (hiddenBullDiv or hiddenBearDiv ? "H" : "") +
-         (quickBullDiv or quickBearDiv ? "Q" : "")
-    f_row(dash, 3, "Methods",   divMethods != "" ? divMethods : "—", color.yellow)
+    divMethods = (classicBullDiv or classicBearDiv ? "C" : "") + (hiddenBullDiv or hiddenBearDiv ? "H" : "") + (quickBullDiv or quickBearDiv ? "Q" : "")
+    f_row(dash, 3, "Methods", divMethods != "" ? divMethods : "—", color.yellow)
 
     scoreNow = anyBullDiv ? divScoreBull : anyBearDiv ? divScoreBear : 0
-    scoreStr = str.tostring(scoreNow) + "/8"
-    scoreClr = scoreNow >= 4 ? color.green : scoreNow >= 2 ? color.yellow : color.gray
-    f_row(dash, 4, "Score",     scoreStr, scoreClr)
+    f_row(dash, 4, "Score", str.tostring(scoreNow) + "/8", scoreNow >= 4 ? color.green : scoreNow >= 2 ? color.yellow : color.gray)
 
-    // ── BB Status ──
     bbStr = atBBLower ? "AT LOWER" : atBBUpper ? "AT UPPER" : str.tostring(bbPctB * 100, "#.0") + "%"
-    bbClr = atBBLower ? color.green : atBBUpper ? color.red : color.white
-    f_row(dash, 5, "BB %B",    bbStr, bbClr)
+    f_row(dash, 5, "BB %B", bbStr, atBBLower ? color.green : atBBUpper ? color.red : color.white)
 
-    // ── RSI ──
-    rsiStr = str.tostring(rsi, "#.1")
-    rsiClr = rsi > i_rsiOB ? color.red : rsi < i_rsiOS ? color.green : color.white
-    f_row(dash, 6, "RSI",      rsiStr, rsiClr)
+    f_row(dash, 6, "RSI", str.tostring(rsi, "#.1"), rsi > i_rsiOB ? color.red : rsi < i_rsiOS ? color.green : color.white)
 
-    // ── HTF ──
     htfStr = htfBullAlign ? "BULL ALIGN" : htfBearAlign ? "BEAR ALIGN" : "NEUTRAL"
-    htfClr = htfBullAlign ? color.green : htfBearAlign ? color.red : color.gray
-    f_row(dash, 7, "HTF Div",  htfStr, htfClr)
-    f_row(dash, 8, "HTF RSI",  str.tostring(htfRSI, "#.1"), htfRSI > 65 ? color.red : htfRSI < 35 ? color.green : color.white)
+    f_row(dash, 7, "HTF Div", htfStr, htfBullAlign ? color.green : htfBearAlign ? color.red : color.gray)
+    f_row(dash, 8, "HTF RSI", str.tostring(htfRSI, "#.1"), htfRSI > 65 ? color.red : htfRSI < 35 ? color.green : color.white)
 
-    // ── MACD ──
-    macdStr = hist > hist[1] ? "RISING" : "FALLING"
-    macdClr = hist > hist[1] ? color.green : color.red
-    f_row(dash, 9, "MACD Hist", macdStr, macdClr)
+    f_row(dash, 9, "MACD Hist", hist > hist[1] ? "RISING" : "FALLING", hist > hist[1] ? color.green : color.red)
 
-    // ── Momentum ──
     momStr = momBull ? "BULL TURN" : momBear ? "BEAR TURN" : "FLAT"
-    momClr = momBull ? color.green : momBear ? color.red : color.gray
-    f_row(dash, 10, "Momentum", momStr, momClr)
+    f_row(dash, 10, "Momentum", momStr, momBull ? color.green : momBear ? color.red : color.gray)
 
-    // ── Position ──
     posStr = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
-    posClr = inLong ? color.green : inShort ? color.red : color.gray
-    f_row(dash, 11, "Position",  posStr, posClr)
-
-    f_row(dash, 12, "Div Type",  inLong or inShort ? divType : "—", color.yellow)
+    f_row(dash, 11, "Position", posStr, inLong ? color.green : inShort ? color.red : color.gray)
+    f_row(dash, 12, "Div Type", inLong or inShort ? divType : "—", color.yellow)
     f_row(dash, 13, "Entry Score", inLong or inShort ? str.tostring(entryScore) + "/8" : "—", entryScore >= 4 ? color.green : color.yellow)
 
-    // ── R Tracking ──
     rStr = inLong or inShort ? str.tostring(currentR, "#.1") + "R" : "—"
     rClr = currentR >= 10 ? color.lime : currentR >= 5 ? color.green : currentR >= 1 ? color.yellow : currentR >= 0 ? color.white : color.red
     f_row(dash, 14, "Current R", rStr, rClr)
+    f_row(dash, 15, "Risk (pts)", inLong or inShort ? str.tostring(riskDist, "#.1") : "—", color.white)
+    f_row(dash, 16, "Target (pts)", inLong or inShort ? str.tostring(riskDist * i_rrRatio, "#.0") : "—", color.white)
 
-    riskPts  = inLong or inShort ? str.tostring(riskDist, "#.1") : "—"
-    targPts  = inLong or inShort ? str.tostring(riskDist * i_rrRatio, "#.0") : "—"
-    f_row(dash, 15, "Risk (pts)", riskPts, color.white)
-    f_row(dash, 16, "Target (pts)", targPts, color.white)
+    f_row(dash, 17, "TP1 (3R)", inLong or inShort ? (tp1Hit ? "HIT" : "...") : "—", tp1Hit ? color.green : color.orange)
+    f_row(dash, 18, "TP2 (5R)", inLong or inShort ? (tp2Hit ? "HIT" : "...") : "—", tp2Hit ? color.green : color.orange)
+    f_row(dash, 19, "TP3 (7R)", inLong or inShort ? (tp3Hit ? "HIT" : "...") : "—", tp3Hit ? color.green : color.orange)
 
-    // ── TP Status ──
-    f_row(dash, 17, "TP1 (3R)",  inLong or inShort ? (tp1Hit ? "HIT" : "...") : "—", tp1Hit ? color.green : color.orange)
-    f_row(dash, 18, "TP2 (5R)",  inLong or inShort ? (tp2Hit ? "HIT" : "...") : "—", tp2Hit ? color.green : color.orange)
-    f_row(dash, 19, "TP3 (7R)",  inLong or inShort ? (tp3Hit ? "HIT" : "...") : "—", tp3Hit ? color.green : color.orange)
+    f_row(dash, 20, "Win Rate", str.tostring(winRate, "#.1") + "% (" + str.tostring(totalWins) + "W/" + str.tostring(totalLosses) + "L)", winRate >= 15 ? color.green : color.red)
+    f_row(dash, 21, "Signals", str.tostring(totalTrades), color.white)
 
-    // ── Performance ──
-    f_row(dash, 20, "Win Rate",  str.tostring(winRate, "#.1") + "% (" + str.tostring(totalWins) + "W/" + str.tostring(totalLosses) + "L)", winRate >= 15 ? color.green : color.red)
-    f_row(dash, 21, "Max DD",    str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)
-
-    // ── Classic Divergence Stats ──
     f_row(dash, 22, "═══ CD STATS", "═══════", color.new(#58A6FF, 0))
-
-    cdNow = classicBullDiv and atBBLower ? "BULL CD" : classicBearDiv and atBBUpper ? "BEAR CD" : classicBullDiv ? "BULL (no BB)" : classicBearDiv ? "BEAR (no BB)" : "NONE"
+    cdNow    = classicBullDiv and atBBLower ? "BULL CD" : classicBearDiv and atBBUpper ? "BEAR CD" : classicBullDiv ? "BULL (no BB)" : classicBearDiv ? "BEAR (no BB)" : "NONE"
     cdNowClr = classicBullDiv and atBBLower ? color.lime : classicBearDiv and atBBUpper ? color.red : classicBullDiv or classicBearDiv ? color.yellow : color.gray
-    f_row(dash, 23, "CD Status",  cdNow, cdNowClr)
+    f_row(dash, 23, "CD Status", cdNow, cdNowClr)
 
-    // CD depth / strength
     cdDepthNow = classicBullDiv ? cdBullDepth : classicBearDiv ? cdBearDepth : 0.0
-    cdDepthStr = cdDepthNow > 0 ? str.tostring(cdDepthNow, "#.2") : "—"
-    cdDepthClr = cdDepthNow >= 3.0 ? color.lime : cdDepthNow >= 1.5 ? color.green : cdDepthNow > 0 ? color.yellow : color.gray
-    f_row(dash, 24, "CD Depth",   cdDepthStr, cdDepthClr)
+    f_row(dash, 24, "CD Depth", cdDepthNow > 0 ? str.tostring(cdDepthNow, "#.2") : "—", cdDepthNow >= 3.0 ? color.lime : cdDepthNow >= 1.5 ? color.green : cdDepthNow > 0 ? color.yellow : color.gray)
 
-    // RSI pivot values
-    cdRsiStr = classicBullDiv ? str.tostring(rsiPL2, "#.0") + " → " + str.tostring(rsiPL1, "#.0") + " ↑" :
-         classicBearDiv ? str.tostring(rsiPH2, "#.0") + " → " + str.tostring(rsiPH1, "#.0") + " ↓" : "—"
+    cdRsiStr = classicBullDiv ? str.tostring(rsiPL2, "#.0") + " → " + str.tostring(rsiPL1, "#.0") + " ↑" : classicBearDiv ? str.tostring(rsiPH2, "#.0") + " → " + str.tostring(rsiPH1, "#.0") + " ↓" : "—"
     f_row(dash, 25, "RSI Pivots", cdRsiStr, classicBullDiv ? color.green : classicBearDiv ? color.red : color.gray)
 
-    // Price pivot values
-    cdPxStr = classicBullDiv ? str.tostring(pxAtRsiPL2, "#.0") + " → " + str.tostring(pxAtRsiPL1, "#.0") + " ↓" :
-         classicBearDiv ? str.tostring(pxAtRsiPH2, "#.0") + " → " + str.tostring(pxAtRsiPH1, "#.0") + " ↑" : "—"
-    f_row(dash, 26, "Px Pivots",  cdPxStr, classicBullDiv ? color.green : classicBearDiv ? color.red : color.gray)
+    cdPxStr = classicBullDiv ? str.tostring(pxAtRsiPL2, "#.0") + " → " + str.tostring(pxAtRsiPL1, "#.0") + " ↓" : classicBearDiv ? str.tostring(pxAtRsiPH2, "#.0") + " → " + str.tostring(pxAtRsiPH1, "#.0") + " ↑" : "—"
+    f_row(dash, 26, "Px Pivots", cdPxStr, classicBullDiv ? color.green : classicBearDiv ? color.red : color.gray)
 
-    // CD signal history
     f_row(dash, 27, "CD Signals", str.tostring(cdTotalSignals) + " (" + str.tostring(cdBullCount) + "B/" + str.tostring(cdBearCount) + "S)", color.white)
-    f_row(dash, 28, "CD Hit 3R",  str.tostring(cdTotalWins) + "/" + str.tostring(cdTotalSignals), cdHitRate >= 30 ? color.green : color.yellow)
+    f_row(dash, 28, "CD Hit 3R", str.tostring(cdTotalWins) + "/" + str.tostring(cdTotalSignals), cdHitRate >= 30 ? color.green : color.yellow)
     f_row(dash, 29, "CD Hit Rate", str.tostring(cdHitRate, "#.0") + "%", cdHitRate >= 30 ? color.green : cdHitRate >= 15 ? color.yellow : color.red)
