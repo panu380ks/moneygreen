@@ -147,16 +147,16 @@ if bos_confirm > 1 and bearish_bos
 // ──────────────────────────────────────────────────────────────────────────────
 
 // ── LONG ENTRY ──
-// Bullish BOS (Higher High confirmed) + price near or crossing above the lower BB
+// Bullish BOS (Higher High confirmed) + price above basis (upper half of BB)
 // + Heiken Ashi bullish candle for momentum confirmation
-long_bb_filter   = close <= basis                          // price is in the lower half of BB (value zone)
+long_bb_filter   = close >= basis                          // price is above basis (only long above basis)
 long_ha_filter   = ha_bullish                              // HA candle is green
 long_signal      = bullish_bos_confirmed and long_bb_filter and long_ha_filter
 
 // ── SHORT ENTRY ──
-// Bearish BOS (HL break or LL continuation) + price near or crossing below the upper BB
+// Bearish BOS (HL break or LL continuation) + price below basis (lower half of BB)
 // + Heiken Ashi bearish candle for momentum confirmation
-short_bb_filter  = close >= basis                          // price is in the upper half of BB (value zone)
+short_bb_filter  = close <= basis                          // price is below basis (only short below basis)
 short_ha_filter  = ha_bearish                              // HA candle is red
 short_signal     = bearish_bos_confirmed and short_bb_filter and short_ha_filter
 
