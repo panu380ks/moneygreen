@@ -1,0 +1,588 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=5
+strategy("10R Sniper | 1:10 Risk-Reward Hunter",
+     overlay        = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.02,
+     slippage       = 3,
+     pyramiding     = 0,
+     calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HOW 1:10 R:R WORKS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The secret to 1:10 is NOT wide targets — it's TIGHT stops.
+//
+// SL is placed at the nearest swing structure (recent swing low/high)
+// rather than a fixed ATR multiple. This gives the smallest valid
+// stop loss. Then TP is set at 10x that risk distance.
+//
+// You only need to win ~10-15% of these trades to be profitable.
+// The strategy is highly selective — few trades, massive payoff.
+//
+// Entry triggers are designed to catch the START of explosive moves:
+// 1. Squeeze breakouts (compression → explosion)
+// 2. Momentum ignition (MACD + volume spike)
+// 3. Structure break + retest (classic ICT/SMC)
+// 4. Divergence reversal at key levels
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTO-DETECT INSTRUMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+isGold   = str.contains(syminfo.ticker, "XAU") or str.contains(syminfo.ticker, "GOLD")
+isSilver = str.contains(syminfo.ticker, "XAG") or str.contains(syminfo.ticker, "SILVER")
+isNAS    = str.contains(syminfo.ticker, "NAS") or str.contains(syminfo.ticker, "NDX") or str.contains(syminfo.ticker, "QQQ") or str.contains(syminfo.ticker, "US100") or str.contains(syminfo.ticker, "USTEC")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Risk:Reward ──
+i_rrRatio    = input.float(10.0, "Risk:Reward Ratio (R)",    step = 0.5, minval = 2.0, group = "R:R Target")
+i_minRisk    = input.float(0.3,  "Min Risk (ATR) — skip tiny stops", step = 0.1, group = "R:R Target")
+i_maxRisk    = input.float(2.0,  "Max Risk (ATR) — skip wide stops", step = 0.1, group = "R:R Target")
+
+// ── Structure (for tight stop placement) ──
+i_swingLen   = input.int(5,      "Swing Detection Length",    group = "Structure")
+i_lookback   = input.int(20,     "Structure Lookback Bars",   group = "Structure")
+
+// ── Trend ──
+i_emaFast    = input.int(9,      "EMA Fast",      group = "Trend")
+i_emaSlow    = input.int(50,     "EMA Slow",      group = "Trend")
+i_ema200     = input.int(200,    "EMA 200",       group = "Trend")
+
+// ── MACD ──
+i_macdFast   = input.int(12,     "MACD Fast",     group = "MACD")
+i_macdSlow   = input.int(26,     "MACD Slow",     group = "MACD")
+i_macdSig    = input.int(9,      "MACD Signal",   group = "MACD")
+
+// ── RSI ──
+i_rsiLen     = input.int(14,     "RSI Length",     group = "RSI")
+
+// ── Bollinger Bands (squeeze detection) ──
+i_bbLen      = input.int(20,     "BB Length",                  group = "BB Squeeze")
+i_bbMult     = input.float(2.0,  "BB StdDev",    step = 0.1,  group = "BB Squeeze")
+i_kcLen      = input.int(20,     "KC Length",                  group = "BB Squeeze")
+i_kcMult     = input.float(1.5,  "KC Multiplier", step = 0.1, group = "BB Squeeze")
+
+// ── Volume ──
+i_volLen     = input.int(20,     "Volume MA Length",          group = "Volume")
+i_volSpike   = input.float(1.5,  "Volume Spike (x avg)",     step = 0.1, group = "Volume")
+
+// ── HTF Trend ──
+i_useMTF     = input.bool(true,  "Enable HTF Trend Filter",  group = "HTF")
+i_htfTF      = input.timeframe("240", "HTF Timeframe",       group = "HTF")
+i_htfEMA     = input.int(50,     "HTF EMA Length",            group = "HTF")
+
+// ── Session ──
+i_useSess    = input.bool(true,  "Enable Session Filter",    group = "Session")
+i_sessDefault = input.session("0700-2000", "Trading Session", group = "Session")
+
+// ── Partial Profits ──
+i_tp1R       = input.float(3.0,  "TP1 at R multiple",   step = 0.5, group = "Scaling Out")
+i_tp1Pct     = input.float(30,   "TP1 Close %",         step = 5,   group = "Scaling Out")
+i_tp2R       = input.float(5.0,  "TP2 at R multiple",   step = 0.5, group = "Scaling Out")
+i_tp2Pct     = input.float(20,   "TP2 Close %",         step = 5,   group = "Scaling Out")
+i_tp3R       = input.float(7.0,  "TP3 at R multiple",   step = 0.5, group = "Scaling Out")
+i_tp3Pct     = input.float(15,   "TP3 Close %",         step = 5,   group = "Scaling Out")
+// Remaining 35% rides to 10R or trails
+
+// ── Cooldown ──
+i_cooldownBars = input.int(5,    "Cooldown Bars After Loss",  group = "Cooldown")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, i_emaFast)
+emaSlow = ta.ema(close, i_emaSlow)
+ema200  = ta.ema(close, i_ema200)
+atr     = ta.atr(14)
+
+[macdLine, signalLine, hist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+rsi = ta.rsi(close, i_rsiLen)
+
+volMA   = ta.sma(volume, i_volLen)
+volSpike = volume >= volMA * i_volSpike
+
+// HTF
+htfEMA   = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfEMA), lookahead = barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, i_htfTF, close, lookahead = barmerge.lookahead_off)
+htfBull  = not i_useMTF or htfClose > htfEMA
+htfBear  = not i_useMTF or htfClose < htfEMA
+
+// Session
+inSession = not i_useSess or not na(time(timeframe.period, i_sessDefault))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SWING STRUCTURE DETECTION (for tight stop placement)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Find recent swing lows and swing highs
+swingLow  = ta.lowest(low, i_swingLen)
+swingHigh = ta.highest(high, i_swingLen)
+
+// Find the most recent pivot low/high for precise SL
+pivotLow  = ta.pivotlow(low, i_swingLen, i_swingLen)
+pivotHigh = ta.pivothigh(high, i_swingLen, i_swingLen)
+
+// Track last known pivot levels
+var float lastPivotLow  = na
+var float lastPivotHigh = na
+
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+
+// Structure-based stop: nearest swing low for longs, swing high for shorts
+// Use the tighter of: recent swing or lookback-period low/high
+recentLow   = ta.lowest(low, i_lookback)
+recentHigh  = ta.highest(high, i_lookback)
+
+// For longs: SL just below the nearest swing low
+structureSL_long  = not na(lastPivotLow) and lastPivotLow > recentLow ? lastPivotLow : recentLow
+longRiskRaw       = close - structureSL_long
+
+// For shorts: SL just above the nearest swing high
+structureSL_short = not na(lastPivotHigh) and lastPivotHigh < recentHigh ? lastPivotHigh : recentHigh
+shortRiskRaw      = structureSL_short - close
+
+// Add a small buffer (10% of ATR) beyond the structure
+slBuffer         = atr * 0.1
+longSL           = structureSL_long - slBuffer
+shortSL          = structureSL_short + slBuffer
+
+// Final risk distances
+longRisk   = close - longSL
+shortRisk  = shortSL - close
+
+// Risk validation: not too tight (noise), not too wide (poor R:R)
+longRiskOK  = longRisk  > atr * i_minRisk and longRisk  < atr * i_maxRisk
+shortRiskOK = shortRisk > atr * i_minRisk and shortRisk < atr * i_maxRisk
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOLLINGER BAND SQUEEZE
+// ═══════════════════════════════════════════════════════════════════════════
+
+bbBasis = ta.sma(close, i_bbLen)
+bbDev   = ta.stdev(close, i_bbLen) * i_bbMult
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+kcBasis = ta.ema(close, i_kcLen)
+kcRange = ta.atr(i_kcLen) * i_kcMult
+kcUpper = kcBasis + kcRange
+kcLower = kcBasis - kcRange
+
+sqzOn   = bbLower > kcLower and bbUpper < kcUpper
+sqzFire = not sqzOn and sqzOn[1]
+
+// Count bars in squeeze (longer squeeze = bigger breakout)
+var int sqzBars = 0
+if sqzOn
+    sqzBars += 1
+else
+    sqzBars := 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RSI DIVERGENCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+priceLow1  = ta.lowest(low, 8)
+priceLow2  = ta.lowest(low, 8)[8]
+rsiLow1    = ta.lowest(rsi, 8)
+rsiLow2    = ta.lowest(rsi, 8)[8]
+bullDiv    = priceLow1 < priceLow2 and rsiLow1 > rsiLow2 and rsi < 35
+
+priceHi1   = ta.highest(high, 8)
+priceHi2   = ta.highest(high, 8)[8]
+rsiHi1     = ta.highest(rsi, 8)
+rsiHi2     = ta.highest(rsi, 8)[8]
+bearDiv    = priceHi1 > priceHi2 and rsiHi1 < rsiHi2 and rsi > 65
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND & MOMENTUM
+// ═══════════════════════════════════════════════════════════════════════════
+
+bullTrend = emaFast > emaSlow and close > emaSlow
+bearTrend = emaFast < emaSlow and close < emaSlow
+
+macdCrossBull = ta.crossover(macdLine, signalLine)
+macdCrossBear = ta.crossunder(macdLine, signalLine)
+
+// Structure break: price closes above recent high (bullish break)
+structBreakBull = close > recentHigh[1] and close[1] <= recentHigh[1]
+structBreakBear = close < recentLow[1]  and close[1] >= recentLow[1]
+
+// Candle strength
+bodySize   = math.abs(close - open)
+bullCandle = close > open and bodySize > atr * 0.3
+bearCandle = close < open and bodySize > atr * 0.3
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOLDOWN
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int barsSinceSL = 999
+wasInTrade = strategy.position_size[1] != 0
+nowFlat    = strategy.position_size == 0
+gotClosed  = wasInTrade and nowFlat and strategy.closedtrades > 0
+
+if gotClosed
+    pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if pnl < 0
+        barsSinceSL := 0
+
+if barsSinceSL < 999
+    barsSinceSL += 1
+
+cooldownOK = barsSinceSL > i_cooldownBars
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY TRIGGERS — HIGH-CONVICTION ONLY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Each trigger is designed to catch the START of a big move.
+// All require structure-validated stop loss for tight risk.
+
+// ─────────────────────────────────────────────────────────────────────────
+// T1: SQUEEZE BREAKOUT
+// BB compressed inside KC for 5+ bars, just released.
+// Direction confirmed by MACD + trend. Volume spike required.
+// This catches explosive moves after volatility compression.
+// ─────────────────────────────────────────────────────────────────────────
+trig1Long  = sqzFire and sqzBars[1] >= 5 and close > bbBasis and macdLine > signalLine and volSpike and bullTrend
+trig1Short = sqzFire and sqzBars[1] >= 5 and close < bbBasis and macdLine < signalLine and volSpike and bearTrend
+
+// ─────────────────────────────────────────────────────────────────────────
+// T2: MOMENTUM IGNITION
+// MACD crosses in trend direction + volume spike + strong candle.
+// RSI confirms momentum (above 50 for longs, below 50 for shorts).
+// The volume spike signals institutional participation.
+// ─────────────────────────────────────────────────────────────────────────
+trig2Long  = macdCrossBull and bullTrend and volSpike and bullCandle and rsi > 50 and rsi < 70
+trig2Short = macdCrossBear and bearTrend and volSpike and bearCandle and rsi < 50 and rsi > 30
+
+// ─────────────────────────────────────────────────────────────────────────
+// T3: STRUCTURE BREAK + MOMENTUM
+// Price breaks above recent high (or below recent low)
+// with MACD momentum + volume. Classic breakout play.
+// Tight SL at the structure that just broke.
+// ─────────────────────────────────────────────────────────────────────────
+trig3Long  = structBreakBull and macdLine > 0 and hist > hist[1] and volSpike
+trig3Short = structBreakBear and macdLine < 0 and hist < hist[1] and volSpike
+
+// ─────────────────────────────────────────────────────────────────────────
+// T4: DIVERGENCE REVERSAL AT BB EXTREME
+// RSI divergence while price at BB band extreme.
+// Catches major reversals early — the best R:R setups.
+// Requires MACD cross to confirm timing.
+// ─────────────────────────────────────────────────────────────────────────
+trig4Long  = bullDiv and close <= bbLower * 1.005 and (macdCrossBull or hist > hist[1]) and rsi > rsi[1]
+trig4Short = bearDiv and close >= bbUpper * 0.995 and (macdCrossBear or hist < hist[1]) and rsi < rsi[1]
+
+// ─────────────────────────────────────────────────────────────────────────
+// Combined entry — all require valid structure stop + session + cooldown
+// ─────────────────────────────────────────────────────────────────────────
+longEntry  = (trig1Long or trig2Long or trig3Long or trig4Long) and longRiskOK and inSession and cooldownOK and htfBull
+shortEntry = (trig1Short or trig2Short or trig3Short or trig4Short) and shortRiskOK and inSession and cooldownOK and htfBear
+
+var string lastTrigger = ""
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float tp3Price   = na
+var float tp10RPrice = na
+var float riskDist   = na
+var float trailStop  = na
+var bool  tp1Hit     = false
+var bool  tp2Hit     = false
+var bool  tp3Hit     = false
+
+flat    = strategy.position_size == 0
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// ── Long Entry ──
+if longEntry and flat
+    entryPrice := close
+    riskDist   := longRisk
+    slPrice    := longSL
+    tp1Price   := close + riskDist * i_tp1R
+    tp2Price   := close + riskDist * i_tp2R
+    tp3Price   := close + riskDist * i_tp3R
+    tp10RPrice := close + riskDist * i_rrRatio
+    trailStop  := longSL
+    tp1Hit     := false
+    tp2Hit     := false
+    tp3Hit     := false
+    lastTrigger := trig1Long ? "Squeeze" : trig2Long ? "Ignition" : trig3Long ? "Break" : "Diverge"
+    strategy.entry("Long", strategy.long)
+
+// ── Short Entry ──
+if shortEntry and flat
+    entryPrice := close
+    riskDist   := shortRisk
+    slPrice    := shortSL
+    tp1Price   := close - riskDist * i_tp1R
+    tp2Price   := close - riskDist * i_tp2R
+    tp3Price   := close - riskDist * i_tp3R
+    tp10RPrice := close - riskDist * i_rrRatio
+    trailStop  := shortSL
+    tp1Hit     := false
+    tp2Hit     := false
+    tp3Hit     := false
+    lastTrigger := trig1Short ? "Squeeze" : trig2Short ? "Ignition" : trig3Short ? "Break" : "Diverge"
+    strategy.entry("Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC — SCALE OUT TO 10R
+//
+// TP1 at 3R  → close 30%, SL to breakeven
+// TP2 at 5R  → close 20%, SL to 2R profit
+// TP3 at 7R  → close 15%, SL to 4R profit
+// 10R target → close remaining 35% OR trail it
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── TP1: 3R — take first profit, secure breakeven ──
+if inLong and not tp1Hit
+    strategy.exit("TP1", "Long", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if high >= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice  // breakeven
+
+if inShort and not tp1Hit
+    strategy.exit("TP1", "Short", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if low <= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+// ── TP2: 5R — more profit, lock at 2R ──
+if inLong and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "Long", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if high >= tp2Price
+        tp2Hit  := true
+        slPrice := entryPrice + riskDist * 2  // lock 2R
+
+if inShort and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "Short", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if low <= tp2Price
+        tp2Hit  := true
+        slPrice := entryPrice - riskDist * 2
+
+// ── TP3: 7R — more profit, lock at 4R ──
+if inLong and tp2Hit and not tp3Hit
+    strategy.exit("TP3", "Long", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
+    if high >= tp3Price
+        tp3Hit  := true
+        slPrice := entryPrice + riskDist * 4  // lock 4R
+
+if inShort and tp2Hit and not tp3Hit
+    strategy.exit("TP3", "Short", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
+    if low <= tp3Price
+        tp3Hit  := true
+        slPrice := entryPrice - riskDist * 4
+
+// ── 10R Final Target + Trail for Runner ──
+if inLong and tp3Hit
+    // Trail aggressively — lock 6R minimum, trail with 1 ATR
+    newTrail = close - atr * 1.0
+    lockMin  = entryPrice + riskDist * 6
+    candidate = math.max(newTrail, lockMin)
+    if candidate > trailStop
+        trailStop := candidate
+    effectiveStop = math.max(slPrice, trailStop)
+    strategy.exit("10R", "Long", limit = tp10RPrice, stop = effectiveStop)
+
+if inShort and tp3Hit
+    newTrail = close + atr * 1.0
+    lockMin  = entryPrice - riskDist * 6
+    candidate = math.min(newTrail, lockMin)
+    if candidate < trailStop
+        trailStop := candidate
+    effectiveStop = math.min(slPrice, trailStop)
+    strategy.exit("10R", "Short", limit = tp10RPrice, stop = effectiveStop)
+
+// ── Ratchet trail after TP1 ──
+if inLong and tp1Hit and not tp3Hit
+    newTrail = close - atr * 1.5
+    if newTrail > trailStop
+        trailStop := newTrail
+
+if inShort and tp1Hit and not tp3Hit
+    newTrail = close + atr * 1.5
+    if newTrail < trailStop
+        trailStop := newTrail
+
+// ── Session End Exit ──
+if i_useSess and not inSession
+    if inLong
+        strategy.close("Long", comment = "Session End")
+    if inShort
+        strategy.close("Short", comment = "Session End")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CURRENT R MULTIPLE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+currentR = 0.0
+if inLong and riskDist > 0
+    currentR := (close - entryPrice) / riskDist
+if inShort and riskDist > 0
+    currentR := (entryPrice - close) / riskDist
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERFORMANCE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int totalWins    = 0
+var int totalLosses  = 0
+var int total10R     = 0
+var float totalRwon  = 0.0
+var float totalRlost = 0.0
+var float peakEq     = 100000.0
+var float maxDD      = 0.0
+
+if gotClosed and strategy.closedtrades > 0
+    pnl       = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    entryP    = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+    exitP     = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    wasLong   = strategy.closedtrades.size(strategy.closedtrades - 1) > 0
+    if pnl > 0
+        totalWins += 1
+    else
+        totalLosses += 1
+
+if strategy.equity > peakEq
+    peakEq := strategy.equity
+dd = (peakEq - strategy.equity) / peakEq * 100
+if dd > maxDD
+    maxDD := dd
+
+winRate   = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) * 100 : 0.0
+totalTrades = totalWins + totalLosses
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(emaFast, "EMA Fast", color.new(#2962FF, 0), 1)
+plot(emaSlow, "EMA Slow", color.new(#E91E63, 0), 2)
+plot(ema200,  "EMA 200",  color.new(#FFFFFF, 60), 2)
+plot(i_useMTF ? htfEMA : na, "HTF EMA", color.new(#FFFFFF, 50), 2, plot.style_stepline)
+
+// Bollinger Bands
+p_bbUp  = plot(bbUpper, "BB Upper", color.new(#787B86, 50), 1)
+p_bbLow = plot(bbLower, "BB Lower", color.new(#787B86, 50), 1)
+plot(bbBasis, "BB Mid",  color.new(#787B86, 70), 1, plot.style_circles)
+bbFillClr = sqzOn ? color.new(#FF6D00, 88) : color.new(#787B86, 95)
+fill(p_bbUp, p_bbLow, bbFillClr)
+
+// Squeeze dots
+plotshape(sqzOn,  "Squeeze",   shape.diamond, location.bottom, color.new(#FF1744, 30), size = size.tiny)
+plotshape(sqzFire, "Sqz Fire", shape.diamond, location.bottom, color.new(#00E676, 0),  size = size.tiny)
+
+// Structure levels
+plot(lastPivotLow,  "Pivot Low",  color.new(#00E676, 50), 1, plot.style_circles)
+plot(lastPivotHigh, "Pivot High", color.new(#FF1744, 50), 1, plot.style_circles)
+
+// Entry markers
+allBullOK = longRiskOK and inSession and cooldownOK and htfBull
+allBearOK = shortRiskOK and inSession and cooldownOK and htfBear
+
+plotshape(trig1Long and flat and allBullOK, "Squeeze Long", shape.triangleup, location.belowbar, color.new(#00E676, 0), size = size.small, text = "SQ")
+plotshape(trig1Short and flat and allBearOK, "Squeeze Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.small, text = "SQ")
+
+plotshape(trig2Long and not trig1Long and flat and allBullOK, "Ignite Long", shape.triangleup, location.belowbar, color.new(#00BCD4, 0), size = size.small, text = "IG")
+plotshape(trig2Short and not trig1Short and flat and allBearOK, "Ignite Short", shape.triangledown, location.abovebar, color.new(#FF9800, 0), size = size.small, text = "IG")
+
+plotshape(trig3Long and not trig1Long and not trig2Long and flat and allBullOK, "Break Long", shape.triangleup, location.belowbar, color.new(#7C4DFF, 0), size = size.small, text = "BK")
+plotshape(trig3Short and not trig1Short and not trig2Short and flat and allBearOK, "Break Short", shape.triangledown, location.abovebar, color.new(#E040FB, 0), size = size.small, text = "BK")
+
+plotshape(trig4Long and not trig1Long and not trig2Long and not trig3Long and flat and allBullOK, "Div Long", shape.triangleup, location.belowbar, color.new(#FFD600, 0), size = size.small, text = "DV")
+plotshape(trig4Short and not trig1Short and not trig2Short and not trig3Short and flat and allBearOK, "Div Short", shape.triangledown, location.abovebar, color.new(#FF6E40, 0), size = size.small, text = "DV")
+
+// Trend background
+bgColor = bullTrend and htfBull ? color.new(#00E676, 96) : bearTrend and htfBear ? color.new(#FF1744, 96) : na
+bgcolor(bgColor)
+
+// Trade levels — show all R targets
+plot(inLong or inShort ? slPrice : na,    "Stop",  color.new(#FF1744, 0),  2, plot.style_cross)
+plot(inLong or inShort ? tp1Price : na,   "3R",    color.new(#FFEB3B, 0),  1, plot.style_cross)
+plot(inLong or inShort ? tp2Price : na,   "5R",    color.new(#FF9800, 0),  1, plot.style_cross)
+plot(inLong or inShort ? tp3Price : na,   "7R",    color.new(#FF6D00, 0),  1, plot.style_circles)
+plot(inLong or inShort ? tp10RPrice : na, "10R",   color.new(#00E676, 0),  2, plot.style_circles)
+plot(tp1Hit and (inLong or inShort) ? trailStop : na, "Trail", color.new(#FFAB00, 40), 1, plot.style_stepline)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table infoTbl = table.new(position.top_right, 2, 18,
+     bgcolor      = color.new(#1E1E1E, 10),
+     border_color = color.new(#333333, 0),
+     border_width = 1)
+
+f_row(tbl, r, label, val, valClr) =>
+    table.cell(tbl, 0, r, label, text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, r, val,   text_color = valClr,      text_size = size.small)
+
+if barstate.islast
+    instStr = isGold ? "GOLD" : isSilver ? "SILVER" : isNAS ? "NAS100" : syminfo.ticker
+    instClr = isGold ? color.yellow : isSilver ? color.silver : isNAS ? color.aqua : color.white
+
+    trendStr = bullTrend ? "BULL" : bearTrend ? "BEAR" : "FLAT"
+    trendClr = bullTrend ? color.green : bearTrend ? color.red : color.gray
+
+    macdStr = macdLine > signalLine ? "BULL" : "BEAR"
+    macdClr = macdLine > signalLine ? color.green : color.red
+
+    rsiStr = str.tostring(rsi, "#.0")
+    rsiClr = rsi > 70 ? color.red : rsi < 30 ? color.green : color.white
+
+    sqzStr = sqzOn ? "SQUEEZE (" + str.tostring(sqzBars) + ")" : "OPEN"
+    sqzClr = sqzOn ? color.orange : color.green
+
+    posStr = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    posClr = inLong ? color.green : inShort ? color.red : color.gray
+
+    rStr = inLong or inShort ? str.tostring(currentR, "#.1") + "R" : "—"
+    rClr = currentR >= 10 ? color.lime : currentR >= 5 ? color.green : currentR >= 1 ? color.yellow : currentR >= 0 ? color.white : color.red
+
+    riskStr  = inLong or inShort ? str.tostring(riskDist, "#.1") : "—"
+    targetStr = inLong or inShort ? str.tostring(riskDist * i_rrRatio, "#.0") : "—"
+
+    f_row(infoTbl, 0,  "10R SNIPER",  instStr,    instClr)
+    f_row(infoTbl, 1,  "Trend",       trendStr,   trendClr)
+    f_row(infoTbl, 2,  "MACD",        macdStr,    macdClr)
+    f_row(infoTbl, 3,  "RSI",         rsiStr,     rsiClr)
+    f_row(infoTbl, 4,  "BB Squeeze",  sqzStr,     sqzClr)
+    f_row(infoTbl, 5,  "Position",    posStr,     posClr)
+    f_row(infoTbl, 6,  "Entry Type",  inLong or inShort ? lastTrigger : "—", color.yellow)
+    f_row(infoTbl, 7,  "Current R",   rStr,       rClr)
+    f_row(infoTbl, 8,  "Risk (pts)",  riskStr,    color.white)
+    f_row(infoTbl, 9,  "Target (pts)", targetStr,  color.white)
+    f_row(infoTbl, 10, "TP1 (3R)",    inLong or inShort ? (tp1Hit ? "HIT" : "...") : "—", tp1Hit ? color.green : color.orange)
+    f_row(infoTbl, 11, "TP2 (5R)",    inLong or inShort ? (tp2Hit ? "HIT" : "...") : "—", tp2Hit ? color.green : color.orange)
+    f_row(infoTbl, 12, "TP3 (7R)",    inLong or inShort ? (tp3Hit ? "HIT" : "...") : "—", tp3Hit ? color.green : color.orange)
+    f_row(infoTbl, 13, "10R Target",  inLong or inShort ? (tp3Hit ? "RUNNING" : "...") : "—", tp3Hit ? color.lime : color.gray)
+    f_row(infoTbl, 14, "Win Rate",    str.tostring(winRate, "#.1") + "%", winRate >= 15 ? color.green : color.red)
+    f_row(infoTbl, 15, "Trades",      str.tostring(totalTrades), color.white)
+    f_row(infoTbl, 16, "W / L",       str.tostring(totalWins) + " / " + str.tostring(totalLosses), color.white)
+    f_row(infoTbl, 17, "Max DD",      str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)
