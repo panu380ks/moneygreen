@@ -1,0 +1,235 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=5
+strategy("Gold Trend Rider",
+     overlay        = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.02,
+     slippage       = 3,
+     pyramiding     = 0,
+     calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Trend Filter ──
+i_emaFast   = input.int(21,   "Fast EMA",           group = "Trend Filter")
+i_emaMid    = input.int(50,   "Mid EMA",            group = "Trend Filter")
+i_emaSlow   = input.int(200,  "Slow EMA",           group = "Trend Filter")
+
+// ── Supertrend ──
+i_stFactor  = input.float(3.0, "Factor",   step = 0.1, group = "Supertrend")
+i_stPeriod  = input.int(10,    "ATR Period",           group = "Supertrend")
+
+// ── RSI Filter ──
+i_useRSI    = input.bool(true, "Enable RSI Filter",    group = "RSI Filter")
+i_rsiLen    = input.int(14,    "RSI Length",            group = "RSI Filter")
+i_rsiOB     = input.int(75,    "Overbought (no longs)", group = "RSI Filter")
+i_rsiOS     = input.int(25,    "Oversold (no shorts)",  group = "RSI Filter")
+
+// ── Risk Management ──
+i_atrLen    = input.int(14,    "ATR Length",             group = "Risk")
+i_slMult    = input.float(2.0, "SL: ATR Multiplier",    step = 0.1, group = "Risk")
+i_beActive  = input.bool(true, "Move SL to Breakeven",  group = "Risk")
+i_beMult    = input.float(1.5, "BE Trigger: ATR Mult",  step = 0.1, group = "Risk")
+
+// ── Exit Mode ──
+i_exitMode  = input.string("Supertrend Flip", "Exit Method",
+                 options = ["Supertrend Flip", "ATR Trail", "Both (first hit)"],
+                 group = "Exit")
+i_trailMult = input.float(2.5, "Trail: ATR Multiplier", step = 0.1, group = "Exit")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+emaFast  = ta.ema(close, i_emaFast)
+emaMid   = ta.ema(close, i_emaMid)
+emaSlow  = ta.ema(close, i_emaSlow)
+
+[st, stDir] = ta.supertrend(i_stFactor, i_stPeriod)
+
+rsi = ta.rsi(close, i_rsiLen)
+atr = ta.atr(i_atrLen)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Stacked EMAs = strong trend
+bullTrend = emaFast > emaMid and emaMid > emaSlow
+bearTrend = emaFast < emaMid and emaMid < emaSlow
+
+// Supertrend direction
+stBull = stDir < 0
+stBear = stDir > 0
+
+// Supertrend flips (entry trigger)
+stFlipBull = stBull and not stBull[1]
+stFlipBear = stBear and not stBear[1]
+
+// RSI filter
+rsiBullOK = not i_useRSI or rsi < i_rsiOB
+rsiBearOK = not i_useRSI or rsi > i_rsiOS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+longEntry  = bullTrend and stFlipBull and rsiBullOK
+shortEntry = bearTrend and stFlipBear and rsiBearOK
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice  = na
+var float slPrice     = na
+var bool  beMoved     = false
+var float trailStop   = na
+
+flat = strategy.position_size == 0
+
+// ── New Long Entry ──
+if longEntry and flat
+    entryPrice := close
+    slPrice    := close - atr * i_slMult
+    beMoved    := false
+    trailStop  := close - atr * i_trailMult
+    strategy.entry("Long", strategy.long)
+
+// ── New Short Entry ──
+if shortEntry and flat
+    entryPrice := close
+    slPrice    := close + atr * i_slMult
+    beMoved    := false
+    trailStop  := close + atr * i_trailMult
+    strategy.entry("Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// ── Breakeven Logic ──
+if i_beActive and inLong and not beMoved
+    if high >= entryPrice + atr * i_beMult
+        slPrice := entryPrice
+        beMoved := true
+
+if i_beActive and inShort and not beMoved
+    if low <= entryPrice - atr * i_beMult
+        slPrice := entryPrice
+        beMoved := true
+
+// ── ATR Trailing Stop ──
+if inLong
+    newTrail = close - atr * i_trailMult
+    if newTrail > trailStop
+        trailStop := newTrail
+
+if inShort
+    newTrail = close + atr * i_trailMult
+    if newTrail < trailStop
+        trailStop := newTrail
+
+// ── Determine active stop ──
+var float activeStop = na
+
+if inLong
+    if i_exitMode == "ATR Trail"
+        activeStop := math.max(slPrice, trailStop)
+    else if i_exitMode == "Both (first hit)"
+        activeStop := math.max(slPrice, trailStop)
+    else
+        activeStop := slPrice
+
+if inShort
+    if i_exitMode == "ATR Trail"
+        activeStop := math.min(slPrice, trailStop)
+    else if i_exitMode == "Both (first hit)"
+        activeStop := math.min(slPrice, trailStop)
+    else
+        activeStop := slPrice
+
+// ── Stop Loss Exit ──
+if inLong
+    strategy.exit("SL", "Long", stop = activeStop)
+
+if inShort
+    strategy.exit("SL", "Short", stop = activeStop)
+
+// ── Supertrend Flip Exit ──
+useST = i_exitMode == "Supertrend Flip" or i_exitMode == "Both (first hit)"
+
+if useST and inLong and stFlipBear
+    strategy.close("Long", comment = "ST Flip")
+
+if useST and inShort and stFlipBull
+    strategy.close("Short", comment = "ST Flip")
+
+// ── Trend Structure Break Exit ──
+// Close if EMAs unstack (trend is over)
+if inLong and (emaFast < emaSlow)
+    strategy.close("Long", comment = "Trend Break")
+
+if inShort and (emaFast > emaSlow)
+    strategy.close("Short", comment = "Trend Break")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+plot(emaFast, "EMA 21",  color.new(#2962FF, 0), 1)
+plot(emaMid,  "EMA 50",  color.new(#FF6D00, 0), 1)
+plot(emaSlow, "EMA 200", color.new(#E91E63, 0), 2)
+
+stColor = stBull ? color.new(#00E676, 20) : color.new(#FF1744, 20)
+plot(st, "Supertrend", stColor, 2, plot.style_linebr)
+
+// Entry signals
+plotshape(longEntry  and flat, "Long",  shape.triangleup,   location.belowbar, color.new(#00E676, 0), size = size.small)
+plotshape(shortEntry and flat, "Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.small)
+
+// Trend background
+bgColor = bullTrend ? color.new(#00E676, 95) : bearTrend ? color.new(#FF1744, 95) : na
+bgcolor(bgColor)
+
+// Active stop level
+plot(inLong or inShort ? activeStop : na, "Stop", color.new(#FFAB00, 0), 1, plot.style_cross)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table infoTbl = table.new(position.top_right, 2, 6,
+     bgcolor = color.new(#1E1E1E, 10),
+     border_color = color.new(#333333, 0),
+     border_width = 1)
+
+if barstate.islast
+    trendStr  = bullTrend ? "BULL" : bearTrend ? "BEAR" : "NEUTRAL"
+    trendClr  = bullTrend ? color.green : bearTrend ? color.red : color.gray
+    stStr     = stBull ? "BULL" : "BEAR"
+    stClr     = stBull ? color.green : color.red
+
+    table.cell(infoTbl, 0, 0, "Trend",      text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 1, 0, trendStr,      text_color = trendClr,   text_size = size.small)
+    table.cell(infoTbl, 0, 1, "Supertrend",  text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 1, 1, stStr,         text_color = stClr,       text_size = size.small)
+    table.cell(infoTbl, 0, 2, "RSI",         text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 1, 2, str.tostring(rsi, "#.0"), text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 0, 3, "ATR",         text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 1, 3, str.tostring(atr, "#.00"), text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 0, 4, "Exit Mode",   text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 1, 4, i_exitMode,    text_color = color.yellow, text_size = size.small)
+    table.cell(infoTbl, 0, 5, "Stop",        text_color = color.white, text_size = size.small)
+    table.cell(infoTbl, 1, 5, inLong or inShort ? str.tostring(activeStop, "#.00") : "—",
+               text_color = color.orange, text_size = size.small)
