@@ -1,0 +1,25 @@
+//@version=5
+indicator("MOST", overlay=true)
+
+length = input.int(8, "Length")
+percent = input.float(2.0, "Percent")
+
+exMov = ta.ema(close, length)
+
+fark = exMov * percent * 0.01
+
+longStop = exMov - fark
+longStopPrev = nz(longStop[1], longStop)
+longStop := exMov > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStop = exMov + fark
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+var int dir = 1
+dir := dir == -1 and exMov > shortStopPrev ? 1 : dir == 1 and exMov < longStopPrev ? -1 : dir
+
+MOST = dir == 1 ? longStop : shortStop
+
+plot(MOST, "MOST", color=color.blue)
+plot(exMov, "exMov", color=color.red)
