@@ -188,9 +188,9 @@ recent_squeeze = in_squeeze[1] or in_squeeze[2] or in_squeeze[3]
 sq_long  := sq_long  or (entry_mode == "Squeeze" and guard_long  and recent_squeeze and st_long_ok)
 sq_short := sq_short or (entry_mode == "Squeeze" and guard_short and recent_squeeze and st_short_ok)
 
-// ── Final entry signals ──
-long_entry  = allow_longs  and (bo_long  or mr_long  or sq_long)  and all_filters
-short_entry = allow_shorts and (bo_short or mr_short or sq_short) and all_filters
+// ── Final entry signals (don't re-enter if already in same direction) ──
+long_entry  = allow_longs  and (bo_long  or mr_long  or sq_long)  and all_filters and strategy.position_size <= 0
+short_entry = allow_shorts and (bo_short or mr_short or sq_short) and all_filters and strategy.position_size >= 0
 
 
 // ──────────────────────────────────────────────────────────────────────────────
