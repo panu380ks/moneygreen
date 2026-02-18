@@ -3,7 +3,7 @@
 // © moneygreen
 
 //@version=6
-strategy("Bollinger Bands Strategy directed", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=5, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+strategy("BB HH Session Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=5, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
 source = close
 length = input.int(20, minval=1)
 mult = input.float(2.0, minval=0.001, maxval=50)
@@ -13,6 +13,14 @@ basis = ta.sma(source, length)
 dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
+
+// ── Session Filter ──
+sess_tz    = input.string("America/New_York", "Session Timezone", group="Session Filter")
+sess_start = input.int(8,  "Session Start Hour (0-23)", minval=0, maxval=23, group="Session Filter")
+sess_end   = input.int(12, "Session End Hour (0-23)",   minval=0, maxval=23, group="Session Filter")
+
+current_hour = hour(time, sess_tz)
+in_session   = current_hour >= sess_start and current_hour < sess_end
 
 // ── Track Higher Highs ──
 pivot_len = input.int(5, "Pivot Lookback", minval=1)
@@ -27,11 +35,24 @@ if not na(ph)
 
 higher_high = not na(prev_high) and not na(last_high) and last_high > prev_high
 
+// ── Volume Filter (reduce trades) ──
+vol_filter   = input.bool(true, "Require Above-Avg Volume", group="Trade Filters")
+vol_len      = input.int(20, "Volume MA Length", minval=5, maxval=100, group="Trade Filters")
+vol_thresh   = input.float(1.2, "Volume Threshold (x avg)", minval=1.0, maxval=3.0, step=0.1, group="Trade Filters")
+avg_vol      = ta.sma(volume, vol_len)
+vol_ok       = not vol_filter or (volume >= avg_vol * vol_thresh)
+
+// ── Cooldown (min bars between entries) ──
+cooldown_bars = input.int(10, "Min Bars Between Trades", minval=1, maxval=50, group="Trade Filters")
+var int last_entry_bar = 0
+bars_since_entry = bar_index - last_entry_bar
+cooldown_ok = bars_since_entry >= cooldown_bars
+
 // ── Risk Management Inputs ──
-atr_length    = input.int(14, "ATR Length", minval=1, maxval=50, group="Risk Management")
-sl_atr_mult   = input.float(1.5, "Stop Loss (ATR multiplier)", minval=0.5, maxval=5.0, step=0.1, group="Risk Management")
-tp_atr_mult   = input.float(3.0, "Take Profit (ATR multiplier)", minval=0.5, maxval=10.0, step=0.1, group="Risk Management")
-use_trail     = input.bool(true, "Use Trailing Stop", group="Risk Management")
+atr_length     = input.int(14, "ATR Length", minval=1, maxval=50, group="Risk Management")
+sl_atr_mult    = input.float(1.0, "Stop Loss (ATR multiplier)", minval=0.5, maxval=5.0, step=0.1, group="Risk Management")
+tp_atr_mult    = input.float(3.5, "Take Profit (ATR multiplier)", minval=0.5, maxval=10.0, step=0.1, group="Risk Management")
+use_trail      = input.bool(true, "Use Trailing Stop", group="Risk Management")
 trail_atr_mult = input.float(1.5, "Trailing Stop (ATR multiplier)", minval=0.5, maxval=5.0, step=0.1, group="Risk Management")
 
 // Dashboard
@@ -40,10 +61,13 @@ show_dashboard = input.bool(true, "Show Backtest Dashboard", group="Dashboard")
 // ── ATR Calculation ──
 atr_val = ta.atr(atr_length)
 
-// ── Long: BB crossover + higher high structure ──
-if (ta.crossover(source, lower)) and higher_high
+// ── Combined entry filter ──
+can_trade = in_session and vol_ok and cooldown_ok
+
+// ── Long: BB crossover + higher high + session + filters ──
+if (ta.crossover(source, lower)) and higher_high and can_trade
     strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
-    // ATR-based SL, TP, and optional trailing stop
+    last_entry_bar := bar_index
     long_sl = close - atr_val * sl_atr_mult
     long_tp = close + atr_val * tp_atr_mult
     if use_trail
@@ -53,10 +77,10 @@ if (ta.crossover(source, lower)) and higher_high
 else
     strategy.cancel(id="BBandLE")
 
-// ── Short: price drops below the last higher high ──
-if (ta.crossunder(source, upper)) or (higher_high and close < last_high)
+// ── Short: BB crossunder + session + filters ──
+if ((ta.crossunder(source, upper)) or (higher_high and close < last_high)) and can_trade
     strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
-    // ATR-based SL, TP, and optional trailing stop
+    last_entry_bar := bar_index
     short_sl = close + atr_val * sl_atr_mult
     short_tp = close - atr_val * tp_atr_mult
     if use_trail
@@ -66,12 +90,17 @@ if (ta.crossunder(source, upper)) or (higher_high and close < last_high)
 else
     strategy.cancel(id="BBandSE")
 
+// ── Close any open positions at session end ──
+if not in_session and (strategy.position_size != 0)
+    strategy.close_all(comment="Session End")
+
 // ── Plots ──
 plot(last_high, "Last High", color=color.orange, linewidth=1, style=plot.style_stepline)
 plot(prev_high, "Prev High", color=color.gray, linewidth=1, style=plot.style_stepline)
 plot(upper, "BB Upper", color=color.new(color.red, 30), linewidth=1)
 plot(basis, "BB Mid", color=color.new(color.gray, 50), linewidth=1)
 plot(lower, "BB Lower", color=color.new(color.green, 30), linewidth=1)
+bgcolor(in_session ? color.new(color.blue, 93) : na, title="Session Window")
 
 // ──────────────────────────────────────────────────────────────────────────────
 // BACKTEST PERFORMANCE DASHBOARD
