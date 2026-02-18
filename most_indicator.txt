@@ -1,0 +1,16 @@
+//@version=5
+indicator(title="MOST", shorttitle="MOST", overlay=true)
+length = input.int(8, title="Length", minval=1)
+percent = input.float(2.0, title="Percent", step=0.1)
+exMov = ta.ema(close, length)
+basicUB = exMov * (1 + percent / 100)
+basicLB = exMov * (1 - percent / 100)
+float finalUB = na
+finalUB := basicUB < nz(finalUB[1], basicUB) or exMov[1] > nz(finalUB[1], basicUB) ? basicUB : nz(finalUB[1], basicUB)
+float finalLB = na
+finalLB := basicLB > nz(finalLB[1], basicLB) or exMov[1] < nz(finalLB[1], basicLB) ? basicLB : nz(finalLB[1], basicLB)
+var int dir = 1
+dir := dir == -1 and exMov > finalUB ? 1 : dir == 1 and exMov < finalLB ? -1 : dir
+MOST = dir == 1 ? finalLB : finalUB
+plot(exMov, title="exMov", color=color.blue)
+plot(MOST, title="MOST", color=color.red)
