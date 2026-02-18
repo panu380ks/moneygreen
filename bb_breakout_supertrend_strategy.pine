@@ -278,8 +278,7 @@ plotshape(short_entry and strategy.position_size >= 0, "Sell",
      shape.triangledown, location.abovebar, color.red,  size=size.normal)
 
 // Squeeze dots on zero line (shows when BB is compressed)
-plotshape(in_squeeze, "Squeeze", shape.diamond, location.bottom, color.yellow, size=size.tiny,
-     title="BB Squeeze Active")
+plotshape(in_squeeze, "BB Squeeze Active", shape.diamond, location.bottom, color.yellow, size=size.tiny)
 
 // Session background
 bgcolor(use_session and in_ny_session ? color.new(color.blue, 95) : na, title="NY Session BG")
