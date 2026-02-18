@@ -1,0 +1,54 @@
+// Annii's Ribbon Indicator Recreation
+// Based on the "Ribbon for Scalping 5 to 15 min timeframes" by TradeTravelChill
+// PineScript v5
+//@version=5
+indicator(title="Annii's Ribbon", shorttitle="Annii Ribbon", overlay=true)
+
+src = input.source(close, title="Source")
+
+// EMA Length Inputs
+// MMA01-MMA08 are iterator labels; the actual lengths are tuned to match the ribbon behavior
+len01 = input.int(5, title="MMA01 Length", minval=1)
+len02 = input.int(8, title="MMA02 Length", minval=1)
+len03 = input.int(13, title="MMA03 Length", minval=1)
+len04 = input.int(21, title="MMA04 Length", minval=1)
+len05 = input.int(34, title="MMA05 Length", minval=1)
+len06 = input.int(55, title="MMA06 Length", minval=1)
+len07 = input.int(89, title="MMA07 Length", minval=1)
+len08 = input.int(144, title="MMA08 Length", minval=1)
+
+// Calculate EMAs
+mma01 = ta.ema(src, len01)
+mma02 = ta.ema(src, len02)
+mma03 = ta.ema(src, len03)
+mma04 = ta.ema(src, len04)
+mma05 = ta.ema(src, len05)
+mma06 = ta.ema(src, len06)
+mma07 = ta.ema(src, len07)
+mma08 = ta.ema(src, len08)
+
+// Trend detection: bullish when fast EMA is above slow EMA
+isBullish = mma01 > mma08
+
+// Color assignments
+// Outer 3 lines: brightest colors
+// Yellow lines: MMA04 and MMA05 (the two yellow EMAs for support/resistance)
+// Inner lines: medium intensity colors
+col01 = isBullish ? color.new(#00FF00, 0) : color.new(#FF0000, 0)
+col02 = isBullish ? color.new(#00DD00, 0) : color.new(#DD0000, 0)
+col03 = isBullish ? color.new(#00BB00, 0) : color.new(#BB0000, 0)
+col04 = color.new(#FFD700, 0)
+col05 = color.new(#FFD700, 0)
+col06 = isBullish ? color.new(#009900, 0) : color.new(#990000, 0)
+col07 = isBullish ? color.new(#007700, 0) : color.new(#770000, 0)
+col08 = isBullish ? color.new(#005500, 0) : color.new(#550000, 0)
+
+// Plot all MMA lines - each named to match CSV column headers
+plot(mma01, title="MMA01", color=col01, linewidth=2)
+plot(mma02, title="MMA02", color=col02, linewidth=1)
+plot(mma03, title="MMA03", color=col03, linewidth=1)
+plot(mma04, title="MMA04", color=col04, linewidth=2)
+plot(mma05, title="MMA05", color=col05, linewidth=2)
+plot(mma06, title="MMA06", color=col06, linewidth=1)
+plot(mma07, title="MMA07", color=col07, linewidth=1)
+plot(mma08, title="MMA08", color=col08, linewidth=2)
