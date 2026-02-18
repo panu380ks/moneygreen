@@ -1,25 +1,25 @@
-//@version=5
-indicator("MOST", overlay=true)
-
+//@version=6
+strategy("MOST Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
 length = input.int(8, "Length")
 percent = input.float(2.0, "Percent")
-
 exMov = ta.ema(close, length)
-
 fark = exMov * percent * 0.01
-
 longStop = exMov - fark
 longStopPrev = nz(longStop[1], longStop)
 longStop := exMov > longStopPrev ? math.max(longStop, longStopPrev) : longStop
-
 shortStop = exMov + fark
 shortStopPrev = nz(shortStop[1], shortStop)
 shortStop := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
-
 var int dir = 1
 dir := dir == -1 and exMov > shortStopPrev ? 1 : dir == 1 and exMov < longStopPrev ? -1 : dir
-
 MOST = dir == 1 ? longStop : shortStop
-
-plot(MOST, "MOST", color=color.blue)
-plot(exMov, "exMov", color=color.red)
+buySignal = dir == 1 and dir[1] == -1
+sellSignal = dir == -1 and dir[1] == 1
+if buySignal
+    strategy.entry("Long", strategy.long)
+if sellSignal
+    strategy.entry("Short", strategy.short)
+plot(MOST, "MOST", color=dir == 1 ? color.green : color.red, linewidth=2)
+plot(exMov, "exMov", color=color.orange)
+plotshape(buySignal, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown, location.abovebar, color.red, size=size.small)
