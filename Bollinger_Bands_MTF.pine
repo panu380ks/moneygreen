@@ -3,87 +3,131 @@
 // https://mozilla.org/MPL/2.0/
 // © moneygreen
 
-strategy("Bollinger Bands Strategy v4 — NAS100 Daily", shorttitle="BB v4 NAS100 1D", overlay=true,
+strategy("BB Squeeze Breakout v5 — NAS100 Daily", shorttitle="BB v5 NAS100 1D", overlay=true,
      process_orders_on_close=true, initial_capital=100000,
-     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=75,
      currency=currency.USD, pyramiding=0,
      commission_type=strategy.commission.percent, commission_value=0.05,
      slippage=2)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NAS100 BB STRATEGY — v4 (DAILY TIMEFRAME)
+// NAS100 BB STRATEGY — v5 (DAILY TIMEFRAME)
 // ═══════════════════════════════════════════════════════════════════════════
-// Based on TradingView's built-in "Bollinger Bands Strategy directed"
-// Adjusted for 1D NAS100 with proper risk management.
+// Complete redesign from v4. v4 used simple BB crossovers which generated
+// 1,071 trades, 40% win rate, -39% P&L. Way too many low-quality entries.
 //
-// Original had NO exits — positions held until opposite signal.
-// On NAS100 daily since 2008, the original long-only actually works
-// because NAS100 trends up. But it gives back huge drawdowns.
+// v5 uses SQUEEZE BREAKOUT (John Carter TTM concept):
+//   1. Detect BB squeeze — bandwidth contracts below its average
+//   2. Wait for price to cross above upper band (long) or below lower (short)
+//   3. Confirm with RSI momentum + 50 EMA slope + 200 EMA trend
+//   4. Ride the trend with wide ATR-based stops and trail
 //
-// v4 keeps the simple crossover logic and adds:
-//   • ATR-based SL/TP to cap drawdowns
-//   • 200 EMA trend filter (long above, short below)
-//   • Trailing stop to lock in gains
-//   • Cooldown of 3 daily bars (no back-to-back entries)
-//   • Long-only default (NAS100 long bias)
+// Squeeze breakouts catch the big directional moves after consolidation.
+// Expect 100-200 trades over 17 years instead of 1,071.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INPUTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Bollinger Bands (same as original) ──
+// ── Bollinger Bands ──
 bb_group  = "== Bollinger Bands =="
 source    = input.source(close, "Source", group=bb_group)
 length    = input.int(20, "BB Length", minval=1, group=bb_group)
-mult      = input.float(2.0, "BB Multiplier", minval=0.001, maxval=50, group=bb_group)
+bbMult    = input.float(2.0, "BB Multiplier", minval=0.001, maxval=50, group=bb_group)
 
-// ── Direction (same as original) ──
+// ── Squeeze Detection ──
+sq_group       = "== Squeeze Detection =="
+sqLookback     = input.int(5, "Squeeze Lookback (bars)", minval=1, maxval=20, group=sq_group,
+     tooltip="How many bars back to look for a squeeze. 5 = squeeze must have occurred within the last week")
+bwAvgLen       = input.int(20, "Bandwidth SMA Length", minval=5, maxval=50, group=sq_group,
+     tooltip="Period for bandwidth moving average — squeeze is when bandwidth drops below this avg")
+sqThreshold    = input.float(1.0, "Squeeze Threshold (x avg)", minval=0.5, maxval=1.5, step=0.1, group=sq_group,
+     tooltip="1.0 = bandwidth must be below its average. Lower = stricter squeeze requirement")
+
+// ── Trading Mode ──
 dir_group     = "== Trading Mode =="
 direction     = input.int(1, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group=dir_group,
-     tooltip="1 = Long only. NAS100 has massive upward bias — shorting it long-term loses money")
+     tooltip="1 = Long only. NAS100 has massive upward bias — shorting long-term loses money")
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
-cooldownBars  = input.int(3, "Min Bars Between Trades", minval=0, maxval=50, group=dir_group,
-     tooltip="3 daily bars — prevents whipsaw re-entries")
+cooldownBars  = input.int(10, "Min Bars Between Trades", minval=0, maxval=50, group=dir_group,
+     tooltip="10 daily bars (2 weeks) — prevents overtrading, quality over quantity")
 
 // ── Trend Filter ──
 trend_group    = "== Trend Filter =="
 use200EMA      = input.bool(true, "Enable 200 EMA Trend Filter", group=trend_group,
-     tooltip="Only long above 200 EMA, only short below. Keeps you on the right side of the macro trend")
+     tooltip="Only long above 200 EMA, only short below. Macro trend alignment")
 ema200Len      = input.int(200, "200 EMA Length", minval=1, group=trend_group)
+use50Slope     = input.bool(true, "Enable 50 EMA Slope Filter", group=trend_group,
+     tooltip="Requires 50 EMA to be rising for longs, falling for shorts — confirms intermediate trend")
+ema50Len       = input.int(50, "50 EMA Length", minval=1, group=trend_group)
+slopeBars      = input.int(5, "Slope Lookback (bars)", minval=1, maxval=20, group=trend_group,
+     tooltip="Compare 50 EMA now vs N bars ago to determine slope direction")
+
+// ── Momentum Filter ──
+mom_group      = "== Momentum Filter =="
+useRSI         = input.bool(true, "Enable RSI Filter", group=mom_group,
+     tooltip="Confirms momentum direction before entry")
+rsiLen         = input.int(14, "RSI Length", minval=1, group=mom_group)
+rsiLongMin     = input.int(50, "RSI Min for Long", minval=20, maxval=70, group=mom_group,
+     tooltip="RSI must be above this for longs — confirms upward momentum")
+rsiLongMax     = input.int(80, "RSI Max for Long", minval=60, maxval=95, group=mom_group,
+     tooltip="RSI must be below this for longs — avoids buying into exhaustion")
+rsiShortMax    = input.int(50, "RSI Max for Short", minval=30, maxval=70, group=mom_group)
+rsiShortMin    = input.int(20, "RSI Min for Short", minval=5, maxval=40, group=mom_group)
 
 // ── Risk Management ──
 risk_group   = "== Risk Management =="
 atrLen       = input.int(14, "ATR Length", minval=1, group=risk_group)
-slMult       = input.float(2.0, "Stop Loss ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
-     tooltip="2.0x ATR — wide enough for daily noise, caps worst-case loss")
-tpMult       = input.float(4.0, "Take Profit ATR Mult", minval=1.0, maxval=30.0, step=0.5, group=risk_group,
-     tooltip="4.0x ATR — 2:1 R:R, lets daily winners run")
+slMult       = input.float(3.0, "Stop Loss ATR Mult", minval=1.0, maxval=10.0, step=0.5, group=risk_group,
+     tooltip="3.0x ATR — wider than v4, survives daily noise without premature stopouts")
+useTP        = input.bool(true, "Use Take Profit", group=risk_group)
+tpMult       = input.float(8.0, "Take Profit ATR Mult", minval=2.0, maxval=30.0, step=0.5, group=risk_group,
+     tooltip="8.0x ATR — very generous TP, lets big trends develop. Disable to rely on trail only")
 useTrail     = input.bool(true, "Use Trailing Stop", group=risk_group)
-trailMult    = input.float(2.5, "Trailing Stop ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
-     tooltip="2.5x ATR — wide trail for daily TF, doesn't get shaken out by normal swings")
+trailMult    = input.float(3.0, "Trailing Stop ATR Mult", minval=1.0, maxval=10.0, step=0.5, group=risk_group,
+     tooltip="3.0x ATR — wide trail for daily TF, locks in gains without chopping out of trends")
 
 // ── Volatility Filter ──
 vol_group    = "== Volatility Filter =="
 useVolFilter = input.bool(true, "Enable Volatility Spike Filter", group=vol_group,
-     tooltip="Blocks entries when daily ATR is 3x its 20-day avg (crash days, FOMC)")
+     tooltip="Blocks entries when daily ATR is 3x its 20-day avg (crash days, FOMC bombs)")
 volSpikeMult = input.float(3.0, "Vol Spike Multiplier", minval=1.5, maxval=5.0, step=0.5, group=vol_group)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BOLLINGER BANDS (same calculation as original)
+// BOLLINGER BANDS
 // ═══════════════════════════════════════════════════════════════════════════
 basis = ta.sma(source, length)
-dev   = mult * ta.stdev(source, length)
+dev   = bbMult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TREND FILTER
+// SQUEEZE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+bandwidth = (upper - lower) / basis
+bwAvg     = ta.sma(bandwidth, bwAvgLen)
+isSqueeze = bandwidth < bwAvg * sqThreshold
+
+// Was there a squeeze within the lookback window?
+barsSinceSqueeze = ta.barssince(isSqueeze)
+wasSqueeze       = not na(barsSinceSqueeze) and barsSinceSqueeze <= sqLookback
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND FILTERS
 // ═══════════════════════════════════════════════════════════════════════════
 ema200 = ta.ema(close, ema200Len)
+ema50  = ta.ema(close, ema50Len)
 
-trendLongOK  = not use200EMA or close > ema200
-trendShortOK = not use200EMA or close < ema200
+trendLongOK  = (not use200EMA or close > ema200) and (not use50Slope or ema50 > ema50[slopeBars])
+trendShortOK = (not use200EMA or close < ema200) and (not use50Slope or ema50 < ema50[slopeBars])
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MOMENTUM FILTER
+// ═══════════════════════════════════════════════════════════════════════════
+rsiValue   = ta.rsi(close, rsiLen)
+rsiLongOK  = not useRSI or (rsiValue > rsiLongMin and rsiValue < rsiLongMax)
+rsiShortOK = not useRSI or (rsiValue < rsiShortMax and rsiValue > rsiShortMin)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ATR + VOLATILITY FILTER
@@ -100,48 +144,60 @@ barsSinceEntry = bar_index - lastEntryBar
 cooldownOK     = barsSinceEntry >= cooldownBars
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ENTRY CONDITIONS (crossover logic from original)
+// ENTRY CONDITIONS — Squeeze Breakout
 // ═══════════════════════════════════════════════════════════════════════════
-long_entry  = ta.crossover(source, lower)  and trendLongOK  and notTooWild and cooldownOK
-short_entry = ta.crossunder(source, upper) and trendShortOK and notTooWild and cooldownOK
+// Long:  price crosses above upper band after recent squeeze + trend up + RSI confirms
+// Short: price crosses below lower band after recent squeeze + trend down + RSI confirms
+long_entry  = ta.crossover(source, upper)  and wasSqueeze and trendLongOK  and rsiLongOK  and notTooWild and cooldownOK
+short_entry = ta.crossunder(source, lower) and wasSqueeze and trendShortOK and rsiShortOK and notTooWild and cooldownOK
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENTRIES
 // ═══════════════════════════════════════════════════════════════════════════
 if long_entry
-    strategy.entry("BBandLE", strategy.long, comment="BB Long")
+    strategy.entry("BBandLE", strategy.long, comment="Squeeze Long")
     lastEntryBar := bar_index
 
 if short_entry
-    strategy.entry("BBandSE", strategy.short, comment="BB Short")
+    strategy.entry("BBandSE", strategy.short, comment="Squeeze Short")
     lastEntryBar := bar_index
 
 // ═══════════════════════════════════════════════════════════════════════════
-// EXITS — ATR-based SL/TP/Trail
+// EXITS — ATR-based SL / TP / Trail
 // ═══════════════════════════════════════════════════════════════════════════
 if strategy.position_size > 0
-    longSL = strategy.position_avg_price - slMult * atrValue
-    longTP = strategy.position_avg_price + tpMult * atrValue
-    if useTrail
+    longSL   = strategy.position_avg_price - slMult * atrValue
+    longTP   = strategy.position_avg_price + tpMult * atrValue
+    trailPts = atrValue * trailMult / syminfo.mintick
+    if useTrail and useTP
         strategy.exit("Long Exit", "BBandLE",
-             stop         = longSL,
-             limit        = longTP,
-             trail_points = atrValue * trailMult / syminfo.mintick,
-             trail_offset = atrValue * trailMult / syminfo.mintick)
-    else
+             stop=longSL, limit=longTP,
+             trail_points=trailPts, trail_offset=trailPts)
+    else if useTrail
+        strategy.exit("Long Exit", "BBandLE",
+             stop=longSL,
+             trail_points=trailPts, trail_offset=trailPts)
+    else if useTP
         strategy.exit("Long Exit", "BBandLE", stop=longSL, limit=longTP)
+    else
+        strategy.exit("Long Exit", "BBandLE", stop=longSL)
 
 if strategy.position_size < 0
-    shortSL = strategy.position_avg_price + slMult * atrValue
-    shortTP = strategy.position_avg_price - tpMult * atrValue
-    if useTrail
+    shortSL  = strategy.position_avg_price + slMult * atrValue
+    shortTP  = strategy.position_avg_price - tpMult * atrValue
+    trailPts = atrValue * trailMult / syminfo.mintick
+    if useTrail and useTP
         strategy.exit("Short Exit", "BBandSE",
-             stop         = shortSL,
-             limit        = shortTP,
-             trail_points = atrValue * trailMult / syminfo.mintick,
-             trail_offset = atrValue * trailMult / syminfo.mintick)
-    else
+             stop=shortSL, limit=shortTP,
+             trail_points=trailPts, trail_offset=trailPts)
+    else if useTrail
+        strategy.exit("Short Exit", "BBandSE",
+             stop=shortSL,
+             trail_points=trailPts, trail_offset=trailPts)
+    else if useTP
         strategy.exit("Short Exit", "BBandSE", stop=shortSL, limit=shortTP)
+    else
+        strategy.exit("Short Exit", "BBandSE", stop=shortSL)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PLOTS
@@ -152,6 +208,7 @@ p_lower = plot(lower, "Lower Band", color=color.new(color.green, 30), linewidth=
 fill(p_upper, p_lower, title="BB Fill", color=color.new(color.gray, 90))
 
 plot(use200EMA ? ema200 : na, "200 EMA", color=color.white, linewidth=2)
+plot(use50Slope ? ema50 : na,  "50 EMA",  color=color.new(color.aqua, 30), linewidth=1)
 
 // Signal markers
 plotshape(long_entry and strategy.position_size <= 0,  "Buy",
@@ -159,19 +216,20 @@ plotshape(long_entry and strategy.position_size <= 0,  "Buy",
 plotshape(short_entry and strategy.position_size >= 0, "Sell",
      shape.triangledown, location.abovebar, color.red,  size=size.normal)
 
-// Backgrounds
-bgcolor(not notTooWild ? color.new(color.orange, 90) : na, title="Vol Spike")
+// Squeeze highlight — orange when bands are squeezed
+bgcolor(isSqueeze ? color.new(color.orange, 85) : na, title="Squeeze Active")
+bgcolor(not notTooWild ? color.new(color.red, 90) : na, title="Vol Spike")
 bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
      strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════════════════
-var table info = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
+var table info = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
     table.cell(info, 0, 0, "NAS100",     bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 0, "BB v4 1D",   bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, "BB v5 1D",   bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
 
     table.cell(info, 0, 1, "Upper",      text_color=color.white, text_size=size.small)
     table.cell(info, 1, 1, str.tostring(upper, "#.#"), text_color=color.red, text_size=size.small)
@@ -186,23 +244,31 @@ if barstate.islast
     table.cell(info, 1, 4, str.tostring(ema200, "#.#"),
          text_color=close > ema200 ? color.green : color.red, text_size=size.small)
 
-    table.cell(info, 0, 5, "Trend",      text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 5, close > ema200 ? "BULLISH" : "BEARISH",
+    table.cell(info, 0, 5, "50 EMA",     text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 5, str.tostring(ema50, "#.#"),
+         text_color=ema50 > ema50[slopeBars] ? color.green : color.red, text_size=size.small)
+
+    table.cell(info, 0, 6, "Trend",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 6, close > ema200 ? "BULLISH" : "BEARISH",
          text_color=close > ema200 ? color.green : color.red, text_size=size.small)
 
-    table.cell(info, 0, 6, "ATR (14)",   text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 6, str.tostring(atrValue, "#.#"), text_color=color.green, text_size=size.small)
+    table.cell(info, 0, 7, "RSI (14)",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 7, str.tostring(rsiValue, "#.#"),
+         text_color=rsiValue > 50 ? color.green : color.red, text_size=size.small)
 
-    table.cell(info, 0, 7, "Vol Spike",  text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 7, notTooWild ? "NORMAL" : "BLOCKED",
-         text_color=notTooWild ? color.green : color.orange, text_size=size.small)
+    table.cell(info, 0, 8, "ATR (14)",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 8, str.tostring(atrValue, "#.#"), text_color=color.white, text_size=size.small)
 
-    table.cell(info, 0, 8, "Direction",  text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 8, direction == 1 ? "LONG ONLY" : direction == -1 ? "SHORT ONLY" : "BOTH",
+    table.cell(info, 0, 9, "Squeeze",    text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 9, isSqueeze ? "ACTIVE" : (wasSqueeze ? "RECENT" : "NONE"),
+         text_color=isSqueeze ? color.orange : (wasSqueeze ? color.yellow : color.gray), text_size=size.small)
+
+    table.cell(info, 0, 10, "Direction",  text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 10, direction == 1 ? "LONG ONLY" : direction == -1 ? "SHORT ONLY" : "BOTH",
          text_color=direction == 1 ? color.green : direction == -1 ? color.red : color.yellow, text_size=size.small)
 
-    table.cell(info, 0, 9, "Position",   text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 9,
+    table.cell(info, 0, 11, "Position",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 11,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
          text_size=size.small)
