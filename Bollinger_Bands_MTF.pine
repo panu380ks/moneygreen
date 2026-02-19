@@ -1,0 +1,121 @@
+//@version=6
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © moneygreen
+
+strategy("Bollinger Bands Strategy MTF", shorttitle="BB MTF", overlay=true,
+     process_orders_on_close=true, initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     currency=currency.USD, pyramiding=0,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     slippage=1)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Bollinger Bands ──
+bb_group  = "== Bollinger Bands =="
+source    = input.source(close, "Source", group=bb_group)
+length    = input.int(20, "BB Length", minval=1, group=bb_group)
+mult      = input.float(2.0, "BB Multiplier", minval=0.001, maxval=50, group=bb_group)
+
+// ── Multi-Timeframe ──
+tf_group  = "== Timeframe =="
+tf_select = input.string("Chart", "BB Timeframe", options=["Chart", "1H", "4H", "1D"], group=tf_group,
+     tooltip="Calculate Bollinger Bands on a higher timeframe. 'Chart' uses the current chart timeframe.")
+
+// ── Direction ──
+dir_group = "== Direction =="
+direction = input.int(0, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group=dir_group)
+strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TIMEFRAME RESOLUTION
+// ═══════════════════════════════════════════════════════════════════════════
+tf_res = switch tf_select
+    "1H" => "60"
+    "4H" => "240"
+    "1D" => "1D"
+    => timeframe.period  // "Chart" — use current
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOLLINGER BANDS — Multi-Timeframe
+// ═══════════════════════════════════════════════════════════════════════════
+
+// request.security pulls BB values from the selected timeframe
+// lookahead=barmerge.lookahead_off prevents future leak
+[basis_mtf, upper_mtf, lower_mtf] = request.security(syminfo.tickerid, tf_res, [
+     ta.sma(source, length),
+     ta.sma(source, length) + mult * ta.stdev(source, length),
+     ta.sma(source, length) - mult * ta.stdev(source, length)
+     ], lookahead=barmerge.lookahead_off)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Long: price crosses above the lower band (mean-reversion buy)
+longCondition  = ta.crossover(source, lower_mtf)
+
+// Short: price crosses below the upper band (mean-reversion sell)
+shortCondition = ta.crossunder(source, upper_mtf)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRIES
+// ═══════════════════════════════════════════════════════════════════════════
+if longCondition
+    strategy.entry("BBandLE", strategy.long, stop=lower_mtf,
+         oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+else
+    strategy.cancel(id="BBandLE")
+
+if shortCondition
+    strategy.entry("BBandSE", strategy.short, stop=upper_mtf,
+         oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+else
+    strategy.cancel(id="BBandSE")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+p_basis = plot(basis_mtf, "Basis", color=color.yellow, linewidth=1)
+p_upper = plot(upper_mtf, "Upper Band", color=color.new(color.red, 30), linewidth=2)
+p_lower = plot(lower_mtf, "Lower Band", color=color.new(color.green, 30), linewidth=2)
+fill(p_upper, p_lower, title="BB Fill", color=color.new(color.gray, 90))
+
+// Signal markers
+plotshape(longCondition,  "Long Signal",  shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(shortCondition, "Short Signal", shape.triangledown,  location.abovebar, color.red,  size=size.small)
+
+// Position background
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
+     strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+var table info = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "BB MTF",     bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, tf_select,     bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
+
+    table.cell(info, 0, 1, "Upper",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 1, str.tostring(upper_mtf, "#.##"), text_color=color.red, text_size=size.small)
+
+    table.cell(info, 0, 2, "Basis",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 2, str.tostring(basis_mtf, "#.##"), text_color=color.yellow, text_size=size.small)
+
+    table.cell(info, 0, 3, "Lower",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 3, str.tostring(lower_mtf, "#.##"), text_color=color.green, text_size=size.small)
+
+    table.cell(info, 0, 4, "Direction",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 4, direction == 0 ? "BOTH" : direction > 0 ? "LONG ONLY" : "SHORT ONLY",
+         text_color=direction == 0 ? color.white : direction > 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(info, 0, 5, "Position",    text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 5,
+         strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
+         text_size=size.small)
