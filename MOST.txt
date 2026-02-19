@@ -7,7 +7,7 @@ percent = input.float(2.0, "Percent")
 atrLen = input.int(14, "ATR Length")
 atrMult = input.float(1.5, "ATR Multiplier")
 trendLen = input.int(200, "Trend EMA Length")
-startDate = input.time(timestamp("1 Jan 2018 00:00 +0000"), "Start Date")
+startDate = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Start Date")
 endDate = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date")
 
 // Date Filter
