@@ -35,8 +35,16 @@ trailATRMult = input.float(5.0, "Trailing Stop ATR Multiplier", minval=1.0, maxv
 useTrendFilter = input.bool(true,  "Enable 200 EMA Trend Filter", group="Trend Filter")
 trendEmaLen    = input.int(200,    "Trend EMA Length", minval=1,   group="Trend Filter")
 
-// ── Entry Window (1–8 hours from session open) ──
-entryHours  = input.int(8,  "Entry Window (hours from session open)", minval=1, maxval=24, group="Time Filter")
+// ── New York Session Filter ──
+useNYSession = input.bool(true, "Only Trade During NY Session", group="NY Session")
+nyOpenHour   = input.int(9,  "NY Open Hour (ET)",  minval=0, maxval=23, group="NY Session")
+nyOpenMin    = input.int(30, "NY Open Minute (ET)", minval=0, maxval=59, group="NY Session")
+nyCloseHour  = input.int(16, "NY Close Hour (ET)", minval=0, maxval=23, group="NY Session")
+nyCloseMin   = input.int(0,  "NY Close Minute (ET)", minval=0, maxval=59, group="NY Session")
+entryHours   = input.int(8,  "Max Entry Window (hours from NY open)", minval=1, maxval=8, group="NY Session",
+     tooltip="Only enter trades within the first N hours after NY open. Max 8.")
+
+// ── Date Range ──
 startDate   = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Start Date", group="Time Filter")
 endDate     = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date",   group="Time Filter")
 
@@ -48,11 +56,28 @@ strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (directio
 cooldownBars = input.int(5, "Min Bars Between Trades", minval=0, maxval=100, group="Trade Filters")
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TIME FILTERS
+// TIME FILTERS — NEW YORK SESSION
 // ═══════════════════════════════════════════════════════════════════════════
-timeOK        = time >= startDate and time <= endDate
-msSinceOpen   = time - time("D")
-entryWindowOK = msSinceOpen >= 0 and msSinceOpen < entryHours * 60 * 60 * 1000
+timeOK = time >= startDate and time <= endDate
+
+// Convert current bar time to New York timezone (ET)
+nyHour   = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+
+// NY session boundaries in minutes from midnight
+nyOpenMins  = nyOpenHour  * 60 + nyOpenMin     // default 9:30 = 570 mins
+nyCloseMins = nyCloseHour * 60 + nyCloseMin    // default 16:00 = 960 mins
+nowMins     = nyHour * 60 + nyMinute           // current time in mins
+
+// Check if we're inside New York session hours
+inNYSession = nowMins >= nyOpenMins and nowMins < nyCloseMins
+
+// Entry window: first N hours from NY open only
+minsFromNYOpen = nowMins - nyOpenMins
+entryWindowOK  = minsFromNYOpen >= 0 and minsFromNYOpen < entryHours * 60
+
+// Combined: must be in NY session AND within entry window (or NY filter disabled)
+sessionOK = not useNYSession or (inNYSession and entryWindowOK)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MOST INDICATOR (Moving Average Trend)
@@ -123,10 +148,10 @@ cooldownOK     = barsSinceEntry >= cooldownBars
 // FINAL ENTRY SIGNALS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// BUY: ExMov crosses above MOST + ATR >= 5 + in trend + within entry window
-buySignal  = buySignalRaw  and timeOK and entryWindowOK and atrOK and trendLongOK  and cooldownOK
-// SELL: ExMov crosses below MOST + ATR >= 5 + in trend + within entry window
-sellSignal = sellSignalRaw and timeOK and entryWindowOK and atrOK and trendShortOK and cooldownOK
+// BUY: ExMov crosses above MOST + ATR >= 5 + in trend + NY session open
+buySignal  = buySignalRaw  and timeOK and sessionOK and atrOK and trendLongOK  and cooldownOK
+// SELL: ExMov crosses below MOST + ATR >= 5 + in trend + NY session open
+sellSignal = sellSignalRaw and timeOK and sessionOK and atrOK and trendShortOK and cooldownOK
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENTRIES
@@ -192,8 +217,8 @@ plot(useTrendFilter ? trendEma : na, "Trend EMA 200", color=color.white, linewid
 plotshape(buySignal,  "Buy Signal",  shape.triangleup,   location.belowbar, color.green, size=size.small)
 plotshape(sellSignal, "Sell Signal", shape.triangledown,  location.abovebar, color.red,   size=size.small)
 
-// Entry window background
-bgcolor(entryWindowOK and timeOK ? color.new(color.blue, 95) : na, title="Entry Window")
+// NY session background
+bgcolor(sessionOK and timeOK ? color.new(color.blue, 95) : na, title="NY Session Active")
 
 // ATR too low warning
 bgcolor(not atrOK ? color.new(color.red, 95) : na, title="ATR Below Minimum")
@@ -202,7 +227,7 @@ bgcolor(not atrOK ? color.new(color.red, 95) : na, title="ATR Below Minimum")
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════════════════
 
-var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
+var table infoTable = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
     table.cell(infoTable, 0, 0, "MOST Direction",  text_color=color.white, text_size=size.small)
@@ -223,6 +248,11 @@ if barstate.islast
     table.cell(infoTable, 1, 4, atrOK ? "PASS (≥" + str.tostring(minATR) + ")" : "BLOCKED (<" + str.tostring(minATR) + ")",
          text_color=atrOK ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoTable, 0, 5, "Entry Window",    text_color=color.white, text_size=size.small)
-    table.cell(infoTable, 1, 5, entryWindowOK ? "OPEN" : "CLOSED",
-         text_color=entryWindowOK ? color.green : color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 5, "NY Session",      text_color=color.white, text_size=size.small)
+    nyTimeStr = str.tostring(nyHour, "00") + ":" + str.tostring(nyMinute, "00") + " ET"
+    table.cell(infoTable, 1, 5, inNYSession ? "OPEN  " + nyTimeStr : "CLOSED  " + nyTimeStr,
+         text_color=inNYSession ? color.green : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "Entry Window",    text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, sessionOK ? "ACTIVE" : "INACTIVE",
+         text_color=sessionOK ? color.green : color.gray, text_size=size.small)
