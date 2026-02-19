@@ -1,7 +1,18 @@
 //@version=6
 strategy("MOST Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Inputs
 length = input.int(8, "Length")
 percent = input.float(2.0, "Percent")
+atrLen = input.int(14, "ATR Length")
+atrMult = input.float(1.5, "ATR Multiplier")
+startDate = input.time(timestamp("1 Jan 2018 00:00 +0000"), "Start Date")
+endDate = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date")
+
+// Date Filter
+timeOK = time >= startDate and time <= endDate
+
+// MOST Calculation
 exMov = ta.ema(close, length)
 fark = exMov * percent * 0.01
 longStop = exMov - fark
@@ -13,12 +24,24 @@ shortStop := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortS
 var int dir = 1
 dir := dir == -1 and exMov > shortStopPrev ? 1 : dir == 1 and exMov < longStopPrev ? -1 : dir
 MOST = dir == 1 ? longStop : shortStop
-buySignal = dir == 1 and dir[1] == -1
-sellSignal = dir == -1 and dir[1] == 1
+
+// Signals
+buySignal = timeOK and dir == 1 and dir[1] == -1
+sellSignal = timeOK and dir == -1 and dir[1] == 1
+
+// ATR Stop Loss
+atrValue = ta.atr(atrLen)
+
+// Entries & Exits
 if buySignal
     strategy.entry("Long", strategy.long)
+if strategy.position_size > 0
+    stopPrice = strategy.position_avg_price - atrMult * atrValue
+    strategy.exit("ATR SL", "Long", stop=stopPrice)
 if sellSignal
-    strategy.entry("Short", strategy.short)
+    strategy.close("Long")
+
+// Plots
 plot(MOST, "MOST", color=dir == 1 ? color.green : color.red, linewidth=2)
 plot(exMov, "exMov", color=color.orange)
 plotshape(buySignal, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
