@@ -1,0 +1,28 @@
+//@version=6
+indicator("MOST", overlay=true)
+
+// Inputs
+mostLength  = input.int(14, "Length", minval=1)
+mostPercent = input.float(2.0, "Percent", minval=0.01, step=0.1)
+src         = input.source(close, "Source")
+
+// EMA
+exMov = ta.ema(src, mostLength)
+
+// Trailing stops
+fark         = exMov * mostPercent * 0.01
+longStop     = exMov - fark
+longStopPrev = nz(longStop[1], longStop)
+longStop    := exMov > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+shortStop     = exMov + fark
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop    := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+// Direction
+var int dir = 1
+dir := dir == -1 and exMov > shortStopPrev ? 1 : dir == 1 and exMov < longStopPrev ? -1 : dir
+MOST = dir == 1 ? longStop : shortStop
+
+// Plots
+plot(MOST, "MOST", color=dir == 1 ? color.green : color.red, linewidth=2)
+plot(exMov, "exMov", color=color.orange)
