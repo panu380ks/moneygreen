@@ -1,76 +1,148 @@
 //@version=6
-strategy("MOST Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+strategy("BB + MOST Combined Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
 
-// Inputs
-length = input.int(8, "Length")
-percent = input.float(2.0, "Percent")
-atrLen = input.int(14, "ATR Length")
-atrMult = input.float(1.5, "ATR Multiplier")
-tpMult = input.float(3.0, "Take Profit ATR Multiplier", minval=1.0, step=0.5)
-trendLen = input.int(200, "Trend EMA Length")
-entryHours = input.int(8, "Entry Window (hours from session open)", minval=1, maxval=24)
-startDate = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Start Date")
-endDate = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date")
+// ═══════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════
 
-// Date Filter
+// Bollinger Bands
+bbLength    = input.int(20, "BB Length", minval=1, group="Bollinger Bands")
+bbMult      = input.float(2.0, "BB Multiplier", minval=0.001, maxval=50, group="Bollinger Bands")
+
+// MOST
+mostLength  = input.int(8, "MOST EMA Length", group="MOST")
+mostPercent = input.float(2.0, "MOST Percent", group="MOST")
+
+// Trend
+trendLen    = input.int(200, "Trend EMA Length", group="Trend Filter")
+
+// ATR
+atrLen      = input.int(14, "ATR Length", group="Risk Management")
+
+// Long Risk
+slMultLong  = input.float(1.5, "Long Stop Loss ATR", minval=1.0, maxval=5.0, step=0.5, group="Long Risk")
+tpMultLong  = input.float(3.0, "Long Take Profit ATR", minval=1.0, maxval=10.0, step=0.5, group="Long Risk")
+
+// Short Risk
+slMultShort = input.float(1.5, "Short Stop Loss ATR", minval=1.0, maxval=5.0, step=0.5, group="Short Risk")
+tpMultShort = input.float(3.0, "Short Take Profit ATR", minval=1.0, maxval=10.0, step=0.5, group="Short Risk")
+
+// Time
+entryHours  = input.int(8, "Entry Window (hours from session open)", minval=1, maxval=24, group="Time Filter")
+startDate   = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Start Date", group="Time Filter")
+endDate     = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date", group="Time Filter")
+
+// Direction
+direction   = input.int(0, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group="Direction")
+strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
+
+// ═══════════════════════════════════════════════════
+// TIME FILTERS
+// ═══════════════════════════════════════════════════
 timeOK = time >= startDate and time <= endDate
-
-// 8-Hour Entry Window Filter
-// Only allow new entries within the first 8 hours of the trading session
 msSinceOpen = time - time("D")
 entryWindowOK = msSinceOpen >= 0 and msSinceOpen < entryHours * 60 * 60 * 1000
 
-// Trend Filter
-trendEma = ta.ema(close, trendLen)
-uptrend = close > trendEma
+// ═══════════════════════════════════════════════════
+// TREND FILTER (200 EMA)
+// ═══════════════════════════════════════════════════
+trendEma  = ta.ema(close, trendLen)
+uptrend   = close > trendEma
 downtrend = close < trendEma
 
-// MOST Calculation
-exMov = ta.ema(close, length)
-fark = exMov * percent * 0.01
-longStop = exMov - fark
+// ═══════════════════════════════════════════════════
+// BOLLINGER BANDS
+// ═══════════════════════════════════════════════════
+basis = ta.sma(close, bbLength)
+dev   = bbMult * ta.stdev(close, bbLength)
+upper = basis + dev
+lower = basis - dev
+
+bbBuySignal  = ta.crossover(close, lower)
+bbSellSignal = ta.crossunder(close, upper)
+
+// ═══════════════════════════════════════════════════
+// MOST (Moving Stop)
+// ═══════════════════════════════════════════════════
+exMov = ta.ema(close, mostLength)
+fark  = exMov * mostPercent * 0.01
+
+longStop     = exMov - fark
 longStopPrev = nz(longStop[1], longStop)
-longStop := exMov > longStopPrev ? math.max(longStop, longStopPrev) : longStop
-shortStop = exMov + fark
+longStop    := exMov > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStop     = exMov + fark
 shortStopPrev = nz(shortStop[1], shortStop)
-shortStop := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+shortStop    := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
 var int dir = 1
 dir := dir == -1 and exMov > shortStopPrev ? 1 : dir == 1 and exMov < longStopPrev ? -1 : dir
 MOST = dir == 1 ? longStop : shortStop
 
-// Signals - only buy in uptrend, only sell in downtrend, only during entry window
-buySignal = timeOK and entryWindowOK and dir == 1 and dir[1] == -1 and uptrend
-sellSignal = timeOK and entryWindowOK and dir == -1 and dir[1] == 1 and downtrend
+mostBullish = dir == 1
+mostBearish = dir == -1
+mostFlipLong  = dir == 1 and dir[1] == -1
+mostFlipShort = dir == -1 and dir[1] == 1
 
-// ATR for Stop Loss & Take Profit
+// ═══════════════════════════════════════════════════
+// ATR
+// ═══════════════════════════════════════════════════
 atrValue = ta.atr(atrLen)
 
-// Entries - restricted to 8hr window
+// ═══════════════════════════════════════════════════
+// COMBINED ENTRY SIGNALS (only during 8hr window)
+// ═══════════════════════════════════════════════════
+longEntry  = timeOK and entryWindowOK and bbBuySignal  and mostBullish and uptrend
+shortEntry = timeOK and entryWindowOK and bbSellSignal and mostBearish and downtrend
+
+mostLongEntry  = timeOK and entryWindowOK and mostFlipLong  and uptrend   and close <= basis
+mostShortEntry = timeOK and entryWindowOK and mostFlipShort and downtrend and close >= basis
+
+buySignal  = longEntry  or mostLongEntry
+sellSignal = shortEntry or mostShortEntry
+
+// ═══════════════════════════════════════════════════
+// ENTRIES (restricted to 8hr window)
+// ═══════════════════════════════════════════════════
 if buySignal
     strategy.entry("Long", strategy.long)
 if sellSignal
     strategy.entry("Short", strategy.short)
 
-// Exits - run anytime (TP + SL), no time restriction
+// ═══════════════════════════════════════════════════
+// EXITS — run anytime, no time restriction
+// Position stays open past the 8hr window.
+// Closes when first hit: TP, SL, or MOST reversal.
+// ═══════════════════════════════════════════════════
+
+// Take Profit + Stop Loss (separate settings for Long and Short)
 if strategy.position_size > 0
-    stopPrice = strategy.position_avg_price - atrMult * atrValue
-    tpPrice = strategy.position_avg_price + tpMult * atrValue
-    strategy.exit("TP/SL Long", "Long", stop=stopPrice, limit=tpPrice)
+    longSL = strategy.position_avg_price - slMultLong * atrValue
+    longTP = strategy.position_avg_price + tpMultLong * atrValue
+    strategy.exit("TP/SL Long", "Long", stop=longSL, limit=longTP)
+
 if strategy.position_size < 0
-    stopPrice = strategy.position_avg_price + atrMult * atrValue
-    tpPrice = strategy.position_avg_price - tpMult * atrValue
-    strategy.exit("TP/SL Short", "Short", stop=stopPrice, limit=tpPrice)
+    shortSL = strategy.position_avg_price + slMultShort * atrValue
+    shortTP = strategy.position_avg_price - tpMultShort * atrValue
+    strategy.exit("TP/SL Short", "Short", stop=shortSL, limit=shortTP)
 
-// MOST reversal exits - also run anytime
-if dir == -1 and strategy.position_size > 0
-    strategy.close("Long")
-if dir == 1 and strategy.position_size < 0
-    strategy.close("Short")
+// MOST reversal exits
+if mostBearish and strategy.position_size > 0
+    strategy.close("Long", comment="MOST Flip")
+if mostBullish and strategy.position_size < 0
+    strategy.close("Short", comment="MOST Flip")
 
-// Plots
-plot(trendEma, "Trend EMA", color=color.white, linewidth=1)
+// ═══════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════
+plot(trendEma, "Trend EMA 200", color=color.white, linewidth=1)
+plot(basis, "BB Basis", color=color.gray)
+p1 = plot(upper, "BB Upper", color=color.new(color.blue, 50))
+p2 = plot(lower, "BB Lower", color=color.new(color.blue, 50))
+fill(p1, p2, color=color.new(color.blue, 92), title="BB Fill")
 plot(MOST, "MOST", color=dir == 1 ? color.green : color.red, linewidth=2)
-plot(exMov, "exMov", color=color.orange)
-plotshape(buySignal, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
-plotshape(sellSignal, "Sell", shape.triangledown, location.abovebar, color.red, size=size.small)
+plot(exMov, "MOST EMA", color=color.orange)
+
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(sellSignal, "Sell", shape.triangledown,  location.abovebar, color.red,   size=size.small)
 bgcolor(entryWindowOK ? color.new(color.blue, 95) : na, title="Entry Window")
