@@ -11,22 +11,21 @@ strategy("Bollinger Bands Strategy MTF v3 — NAS100", shorttitle="BB MTF v3 NAS
      slippage=2)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NAS100 BB STRATEGY — v3
+// NAS100 BB STRATEGY — v3 (INTRADAY EDITION)
 // ═══════════════════════════════════════════════════════════════════════════
-// v1: -98.94% (no risk management, 5349 trades)
-// v2: +0.48% / 2 trades (filters too tight, blocked everything)
-// v3: Loosened filters to generate 50-200 trades while keeping
-//     SL/TP/trail risk management intact.
+// v1: -98.94% / 5,349 trades (no SL, no filters, 1-min BB = noise)
+// v2: +0.48% / 2 trades   (all filters ON = blocked everything)
+// v3: -98.94% / 5,047 trades (loosened filters BUT BB TF was "Chart"
+//     on 1-min = same v1 disaster, crossovers fire on every wiggle)
 //
-// Changes from v2:
-//   • BB squeeze filter OFF by default (was biggest blocker)
-//   • Session filter OFF (NAS100 CFDs trade 24/5, daily chart ignores sessions)
-//   • Trend filter: single 200 EMA only (removed 50 EMA — too restrictive)
-//   • minATR lowered to 0 (daily bars always have enough ATR)
-//   • Cooldown reduced from 8 to 3
-//   • Removed basis-touch early exit (was closing winners too soon)
-//   • Wider TP targets: 4x long / 3.5x short (let winners run)
-//   • Added BB re-entry: can re-enter on touch of opposite band
+// v3 FIX — the real problem was always: 1-min BBs are noise.
+//   • BB Timeframe default → "4H" (not "Chart")
+//     4H BBs on a 1-min chart = smooth levels, crossovers = real moves
+//   • Session filter ON — only trade NY 9:30-15:30 ET (liquid hours)
+//   • Cooldown = 60 bars (1 hour on 1-min) — max ~6 trades/day
+//   • MACD confirmation — prevents fading strong trends
+//   • ATR from 4H timeframe for SL/TP — stable, not noisy 1-min ATR
+//   • Long-only by default — NAS100 has massive long bias since 2008
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -41,61 +40,64 @@ mult      = input.float(2.0, "BB Multiplier", minval=0.001, maxval=50, group=bb_
 
 // ── Multi-Timeframe ──
 tf_group  = "== Timeframe =="
-tf_select = input.string("Chart", "BB Timeframe", options=["Chart", "1H", "4H", "1D"], group=tf_group,
-     tooltip="Calculate Bollinger Bands on a higher timeframe. 'Chart' uses the current chart timeframe.")
+tf_select = input.string("4H", "BB Timeframe", options=["Chart", "1H", "4H", "1D"], group=tf_group,
+     tooltip="CRITICAL: Use 4H or 1D when on 1-min/5-min charts. 'Chart' on 1-min = thousands of false signals.")
 
 // ── Trend Filter ──
 trend_group    = "== Trend Filter =="
 use200EMA      = input.bool(true, "Enable 200 EMA Trend Filter", group=trend_group,
-     tooltip="Only long when price > 200 EMA, only short when price < 200 EMA")
+     tooltip="Only long when price > 200 EMA, only short when price < 200 EMA. Uses chart-TF EMA.")
 ema200Len      = input.int(200, "200 EMA Length", minval=1, group=trend_group)
+
+// ── MACD Confirmation ──
+macd_group   = "== MACD Confirmation =="
+useMACD      = input.bool(true, "Require MACD Confirmation", group=macd_group,
+     tooltip="MACD histogram must agree with trade direction — prevents fading strong momentum")
+macdFast     = input.int(12, "MACD Fast", minval=1, group=macd_group)
+macdSlow     = input.int(26, "MACD Slow", minval=1, group=macd_group)
+macdSignal   = input.int(9, "MACD Signal", minval=1, group=macd_group)
 
 // ── Trading Mode ──
 dir_group     = "== Trading Mode =="
-direction     = input.int(0, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group=dir_group)
+direction     = input.int(1, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group=dir_group,
+     tooltip="1 = Long only (default). NAS100 has massive long bias — shorting loses money long-term")
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
-cooldownBars  = input.int(3, "Min Bars Between Trades", minval=0, maxval=100, group=dir_group,
-     tooltip="3 bars — enough to prevent same-bar re-entry without blocking trades")
+cooldownBars  = input.int(60, "Min Bars Between Trades", minval=0, maxval=500, group=dir_group,
+     tooltip="60 bars = 1 hour on 1-min chart. Prevents overtrading. Max ~6 entries per session")
 
 // ── Risk Management ──
 risk_group   = "== Risk Management =="
-atrLen       = input.int(14, "ATR Length", minval=1, group=risk_group)
-minATR       = input.float(0.0, "Minimum ATR Filter", minval=0, step=10.0, group=risk_group,
-     tooltip="0 = disabled. Set to 50+ for intraday to filter dead sessions")
-slMultLong   = input.float(2.0, "Long Stop Loss ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
-     tooltip="2.0x ATR — caps downside on each trade")
-tpMultLong   = input.float(4.0, "Long Take Profit ATR Mult", minval=1.0, maxval=30.0, step=0.5, group=risk_group,
-     tooltip="4.0x ATR — let winners run, 2:1 R:R")
-slMultShort  = input.float(2.0, "Short Stop Loss ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group)
-tpMultShort  = input.float(3.5, "Short Take Profit ATR Mult", minval=1.0, maxval=30.0, step=0.5, group=risk_group,
-     tooltip="3.5x ATR — slightly tighter for shorts due to NAS100 long bias")
+atrLen       = input.int(14, "ATR Length (on BB timeframe)", minval=1, group=risk_group,
+     tooltip="ATR is fetched from BB timeframe (4H) — gives stable SL/TP, not noisy 1-min ATR")
+slMultLong   = input.float(1.5, "Long Stop Loss ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
+     tooltip="1.5x 4H-ATR — tight enough to limit damage, wide enough to avoid noise stops")
+tpMultLong   = input.float(3.0, "Long Take Profit ATR Mult", minval=1.0, maxval=30.0, step=0.5, group=risk_group,
+     tooltip="3.0x 4H-ATR — 2:1 R:R")
+slMultShort  = input.float(1.5, "Short Stop Loss ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group)
+tpMultShort  = input.float(2.5, "Short Take Profit ATR Mult", minval=1.0, maxval=30.0, step=0.5, group=risk_group,
+     tooltip="2.5x ATR — tighter for shorts since NAS100 trends up")
 useTrail     = input.bool(true, "Use Trailing Stop", group=risk_group)
-trailATRMult = input.float(2.0, "Trailing Stop ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
-     tooltip="2.0x ATR — gives room to breathe, doesn't choke winners")
+trailATRMult = input.float(1.5, "Trailing Stop ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
+     tooltip="1.5x ATR — locks in gains as position moves in your favor")
 
 // ── Volatility Filter ──
 vol_group    = "== Volatility Filter =="
 useVolFilter = input.bool(true, "Enable Volatility Spike Filter", group=vol_group,
-     tooltip="Blocks entries when ATR spikes to 3x its 20-bar average")
-volSpikeMult = input.float(3.0, "Vol Spike Multiplier", minval=1.5, maxval=5.0, step=0.5, group=vol_group)
+     tooltip="Blocks entries when ATR spikes to 2.5x its 20-bar avg (FOMC/CPI/earnings)")
+volSpikeMult = input.float(2.5, "Vol Spike Multiplier", minval=1.5, maxval=5.0, step=0.5, group=vol_group)
 
-// ── BB Squeeze Filter (OFF by default in v3) ──
-squeeze_group = "== BB Squeeze =="
-useSqueeze    = input.bool(false, "Require BB Squeeze Before Entry", group=squeeze_group,
-     tooltip="OFF by default — was blocking almost all trades in v2. Turn ON for higher-quality but fewer entries")
-sqzLookback   = input.int(120, "Squeeze Lookback", minval=20, maxval=500, group=squeeze_group)
-sqzPercentile = input.float(50.0, "Squeeze Percentile (%)", minval=5.0, maxval=80.0, step=5.0, group=squeeze_group,
-     tooltip="50% — more permissive than v2's 30% when enabled")
-
-// ── NY Session (OFF by default for daily charts) ──
+// ── NY Session ──
 sess_group   = "== NY Session =="
-use_session  = input.bool(false, "Only Trade During NY Session", group=sess_group,
-     tooltip="OFF by default — daily/4H charts don't need session filtering. Turn ON for 1H or lower")
+use_session  = input.bool(true, "Only Trade During NY Session", group=sess_group,
+     tooltip="ON — NAS100 volume and follow-through is best during NY hours. Avoids overnight chop")
 nyOpenHour   = input.int(9, "NY Open Hour (ET)", minval=0, maxval=23, group=sess_group)
-nyOpenMin    = input.int(0, "NY Open Minute (ET)", minval=0, maxval=59, group=sess_group)
-nyCloseHour  = input.int(16, "NY Close Hour (ET)", minval=0, maxval=23, group=sess_group)
-nyCloseMin   = input.int(0, "NY Close Minute (ET)", minval=0, maxval=59, group=sess_group)
-entryHours   = input.int(6, "Entry Window (hours)", minval=1, maxval=24, group=sess_group)
+nyOpenMin    = input.int(30, "NY Open Minute (ET)", minval=0, maxval=59, group=sess_group,
+     tooltip="9:30 ET — regular market open")
+nyCloseHour  = input.int(15, "NY Close Hour (ET)", minval=0, maxval=23, group=sess_group)
+nyCloseMin   = input.int(30, "NY Close Minute (ET)", minval=0, maxval=59, group=sess_group,
+     tooltip="15:30 ET — 30 min before close, avoids EOD volatility")
+entryHours   = input.int(6, "Entry Window (hours)", minval=1, maxval=24, group=sess_group,
+     tooltip="6 hours — entries allowed 9:30-15:30 ET")
 
 // ── Date Filter ──
 date_group  = "== Date Filter =="
@@ -131,7 +133,7 @@ tf_res = switch tf_select
     => timeframe.period
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BOLLINGER BANDS — Multi-Timeframe
+// BOLLINGER BANDS — Multi-Timeframe (4H default)
 // ═══════════════════════════════════════════════════════════════════════════
 [basis_mtf, upper_mtf, lower_mtf] = request.security(syminfo.tickerid, tf_res, [
      ta.sma(source, length),
@@ -140,7 +142,17 @@ tf_res = switch tf_select
      ], lookahead=barmerge.lookahead_off)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TREND FILTER — 200 EMA only
+// ATR — from BB timeframe (4H) for stable SL/TP levels
+// ═══════════════════════════════════════════════════════════════════════════
+atrHTF = request.security(syminfo.tickerid, tf_res, ta.atr(atrLen), lookahead=barmerge.lookahead_off)
+
+// Also get chart-TF ATR for volatility filter
+atrChart   = ta.atr(atrLen)
+atrChartMA = ta.sma(atrChart, 20)
+notTooWild = not useVolFilter or atrChart < atrChartMA * volSpikeMult
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND FILTER — 200 EMA on chart timeframe
 // ═══════════════════════════════════════════════════════════════════════════
 ema200 = ta.ema(close, ema200Len)
 
@@ -148,33 +160,18 @@ trendLongOK  = not use200EMA or close > ema200
 trendShortOK = not use200EMA or close < ema200
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ATR
+// MACD — Momentum confirmation
 // ═══════════════════════════════════════════════════════════════════════════
-atrValue = ta.atr(atrLen)
-atrOK    = minATR == 0.0 or atrValue >= minATR
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdLongOK  = not useMACD or histLine > 0      // bullish momentum
+macdShortOK = not useMACD or histLine < 0      // bearish momentum
 
 // ═══════════════════════════════════════════════════════════════════════════
-// VOLATILITY SPIKE FILTER
-// ═══════════════════════════════════════════════════════════════════════════
-atrMA      = ta.sma(atrValue, 20)
-notTooWild = not useVolFilter or atrValue < atrMA * volSpikeMult
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BB SQUEEZE FILTER (OFF by default)
-// ═══════════════════════════════════════════════════════════════════════════
-bandwidth    = (upper_mtf - lower_mtf) / basis_mtf * 100
-bwMin        = ta.lowest(bandwidth, sqzLookback)
-bwMax        = ta.highest(bandwidth, sqzLookback)
-bwRange      = bwMax - bwMin
-bwThreshold  = bwMin + bwRange * (sqzPercentile / 100.0)
-inSqueeze    = not useSqueeze or bandwidth <= bwThreshold
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RSI — Wide guard rails
+// RSI — Guard rails
 // ═══════════════════════════════════════════════════════════════════════════
 rsiVal     = ta.rsi(close, 14)
-rsiLongOK  = rsiVal < 85   // very permissive — NAS100 stays overbought in bull runs
-rsiShortOK = rsiVal > 15
+rsiLongOK  = rsiVal < 80
+rsiShortOK = rsiVal > 20
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COOLDOWN
@@ -187,13 +184,13 @@ cooldownOK     = barsSinceEntry >= cooldownBars
 // ENTRY CONDITIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Core BB signals
+// Core BB signals — price crosses 4H BB from outside back inside
 bbLongRaw  = ta.crossover(source, lower_mtf)
 bbShortRaw = ta.crossunder(source, upper_mtf)
 
-// Full entry: BB signal + trend + vol + session + cooldown
-long_entry  = bbLongRaw  and trendLongOK  and rsiLongOK  and notTooWild and inSqueeze and in_date and sessionOK and atrOK and cooldownOK
-short_entry = bbShortRaw and trendShortOK and rsiShortOK and notTooWild and inSqueeze and in_date and sessionOK and atrOK and cooldownOK
+// Full entry conditions
+long_entry  = bbLongRaw  and trendLongOK  and macdLongOK  and rsiLongOK  and notTooWild and in_date and sessionOK and cooldownOK
+short_entry = bbShortRaw and trendShortOK and macdShortOK and rsiShortOK and notTooWild and in_date and sessionOK and cooldownOK
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENTRIES
@@ -207,29 +204,29 @@ if short_entry
     lastEntryBar := bar_index
 
 // ═══════════════════════════════════════════════════════════════════════════
-// EXITS — ATR-based SL/TP/Trail (run anytime)
+// EXITS — ATR-based SL/TP/Trail using 4H ATR
 // ═══════════════════════════════════════════════════════════════════════════
 if strategy.position_size > 0
-    longSL = strategy.position_avg_price - slMultLong * atrValue
-    longTP = strategy.position_avg_price + tpMultLong * atrValue
+    longSL = strategy.position_avg_price - slMultLong * atrHTF
+    longTP = strategy.position_avg_price + tpMultLong * atrHTF
     if useTrail
         strategy.exit("Long Exit", "BBandLE",
              stop         = longSL,
              limit        = longTP,
-             trail_points = atrValue * trailATRMult / syminfo.mintick,
-             trail_offset = atrValue * trailATRMult / syminfo.mintick)
+             trail_points = atrHTF * trailATRMult / syminfo.mintick,
+             trail_offset = atrHTF * trailATRMult / syminfo.mintick)
     else
         strategy.exit("Long Exit", "BBandLE", stop=longSL, limit=longTP)
 
 if strategy.position_size < 0
-    shortSL = strategy.position_avg_price + slMultShort * atrValue
-    shortTP = strategy.position_avg_price - tpMultShort * atrValue
+    shortSL = strategy.position_avg_price + slMultShort * atrHTF
+    shortTP = strategy.position_avg_price - tpMultShort * atrHTF
     if useTrail
         strategy.exit("Short Exit", "BBandSE",
              stop         = shortSL,
              limit        = shortTP,
-             trail_points = atrValue * trailATRMult / syminfo.mintick,
-             trail_offset = atrValue * trailATRMult / syminfo.mintick)
+             trail_points = atrHTF * trailATRMult / syminfo.mintick,
+             trail_offset = atrHTF * trailATRMult / syminfo.mintick)
     else
         strategy.exit("Short Exit", "BBandSE", stop=shortSL, limit=shortTP)
 
@@ -252,20 +249,19 @@ plotshape(short_entry and strategy.position_size >= 0, "Sell",
 // Backgrounds
 bgcolor(not notTooWild ? color.new(color.orange, 90) : na, title="Vol Spike")
 bgcolor(sessionOK and use_session and in_date ? color.new(color.blue, 95) : na, title="NY Session")
-bgcolor(not atrOK and minATR > 0 ? color.new(color.red, 95) : na, title="ATR Low")
 bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
      strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════════════════
-var table info = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+var table info = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
     table.cell(info, 0, 0, "NAS100",     bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
     table.cell(info, 1, 0, "BB MTF v3",  bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
 
-    table.cell(info, 0, 1, "Timeframe",  text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 1, "BB TF",      text_color=color.white, text_size=size.small)
     table.cell(info, 1, 1, tf_select,    text_color=color.aqua, text_size=size.small)
 
     table.cell(info, 0, 2, "Upper",      text_color=color.white, text_size=size.small)
@@ -277,32 +273,36 @@ if barstate.islast
     table.cell(info, 0, 4, "Lower",      text_color=color.white, text_size=size.small)
     table.cell(info, 1, 4, str.tostring(lower_mtf, "#.#"), text_color=color.green, text_size=size.small)
 
-    table.cell(info, 0, 5, "Bandwidth",  text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 5, str.tostring(bandwidth, "#.##") + "%",
-         text_color=color.white, text_size=size.small)
-
-    table.cell(info, 0, 6, "200 EMA",    text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 6, str.tostring(ema200, "#.#"),
+    table.cell(info, 0, 5, "200 EMA",    text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 5, str.tostring(ema200, "#.#"),
          text_color=close > ema200 ? color.green : color.red, text_size=size.small)
 
-    table.cell(info, 0, 7, "Trend",      text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 7, close > ema200 ? "BULLISH (>200)" : "BEARISH (<200)",
+    table.cell(info, 0, 6, "Trend",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 6, close > ema200 ? "BULL (>200)" : "BEAR (<200)",
          text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+
+    table.cell(info, 0, 7, "MACD Hist",  text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 7, str.tostring(histLine, "#.#"),
+         text_color=histLine > 0 ? color.green : color.red, text_size=size.small)
 
     table.cell(info, 0, 8, "RSI (14)",   text_color=color.white, text_size=size.small)
     table.cell(info, 1, 8, str.tostring(rsiVal, "#.#"),
          text_color=rsiVal > 70 ? color.red : rsiVal < 30 ? color.green : color.yellow, text_size=size.small)
 
-    table.cell(info, 0, 9, "ATR (" + str.tostring(atrLen) + ")", text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 9, str.tostring(atrValue, "#.#"),
-         text_color=color.green, text_size=size.small)
+    table.cell(info, 0, 9, "4H ATR",     text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 9, str.tostring(atrHTF, "#.#"), text_color=color.green, text_size=size.small)
 
     table.cell(info, 0, 10, "Vol Spike",  text_color=color.white, text_size=size.small)
     table.cell(info, 1, 10, notTooWild ? "NORMAL" : "BLOCKED",
          text_color=notTooWild ? color.green : color.orange, text_size=size.small)
 
-    table.cell(info, 0, 11, "Position",   text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 11,
+    nyTimeStr = str.tostring(nyHour, "00") + ":" + str.tostring(nyMinute, "00") + " ET"
+    table.cell(info, 0, 11, "NY Session", text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 11, inNYSession ? "OPEN " + nyTimeStr : "CLOSED " + nyTimeStr,
+         text_color=inNYSession ? color.green : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 12, "Position",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 12,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
          text_size=size.small)
