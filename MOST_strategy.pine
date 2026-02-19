@@ -1,0 +1,228 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © moneygreen
+
+//@version=6
+strategy("MOST Trend Strategy",
+     overlay         = true,
+     initial_capital  = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type  = strategy.commission.percent,
+     commission_value = 0.05,
+     slippage         = 1,
+     pyramiding       = 0,
+     calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── MOST Settings ──
+mostLength  = input.int(8,    "MOST EMA Length",   minval=1,    group="MOST")
+mostPercent = input.float(2.0, "MOST Percent",     minval=0.01, step=0.1, group="MOST")
+src         = input.source(close, "Source",                      group="MOST")
+
+// ── ATR Settings ──
+atrLength   = input.int(14,   "ATR Length",        minval=1,    group="ATR / Risk")
+minATR      = input.float(5.0, "Minimum ATR Filter", minval=0,  step=0.5, tooltip="Only enter trades when ATR >= this value. Set 0 to disable.", group="ATR / Risk")
+slATRMult   = input.float(5.0, "Stop Loss ATR Multiplier",  minval=1.0, maxval=20.0, step=0.5, group="ATR / Risk")
+tpATRMult   = input.float(10.0, "Take Profit ATR Multiplier", minval=1.0, maxval=30.0, step=0.5, group="ATR / Risk")
+useTrail    = input.bool(true, "Use Trailing Stop",                       group="ATR / Risk")
+trailATRMult = input.float(5.0, "Trailing Stop ATR Multiplier", minval=1.0, maxval=20.0, step=0.5, group="ATR / Risk")
+
+// ── Trend Filter ──
+useTrendFilter = input.bool(true,  "Enable 200 EMA Trend Filter", group="Trend Filter")
+trendEmaLen    = input.int(200,    "Trend EMA Length", minval=1,   group="Trend Filter")
+
+// ── Entry Window (1–8 hours from session open) ──
+entryHours  = input.int(8,  "Entry Window (hours from session open)", minval=1, maxval=24, group="Time Filter")
+startDate   = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Start Date", group="Time Filter")
+endDate     = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date",   group="Time Filter")
+
+// ── Direction ──
+direction = input.int(0, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group="Direction")
+strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
+
+// ── Cooldown ──
+cooldownBars = input.int(5, "Min Bars Between Trades", minval=0, maxval=100, group="Trade Filters")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TIME FILTERS
+// ═══════════════════════════════════════════════════════════════════════════
+timeOK        = time >= startDate and time <= endDate
+msSinceOpen   = time - time("D")
+entryWindowOK = msSinceOpen >= 0 and msSinceOpen < entryHours * 60 * 60 * 1000
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MOST INDICATOR (Moving Average Trend)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Exponential Moving Average of source
+exMov = ta.ema(src, mostLength)
+
+// Percentage-based trailing band distance
+fark = exMov * mostPercent * 0.01
+
+// Long trailing stop (below EMA, ratchets up)
+longStop     = exMov - fark
+longStopPrev = nz(longStop[1], longStop)
+longStop    := exMov > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+// Short trailing stop (above EMA, ratchets down)
+shortStop     = exMov + fark
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop    := exMov < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+// Direction: 1 = bullish, -1 = bearish
+var int mostDir = 1
+mostDir := mostDir == -1 and exMov > shortStopPrev ? 1 :
+           mostDir ==  1 and exMov < longStopPrev  ? -1 : mostDir
+
+// The MOST line itself
+MOST = mostDir == 1 ? longStop : shortStop
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL DETECTION — ExMov vs MOST crossovers
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ExMov crossing above MOST = BUY (bullish flip)
+mostCrossUp   = ta.crossover(exMov, MOST)
+// ExMov crossing below MOST = SELL (bearish flip)
+mostCrossDown = ta.crossunder(exMov, MOST)
+
+// Also detect the direction flip itself for confirmation
+mostFlipLong  = mostDir == 1  and mostDir[1] == -1
+mostFlipShort = mostDir == -1 and mostDir[1] == 1
+
+// Combined buy/sell signals: crossover OR direction flip
+buySignalRaw  = mostCrossUp  or mostFlipLong
+sellSignalRaw = mostCrossDown or mostFlipShort
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATR CALCULATION & FILTER
+// ═══════════════════════════════════════════════════════════════════════════
+atrValue = ta.atr(atrLength)
+atrOK    = minATR == 0.0 or atrValue >= minATR
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND FILTER (200 EMA)
+// ═══════════════════════════════════════════════════════════════════════════
+trendEma   = ta.ema(close, trendEmaLen)
+trendLongOK  = not useTrendFilter or close > trendEma
+trendShortOK = not useTrendFilter or close < trendEma
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOLDOWN
+// ═══════════════════════════════════════════════════════════════════════════
+var int lastEntryBar = 0
+barsSinceEntry = bar_index - lastEntryBar
+cooldownOK     = barsSinceEntry >= cooldownBars
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FINAL ENTRY SIGNALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// BUY: ExMov crosses above MOST + ATR >= 5 + in trend + within entry window
+buySignal  = buySignalRaw  and timeOK and entryWindowOK and atrOK and trendLongOK  and cooldownOK
+// SELL: ExMov crosses below MOST + ATR >= 5 + in trend + within entry window
+sellSignal = sellSignalRaw and timeOK and entryWindowOK and atrOK and trendShortOK and cooldownOK
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+if buySignal
+    strategy.entry("Long", strategy.long)
+    lastEntryBar := bar_index
+
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    lastEntryBar := bar_index
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXITS — Hold until Take Profit, Stop Loss, or Trailing Stop hit
+// Exits run at all times (no time restriction) so position rides to TP
+// ═══════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size > 0
+    longSL = strategy.position_avg_price - slATRMult * atrValue
+    longTP = strategy.position_avg_price + tpATRMult * atrValue
+    if useTrail
+        strategy.exit("Long Exit", "Long",
+             stop         = longSL,
+             limit        = longTP,
+             trail_points = atrValue * trailATRMult / syminfo.mintick,
+             trail_offset = atrValue * trailATRMult / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if strategy.position_size < 0
+    shortSL = strategy.position_avg_price + slATRMult * atrValue
+    shortTP = strategy.position_avg_price - tpATRMult * atrValue
+    if useTrail
+        strategy.exit("Short Exit", "Short",
+             stop         = shortSL,
+             limit        = shortTP,
+             trail_points = atrValue * trailATRMult / syminfo.mintick,
+             trail_offset = atrValue * trailATRMult / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// ── MOST reversal safety exit ──
+// If MOST flips against your position, close as safety net
+if mostDir == -1 and strategy.position_size > 0
+    strategy.close("Long", comment="MOST Bearish Flip")
+if mostDir == 1 and strategy.position_size < 0
+    strategy.close("Short", comment="MOST Bullish Flip")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// MOST line: green when bullish, red when bearish
+mostColor = mostDir == 1 ? color.green : color.red
+plot(MOST,    "MOST",    color=mostColor,    linewidth=2)
+plot(exMov,   "ExMov",   color=color.orange, linewidth=1)
+
+// 200 EMA trend filter
+plot(useTrendFilter ? trendEma : na, "Trend EMA 200", color=color.white, linewidth=1)
+
+// Entry signals on chart
+plotshape(buySignal,  "Buy Signal",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown,  location.abovebar, color.red,   size=size.small)
+
+// Entry window background
+bgcolor(entryWindowOK and timeOK ? color.new(color.blue, 95) : na, title="Entry Window")
+
+// ATR too low warning
+bgcolor(not atrOK ? color.new(color.red, 95) : na, title="ATR Below Minimum")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "MOST Direction",  text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, mostDir == 1 ? "BULLISH" : "BEARISH",
+         text_color=mostDir == 1 ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "ExMov",           text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(exMov, "#.##"), text_color=color.orange, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "MOST Line",       text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(MOST, "#.##"), text_color=mostColor, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "ATR(" + str.tostring(atrLength) + ")", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(atrValue, "#.##"),
+         text_color=atrOK ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "ATR Filter",      text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, atrOK ? "PASS (≥" + str.tostring(minATR) + ")" : "BLOCKED (<" + str.tostring(minATR) + ")",
+         text_color=atrOK ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Entry Window",    text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, entryWindowOK ? "OPEN" : "CLOSED",
+         text_color=entryWindowOK ? color.green : color.gray, text_size=size.small)
