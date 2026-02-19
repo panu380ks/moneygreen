@@ -6,12 +6,19 @@ length = input.int(8, "Length")
 percent = input.float(2.0, "Percent")
 atrLen = input.int(14, "ATR Length")
 atrMult = input.float(1.5, "ATR Multiplier")
+tpMult = input.float(3.0, "Take Profit ATR Multiplier")
 trendLen = input.int(200, "Trend EMA Length")
+entryHours = input.int(8, "Entry Window (hours from session open)", minval=1, maxval=24)
 startDate = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Start Date")
 endDate = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date")
 
 // Date Filter
 timeOK = time >= startDate and time <= endDate
+
+// 8-Hour Entry Window Filter
+// Only allow new entries within the first 8 hours of the trading session
+msSinceOpen = time - time("D")
+entryWindowOK = msSinceOpen >= 0 and msSinceOpen < entryHours * 60 * 60 * 1000
 
 // Trend Filter
 trendEma = ta.ema(close, trendLen)
@@ -31,24 +38,30 @@ var int dir = 1
 dir := dir == -1 and exMov > shortStopPrev ? 1 : dir == 1 and exMov < longStopPrev ? -1 : dir
 MOST = dir == 1 ? longStop : shortStop
 
-// Signals - only buy in uptrend, only sell in downtrend
-buySignal = timeOK and dir == 1 and dir[1] == -1 and uptrend
-sellSignal = timeOK and dir == -1 and dir[1] == 1 and downtrend
+// Signals - only buy in uptrend, only sell in downtrend, only during entry window
+buySignal = timeOK and entryWindowOK and dir == 1 and dir[1] == -1 and uptrend
+sellSignal = timeOK and entryWindowOK and dir == -1 and dir[1] == 1 and downtrend
 
-// ATR Stop Loss
+// ATR for Stop Loss & Take Profit
 atrValue = ta.atr(atrLen)
 
-// Entries & Exits
+// Entries - restricted to 8hr window
 if buySignal
     strategy.entry("Long", strategy.long)
 if sellSignal
     strategy.entry("Short", strategy.short)
+
+// Exits - run anytime (TP + SL), no time restriction
 if strategy.position_size > 0
     stopPrice = strategy.position_avg_price - atrMult * atrValue
-    strategy.exit("ATR SL Long", "Long", stop=stopPrice)
+    tpPrice = strategy.position_avg_price + tpMult * atrValue
+    strategy.exit("TP/SL Long", "Long", stop=stopPrice, limit=tpPrice)
 if strategy.position_size < 0
     stopPrice = strategy.position_avg_price + atrMult * atrValue
-    strategy.exit("ATR SL Short", "Short", stop=stopPrice)
+    tpPrice = strategy.position_avg_price - tpMult * atrValue
+    strategy.exit("TP/SL Short", "Short", stop=stopPrice, limit=tpPrice)
+
+// MOST reversal exits - also run anytime
 if dir == -1 and strategy.position_size > 0
     strategy.close("Long")
 if dir == 1 and strategy.position_size < 0
@@ -60,3 +73,4 @@ plot(MOST, "MOST", color=dir == 1 ? color.green : color.red, linewidth=2)
 plot(exMov, "exMov", color=color.orange)
 plotshape(buySignal, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(sellSignal, "Sell", shape.triangledown, location.abovebar, color.red, size=size.small)
+bgcolor(entryWindowOK ? color.new(color.blue, 95) : na, title="Entry Window")
