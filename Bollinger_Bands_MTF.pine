@@ -3,27 +3,27 @@
 // https://mozilla.org/MPL/2.0/
 // © moneygreen
 
-strategy("BB Squeeze Breakout v5 — NAS100 Daily", shorttitle="BB v5 NAS100 1D", overlay=true,
+strategy("BB Squeeze Breakout v6 — NAS100 Daily", shorttitle="BB v6 NAS100 1D", overlay=true,
      process_orders_on_close=true, initial_capital=100000,
-     default_qty_type=strategy.percent_of_equity, default_qty_value=75,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      currency=currency.USD, pyramiding=0,
      commission_type=strategy.commission.percent, commission_value=0.05,
      slippage=2)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NAS100 BB STRATEGY — v5 (DAILY TIMEFRAME)
+// NAS100 BB STRATEGY — v6 (DAILY TIMEFRAME)
 // ═══════════════════════════════════════════════════════════════════════════
-// Complete redesign from v4. v4 used simple BB crossovers which generated
-// 1,071 trades, 40% win rate, -39% P&L. Way too many low-quality entries.
+// v5 fixed entries (66% win rate, 86 trades) but trailing stop killed R:R.
+// Average win was only 37% of average loss → PF 0.731 despite 66% wins.
 //
-// v5 uses SQUEEZE BREAKOUT (John Carter TTM concept):
-//   1. Detect BB squeeze — bandwidth contracts below its average
-//   2. Wait for price to cross above upper band (long) or below lower (short)
-//   3. Confirm with RSI momentum + 50 EMA slope + 200 EMA trend
-//   4. Ride the trend with wide ATR-based stops and trail
-//
-// Squeeze breakouts catch the big directional moves after consolidation.
-// Expect 100-200 trades over 17 years instead of 1,071.
+// v6 fixes:
+//   • Trail OFF by default — was chopping winners into tiny gains
+//   • SL tightened to 2x ATR — smaller losses when wrong
+//   • TP set to 6x ATR — 3:1 R:R, more reachable than 8x
+//   • Cooldown 5 bars (1 week) — more opportunities than 10
+//   • Squeeze lookback 8 bars — catches more setups
+//   • RSI loosened to 45-85 — fewer missed entries
+//   • Position size back to 100% — maximize time in market
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -38,8 +38,8 @@ bbMult    = input.float(2.0, "BB Multiplier", minval=0.001, maxval=50, group=bb_
 
 // ── Squeeze Detection ──
 sq_group       = "== Squeeze Detection =="
-sqLookback     = input.int(5, "Squeeze Lookback (bars)", minval=1, maxval=20, group=sq_group,
-     tooltip="How many bars back to look for a squeeze. 5 = squeeze must have occurred within the last week")
+sqLookback     = input.int(8, "Squeeze Lookback (bars)", minval=1, maxval=20, group=sq_group,
+     tooltip="How many bars back to look for a squeeze. 8 = squeeze within ~1.5 weeks")
 bwAvgLen       = input.int(20, "Bandwidth SMA Length", minval=5, maxval=50, group=sq_group,
      tooltip="Period for bandwidth moving average — squeeze is when bandwidth drops below this avg")
 sqThreshold    = input.float(1.0, "Squeeze Threshold (x avg)", minval=0.5, maxval=1.5, step=0.1, group=sq_group,
@@ -50,8 +50,8 @@ dir_group     = "== Trading Mode =="
 direction     = input.int(1, "Strategy Direction (0=Both, 1=Long, -1=Short)", minval=-1, maxval=1, group=dir_group,
      tooltip="1 = Long only. NAS100 has massive upward bias — shorting long-term loses money")
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
-cooldownBars  = input.int(10, "Min Bars Between Trades", minval=0, maxval=50, group=dir_group,
-     tooltip="10 daily bars (2 weeks) — prevents overtrading, quality over quantity")
+cooldownBars  = input.int(5, "Min Bars Between Trades", minval=0, maxval=50, group=dir_group,
+     tooltip="5 daily bars (1 week) — balances quality vs opportunity")
 
 // ── Trend Filter ──
 trend_group    = "== Trend Filter =="
@@ -69,24 +69,25 @@ mom_group      = "== Momentum Filter =="
 useRSI         = input.bool(true, "Enable RSI Filter", group=mom_group,
      tooltip="Confirms momentum direction before entry")
 rsiLen         = input.int(14, "RSI Length", minval=1, group=mom_group)
-rsiLongMin     = input.int(50, "RSI Min for Long", minval=20, maxval=70, group=mom_group,
+rsiLongMin     = input.int(45, "RSI Min for Long", minval=20, maxval=70, group=mom_group,
      tooltip="RSI must be above this for longs — confirms upward momentum")
-rsiLongMax     = input.int(80, "RSI Max for Long", minval=60, maxval=95, group=mom_group,
+rsiLongMax     = input.int(85, "RSI Max for Long", minval=60, maxval=95, group=mom_group,
      tooltip="RSI must be below this for longs — avoids buying into exhaustion")
-rsiShortMax    = input.int(50, "RSI Max for Short", minval=30, maxval=70, group=mom_group)
-rsiShortMin    = input.int(20, "RSI Min for Short", minval=5, maxval=40, group=mom_group)
+rsiShortMax    = input.int(55, "RSI Max for Short", minval=30, maxval=70, group=mom_group)
+rsiShortMin    = input.int(15, "RSI Min for Short", minval=5, maxval=40, group=mom_group)
 
 // ── Risk Management ──
 risk_group   = "== Risk Management =="
 atrLen       = input.int(14, "ATR Length", minval=1, group=risk_group)
-slMult       = input.float(3.0, "Stop Loss ATR Mult", minval=1.0, maxval=10.0, step=0.5, group=risk_group,
-     tooltip="3.0x ATR — wider than v4, survives daily noise without premature stopouts")
+slMult       = input.float(2.0, "Stop Loss ATR Mult", minval=0.5, maxval=10.0, step=0.5, group=risk_group,
+     tooltip="2.0x ATR — tighter SL = smaller losses. 3:1 R:R with 6x TP")
 useTP        = input.bool(true, "Use Take Profit", group=risk_group)
-tpMult       = input.float(8.0, "Take Profit ATR Mult", minval=2.0, maxval=30.0, step=0.5, group=risk_group,
-     tooltip="8.0x ATR — very generous TP, lets big trends develop. Disable to rely on trail only")
-useTrail     = input.bool(true, "Use Trailing Stop", group=risk_group)
-trailMult    = input.float(3.0, "Trailing Stop ATR Mult", minval=1.0, maxval=10.0, step=0.5, group=risk_group,
-     tooltip="3.0x ATR — wide trail for daily TF, locks in gains without chopping out of trends")
+tpMult       = input.float(6.0, "Take Profit ATR Mult", minval=2.0, maxval=30.0, step=0.5, group=risk_group,
+     tooltip="6.0x ATR — 3:1 R:R, reachable target that still lets trends develop")
+useTrail     = input.bool(false, "Use Trailing Stop", group=risk_group,
+     tooltip="OFF by default — trail was chopping v5 winners into tiny gains. Enable to experiment")
+trailMult    = input.float(4.0, "Trailing Stop ATR Mult", minval=1.0, maxval=10.0, step=0.5, group=risk_group,
+     tooltip="4.0x ATR — if enabled, very wide trail to avoid premature chop-outs")
 
 // ── Volatility Filter ──
 vol_group    = "== Volatility Filter =="
@@ -229,7 +230,7 @@ var table info = table.new(position.top_right, 2, 12, bgcolor=color.new(color.bl
 
 if barstate.islast
     table.cell(info, 0, 0, "NAS100",     bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 0, "BB v5 1D",   bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, "BB v6 1D",   bgcolor=color.new(color.purple, 40), text_color=color.white, text_size=size.small)
 
     table.cell(info, 0, 1, "Upper",      text_color=color.white, text_size=size.small)
     table.cell(info, 1, 1, str.tostring(upper, "#.#"), text_color=color.red, text_size=size.small)
