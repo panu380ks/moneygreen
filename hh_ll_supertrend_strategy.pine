@@ -4,31 +4,8 @@
 // (c) moneygreen
 strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overlay=true,
      process_orders_on_close=true, initial_capital=100000,
-     default_qty_type=strategy.percent_of_equity, default_qty_value=35,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=50,
      currency=currency.USD, pyramiding=0)
-
-// --------------------------------------------------------------------------
-// STRATEGY OVERVIEW
-// --------------------------------------------------------------------------
-// Breakout strategy based on Higher Highs and Lower Lows.
-//
-// LONG:  Price closes above the highest high of the lookback period
-//        + safety guard confirms structure (higher high above recent guard high)
-//        + Supertrend confirms uptrend (optional filter)
-// SHORT: Price closes below the lowest low of the lookback period
-//        + safety guard confirms structure (lower low below recent guard low)
-//        + Supertrend confirms downtrend (optional filter)
-//
-// R:R:   1:10 (default) or 1:5 risk-reward ratio enforced on every trade.
-// Session: New York only (09:30-16:00 ET).
-// Exits: SL/TP (1:10 R:R), lower low breakdown, or Supertrend flip.
-//
-// DRAWDOWN PROTECTION:
-// - Position sizing at 35% equity (not 100%)
-// - Consecutive loss cooldown (pause after N losses)
-// - Equity curve filter (stop trading when equity < its SMA)
-// - Daily loss cap (max losses per day)
-// --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
 // INPUTS
@@ -61,29 +38,54 @@ mode_group    = "== Trading Mode =="
 allow_longs   = input.bool(true, "Allow Long Entries", group=mode_group)
 allow_shorts  = input.bool(true, "Allow Short Entries", group=mode_group)
 
-// -- Risk Management (1:5 / 1:10 R:R) --
+// -- Risk Management --
 risk_group  = "== Risk Management =="
 sl_pct      = input.float(1.0,   "Stop Loss %",        minval=0.1, step=0.1, group=risk_group,
-     tooltip="Risk per trade. Keep small -- TP is a multiple of this (1:5 = 5%, 1:10 = 10%)")
+     tooltip="Risk per trade. Keep small -- TP is a multiple of this")
 rr_ratio    = input.float(10.0,  "Reward:Risk Ratio",  minval=1.0, step=1.0, group=risk_group,
      tooltip="TP = SL x ratio. Use 10 for 1:10 R:R or 5 for 1:5 R:R")
-tp_pct      = sl_pct * rr_ratio  // TP auto-calculated: 1% SL x 10 = 10% TP (1:10 R:R)
+tp_pct      = sl_pct * rr_ratio
+use_trail   = input.bool(true, "Use Trailing Stop", group=risk_group,
+     tooltip="Trail stop behind price to lock in profits and avoid winners turning into losers")
+trail_pct   = input.float(0.5, "Trailing Stop %", minval=0.1, step=0.1, group=risk_group,
+     tooltip="Trailing stop distance as % of price. Tighter = locks profits faster but may exit early")
+
+// -- Entry Quality Filters (win rate boosters) --
+qual_group      = "== Entry Quality Filters =="
+use_adx         = input.bool(true, "Use ADX Trend Strength Filter", group=qual_group,
+     tooltip="Only enter when ADX confirms a strong trend -- filters out choppy sideways markets")
+adx_len         = input.int(14, "ADX Length", minval=5, maxval=50, group=qual_group)
+adx_thresh      = input.float(25.0, "ADX Minimum", minval=10.0, maxval=60.0, step=1.0, group=qual_group,
+     tooltip="ADX must be above this value. Higher = stronger trend required. 25 = standard")
+use_candle_str  = input.bool(true, "Use Candle Strength Filter", group=qual_group,
+     tooltip="Breakout candle must have a strong body (not a wick rejection)")
+candle_body_pct = input.float(60.0, "Min Body % of Range", minval=30.0, maxval=90.0, step=5.0, group=qual_group,
+     tooltip="Candle body must be at least this % of the total high-low range. 60% = solid candle")
+use_st_dist     = input.bool(true, "Use Supertrend Distance Filter", group=qual_group,
+     tooltip="Price must be well away from Supertrend -- not barely crossing it")
+st_dist_atr_mult = input.float(0.5, "Min ST Distance (ATR mult)", minval=0.1, maxval=3.0, step=0.1, group=qual_group,
+     tooltip="Minimum distance from Supertrend as a multiple of ATR. Higher = more separation required")
+use_confirm     = input.bool(true, "Use Confirmation Bar", group=qual_group,
+     tooltip="Wait for the bar after breakout to confirm price holds above/below the level")
+use_vol         = input.bool(true, "Use Volume Filter", group=qual_group,
+     tooltip="Breakout bar must have above-average volume")
+vol_mult        = input.float(1.2, "Min Volume Multiplier", minval=0.5, maxval=5.0, step=0.1, group=qual_group,
+     tooltip="Volume must be this multiple of the 20-bar average. 1.2 = 20% above average")
 
 // -- Drawdown Protection --
 dd_group        = "== Drawdown Protection =="
 use_consec_cool = input.bool(true, "Use Consecutive Loss Cooldown", group=dd_group,
      tooltip="Pause trading after a streak of consecutive losses")
-max_consec_loss = input.int(3, "Max Consecutive Losses", minval=1, maxval=10, group=dd_group,
+max_consec_loss = input.int(2, "Max Consecutive Losses", minval=1, maxval=10, group=dd_group,
      tooltip="After this many losses in a row, pause trading")
-cooldown_bars   = input.int(10, "Cooldown Bars", minval=1, maxval=50, group=dd_group,
+cooldown_bars   = input.int(15, "Cooldown Bars", minval=1, maxval=50, group=dd_group,
      tooltip="How many bars to sit out after hitting max consecutive losses")
 use_eq_filter   = input.bool(true, "Use Equity Curve Filter", group=dd_group,
-     tooltip="Only trade when strategy equity is above its moving average -- stops trading during drawdowns")
-eq_sma_len      = input.int(50, "Equity SMA Length", minval=10, maxval=200, group=dd_group,
-     tooltip="Length of the equity moving average. Longer = smoother but slower to recover")
+     tooltip="Only trade when strategy equity is above its moving average")
+eq_sma_len      = input.int(50, "Equity SMA Length", minval=10, maxval=200, group=dd_group)
 use_daily_cap   = input.bool(true, "Use Daily Loss Cap", group=dd_group,
      tooltip="Stop trading for the day after hitting the max daily loss count")
-max_daily_losses = input.int(2, "Max Losses Per Day", minval=1, maxval=10, group=dd_group,
+max_daily_losses = input.int(1, "Max Losses Per Day", minval=1, maxval=10, group=dd_group,
      tooltip="Maximum number of losing trades allowed per day before pausing")
 
 // -- New York Session Filter --
@@ -113,25 +115,69 @@ lo_guard = ta.lowest(low, guard_len)
 
 // Supertrend calculation
 [supertrend, st_direction] = ta.supertrend(st_factor, st_atr_len)
-st_uptrend   = st_direction < 0   // direction < 0 means price is above supertrend (uptrend)
-st_downtrend = st_direction > 0   // direction > 0 means price is below supertrend (downtrend)
-st_flip_up   = st_direction < 0 and st_direction[1] > 0  // just flipped to uptrend
-st_flip_down = st_direction > 0 and st_direction[1] < 0  // just flipped to downtrend
+st_uptrend   = st_direction < 0
+st_downtrend = st_direction > 0
+st_flip_up   = st_direction < 0 and st_direction[1] > 0
+st_flip_down = st_direction > 0 and st_direction[1] < 0
 
 // Breakout detection
 breakout_up   = price > hi[1]
 breakout_down = price < lo[1]
 
-// Safety confirmation -- the previous lookback high must be above the guard
-// (confirms structure is making higher highs, not just a spike)
+// Safety confirmation
 guard_long  = breakout_up  and hi[1] > hi_guard[guard_delay]
 guard_short = breakout_down and lo[1] < lo_guard[guard_delay]
 
 // Date filter
 in_date = not use_date or (time >= start_date and time <= end_date)
 
-// New York session filter (uses exchange timezone by default)
+// New York session filter
 in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "America/New_York"))
+
+// --------------------------------------------------------------------------
+// ENTRY QUALITY FILTERS
+// --------------------------------------------------------------------------
+
+// -- ADX Trend Strength --
+// Only trade when the market is actually trending, not chopping sideways
+dirmov(len) =>
+    upMove = ta.change(high)
+    downMove = -ta.change(low)
+    plusDM  = na(upMove) ? na : (upMove > downMove and upMove > 0 ? upMove : 0)
+    minusDM = na(downMove) ? na : (downMove > upMove and downMove > 0 ? downMove : 0)
+    truerange = ta.rma(ta.tr, len)
+    plus  = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+
+[diplus, diminus] = dirmov(adx_len)
+adx_val = 100 * ta.rma(math.abs(diplus - diminus) / (diplus + diminus == 0 ? 1 : diplus + diminus), adx_len)
+adxOK = not use_adx or adx_val >= adx_thresh
+
+// -- Candle Strength --
+// Breakout candle must have a solid body, not a wick rejection
+candleRange = high - low
+candleBody  = math.abs(close - open)
+bodyRatio   = candleRange > 0 ? (candleBody / candleRange) * 100 : 0
+candleOK    = not use_candle_str or bodyRatio >= candle_body_pct
+
+// -- Supertrend Distance --
+// Price must be well separated from Supertrend, not just barely crossing
+atr_val     = ta.atr(st_atr_len)
+st_dist     = math.abs(close - supertrend)
+stDistOK_long  = not use_st_dist or (st_uptrend and st_dist > atr_val * st_dist_atr_mult)
+stDistOK_short = not use_st_dist or (st_downtrend and st_dist > atr_val * st_dist_atr_mult)
+
+// -- Confirmation Bar --
+// The bar AFTER the breakout must also hold above/below the level
+// This filters out single-bar spikes that immediately reverse
+confirmLong  = not use_confirm or (price[1] > hi[2])   // previous bar also broke out
+confirmShort = not use_confirm or (price[1] < lo[2])   // previous bar also broke down
+
+// -- Volume Confirmation --
+// Breakout must come with above-average volume (conviction)
+avgVol  = ta.sma(volume, 20)
+volOK   = not use_vol or (volume > avgVol * vol_mult)
 
 // --------------------------------------------------------------------------
 // DRAWDOWN PROTECTION
@@ -154,7 +200,6 @@ barsSinceCooldown := barsSinceCooldown + 1
 cooldownActive = use_consec_cool and consecLosses >= max_consec_loss and barsSinceCooldown <= cooldown_bars
 
 // -- Equity Curve Filter --
-// Only trade when equity is above its own SMA (means we're not in a drawdown)
 eq = strategy.equity
 var float[] eqArray = array.new_float(0)
 array.push(eqArray, eq)
@@ -164,7 +209,6 @@ eqSMA = array.avg(eqArray)
 equityOK = not use_eq_filter or eq >= eqSMA
 
 // -- Daily Loss Cap --
-// Track losses per calendar day and stop after max
 var int dailyLosses = 0
 var int lastTradeDay = 0
 currentDay = dayofmonth
@@ -180,42 +224,50 @@ if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) == 1
 
 dailyCapHit = use_daily_cap and dailyLosses >= max_daily_losses
 
-// Combined drawdown filter -- all must pass
+// Combined drawdown filter
 drawdownOK = not cooldownActive and equityOK and not dailyCapHit
 
 // --------------------------------------------------------------------------
 // ENTRY / EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
-// Supertrend trend filter (bypassed when use_st is false)
+// Supertrend trend filter
 st_long_ok  = not use_st or st_uptrend
 st_short_ok = not use_st or st_downtrend
 
-long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session and drawdownOK
-short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session and drawdownOK
+// ALL filters must pass for entry -- ultra selective
+long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session and drawdownOK and adxOK and candleOK and stDistOK_long  and confirmLong  and volOK
+short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session and drawdownOK and adxOK and candleOK and stDistOK_short and confirmShort and volOK
 
-// Exit long when price breaks down (lower low) or Supertrend flips to downtrend
+// Exit conditions
 exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
-// Exit short when price breaks up (higher high) or Supertrend flips to uptrend
 exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
 
 // --------------------------------------------------------------------------
 // STRATEGY EXECUTION
 // --------------------------------------------------------------------------
 
-// Long entries -- SL and TP always active (1:10 R:R enforced)
+// Long entries with trailing stop to lock in profits
 if long_entry
     strategy.entry("Long", strategy.long)
     sl_price_l = close * (1 - sl_pct / 100)
     tp_price_l = close * (1 + tp_pct / 100)
-    strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l)
+    if use_trail
+        trail_points = close * trail_pct / 100 / syminfo.mintick
+        strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l, trail_points=trail_points, trail_offset=trail_points)
+    else
+        strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l)
 
-// Short entries -- SL and TP always active (1:10 R:R enforced)
+// Short entries with trailing stop to lock in profits
 if short_entry
     strategy.entry("Short", strategy.short)
     sl_price_s = close * (1 + sl_pct / 100)
     tp_price_s = close * (1 - tp_pct / 100)
-    strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s)
+    if use_trail
+        trail_points = close * trail_pct / 100 / syminfo.mintick
+        strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s, trail_points=trail_points, trail_offset=trail_points)
+    else
+        strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s)
 
 // Signal-based exits -- trend reversal
 if strategy.position_size > 0 and exit_long
@@ -228,15 +280,12 @@ if strategy.position_size < 0 and exit_short
 // PLOTS
 // --------------------------------------------------------------------------
 
-// Highest high / lowest low channels
 plot(hi, "Highest High", color=color.new(color.green, 30), linewidth=2)
 plot(lo, "Lowest Low",   color=color.new(color.red, 30),   linewidth=2)
 
-// Guard levels
 plot(hi_guard, "Guard High", color=color.new(color.green, 70), linewidth=1, style=plot.style_stepline)
 plot(lo_guard, "Guard Low",  color=color.new(color.red, 70),   linewidth=1, style=plot.style_stepline)
 
-// Supertrend
 st_plot_up   = plot(use_st and st_direction < 0 ? supertrend : na, "ST Up Trend",
      color=color.green, style=plot.style_linebr, linewidth=2)
 st_plot_down = plot(use_st and st_direction < 0 ? na : (use_st ? supertrend : na), "ST Down Trend",
@@ -246,19 +295,13 @@ body_mid     = plot(use_st and not barstate.isfirst ? (open + close) / 2 : na, "
 fill(body_mid, st_plot_up,   title="ST Uptrend BG",   color=color.new(color.green, 90), fillgaps=false)
 fill(body_mid, st_plot_down, title="ST Downtrend BG",  color=color.new(color.red,   90), fillgaps=false)
 
-// Entry signals
 plotshape(long_entry and strategy.position_size <= 0,  "Buy Signal",
      shape.triangleup, location.belowbar, color.lime, size=size.normal)
 plotshape(short_entry and strategy.position_size >= 0, "Sell Signal",
      shape.triangledown, location.abovebar, color.red, size=size.normal)
 
-// NY session background
 bgcolor(use_session and in_ny_session ? color.new(color.blue, 95) : na, title="NY Session BG")
-
-// Drawdown protection active warning
 bgcolor(not drawdownOK ? color.new(color.orange, 90) : na, title="Drawdown Protection Active")
-
-// Background color for position
 bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
      strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position BG")
 
@@ -266,7 +309,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 14, border_width=1)
+var info = table.new(position.top_right, 2, 16, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",    bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Value",        bgcolor=color.new(color.gray, 80), text_color=color.white)
@@ -296,28 +339,35 @@ if barstate.islast
     table.cell(info, 1, 7, str.tostring(sl_pct, "#.#") + " : " + str.tostring(tp_pct, "#.#"),
          text_color=color.yellow)
 
-    table.cell(info, 0, 8, "NY Session", text_color=color.white)
-    table.cell(info, 1, 8, in_ny_session ? "ACTIVE" : "CLOSED",
+    table.cell(info, 0, 8, "ADX", text_color=color.white)
+    table.cell(info, 1, 8, str.tostring(adx_val, "#.#") + (adxOK ? " OK" : " WEAK"),
+         text_color=adxOK ? color.green : color.red)
+
+    table.cell(info, 0, 9, "Candle Body", text_color=color.white)
+    table.cell(info, 1, 9, str.tostring(bodyRatio, "#.#") + "%" + (candleOK ? " OK" : " WEAK"),
+         text_color=candleOK ? color.green : color.red)
+
+    table.cell(info, 0, 10, "NY Session", text_color=color.white)
+    table.cell(info, 1, 10, in_ny_session ? "ACTIVE" : "CLOSED",
          text_color=in_ny_session ? color.lime : color.gray)
 
-    table.cell(info, 0, 9, "Breakout", text_color=color.white)
-    table.cell(info, 1, 9, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
+    table.cell(info, 0, 11, "Breakout", text_color=color.white)
+    table.cell(info, 1, 11, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
          text_color=breakout_up ? color.green : breakout_down ? color.red : color.gray)
 
-    table.cell(info, 0, 10, "Position", text_color=color.white)
-    table.cell(info, 1, 10,
+    table.cell(info, 0, 12, "Position", text_color=color.white)
+    table.cell(info, 1, 12,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
-    // Drawdown protection status
-    table.cell(info, 0, 11, "Consec Losses", text_color=color.white)
-    table.cell(info, 1, 11, str.tostring(consecLosses) + " / " + str.tostring(max_consec_loss),
+    table.cell(info, 0, 13, "Consec Losses", text_color=color.white)
+    table.cell(info, 1, 13, str.tostring(consecLosses) + " / " + str.tostring(max_consec_loss),
          text_color=consecLosses >= max_consec_loss ? color.red : color.green)
 
-    table.cell(info, 0, 12, "Daily Losses", text_color=color.white)
-    table.cell(info, 1, 12, str.tostring(dailyLosses) + " / " + str.tostring(max_daily_losses),
+    table.cell(info, 0, 14, "Daily Losses", text_color=color.white)
+    table.cell(info, 1, 14, str.tostring(dailyLosses) + " / " + str.tostring(max_daily_losses),
          text_color=dailyCapHit ? color.red : color.green)
 
-    table.cell(info, 0, 13, "DD Protection", text_color=color.white)
-    table.cell(info, 1, 13, drawdownOK ? "OK" : "ACTIVE",
+    table.cell(info, 0, 15, "DD Protection", text_color=color.white)
+    table.cell(info, 1, 15, drawdownOK ? "OK" : "ACTIVE",
          text_color=drawdownOK ? color.green : color.red)
