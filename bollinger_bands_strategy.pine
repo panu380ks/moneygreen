@@ -1,5 +1,5 @@
 //@version=6
-strategy("Bollinger Bands Strategy directed", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+strategy("Bollinger Bands Strategy directed", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=35)
 
 source = close
 length = input.int(20, minval=1)
@@ -9,12 +9,21 @@ direction = input.int(0, title = "Strategy Direction", minval=-1, maxval=1)
 // Trend filter length
 trendLen = input.int(30, title="Trend MA Length", minval=1)
 
+// RSI filter
+rsiLen = input.int(14, title="RSI Length")
+rsiOB = input.int(65, title="RSI Overbought", minval=50, maxval=90)
+rsiOS = input.int(35, title="RSI Oversold", minval=10, maxval=50)
+
 // Risk management inputs
 atrLen = input.int(14, title="ATR Length")
-slMult = input.float(1.5, title="Stop Loss ATR Mult", minval=0.1)
+slMult = input.float(1.2, title="Stop Loss ATR Mult", minval=0.1)
 tpMult = input.float(2.5, title="Take Profit ATR Mult", minval=0.1)
 useTrailing = input.bool(true, title="Use Trailing Stop")
 trailMult = input.float(1.5, title="Trailing Stop ATR Mult", minval=0.1)
+
+// Max consecutive losses before cooldown
+maxConsecLoss = input.int(3, title="Max Consecutive Losses", minval=1)
+cooldownBars = input.int(5, title="Cooldown Bars After Max Losses", minval=1)
 
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
 
@@ -29,8 +38,29 @@ trendMA = ta.sma(source, trendLen)
 upTrend = source > trendMA
 downTrend = source < trendMA
 
+// RSI filter — don't buy overbought, don't sell oversold
+rsi = ta.rsi(source, rsiLen)
+rsiLongOK = rsi < rsiOB
+rsiShortOK = rsi > rsiOS
+
 // ATR for dynamic stop loss / take profit
 atr = ta.atr(atrLen)
+
+// Consecutive loss tracking
+var int consecLosses = 0
+var int barsSinceCooldown = 0
+
+if strategy.closedtrades > 0
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastProfit < 0 and ta.change(strategy.closedtrades) == 1
+        consecLosses := consecLosses + 1
+        if consecLosses >= maxConsecLoss
+            barsSinceCooldown := 0
+    else if lastProfit >= 0 and ta.change(strategy.closedtrades) == 1
+        consecLosses := 0
+
+barsSinceCooldown := barsSinceCooldown + 1
+cooldownActive = consecLosses >= maxConsecLoss and barsSinceCooldown <= cooldownBars
 
 // Trend filter: only buy above MA, only sell below MA
 aboveMA = source > basis and upTrend
@@ -53,9 +83,9 @@ shortBounce = ta.crossunder(source, basis) and downTrend and source < upper
 longReentry = source > lower and source[1] <= lower and upTrend and source > basis * 0.995
 shortReentry = source < upper and source[1] >= upper and downTrend and source < basis * 1.005
 
-// Combined long signal
-longSignal = (longCross and aboveMA and expanding) or (longBounce and expanding) or (longReentry and expanding)
-shortSignal = (shortCross and belowMA and expanding) or (shortBounce and expanding) or (shortReentry and expanding)
+// Combined signals with RSI filter and cooldown
+longSignal = ((longCross and aboveMA and expanding) or (longBounce and expanding) or (longReentry and expanding)) and rsiLongOK and not cooldownActive
+shortSignal = ((shortCross and belowMA and expanding) or (shortBounce and expanding) or (shortReentry and expanding)) and rsiShortOK and not cooldownActive
 
 // Only enter if not already in a position in the same direction
 if longSignal and strategy.position_size <= 0
