@@ -1,32 +1,74 @@
 //@version=6
-strategy("Bollinger Bands Strategy directed", overlay=true)
+strategy("Bollinger Bands Strategy directed", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
 
 source = close
 length = input.int(20, minval=1)
 mult = input.float(2.0, minval=0.001, maxval=50)
 direction = input.int(0, title = "Strategy Direction", minval=-1, maxval=1)
 
+// Trend filter length — higher timeframe trend confirmation
+trendLen = input.int(50, title="Trend MA Length", minval=1)
+
+// Risk management inputs
+atrLen = input.int(14, title="ATR Length")
+slMult = input.float(1.5, title="Stop Loss ATR Mult", minval=0.1)
+tpMult = input.float(2.5, title="Take Profit ATR Mult", minval=0.1)
+useTrailing = input.bool(true, title="Use Trailing Stop")
+trailMult = input.float(1.5, title="Trailing Stop ATR Mult", minval=0.1)
+
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
 
+// Bollinger Bands
 basis = ta.sma(source, length)
 dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
 
-// Trend filter: only buy above MA, only sell below MA
-aboveMA = source > basis
-belowMA = source < basis
+// Higher timeframe trend filter — 50 SMA
+trendMA = ta.sma(source, trendLen)
+upTrend = source > trendMA
+downTrend = source < trendMA
 
-if (ta.crossover(source, lower) and aboveMA)
-    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+// ATR for dynamic stop loss / take profit
+atr = ta.atr(atrLen)
+
+// Trend filter: only buy above BOTH MAs, only sell below BOTH MAs
+aboveMA = source > basis and upTrend
+belowMA = source < basis and downTrend
+
+// Band width filter — avoid entries when bands are too narrow (low volatility chop)
+bbWidth = (upper - lower) / basis
+bbWidthMA = ta.sma(bbWidth, length)
+expanding = bbWidth > bbWidthMA
+
+if (ta.crossover(source, lower) and aboveMA and expanding)
+    strategy.entry("BBandLE", strategy.long, comment="BBandLE")
 else
     strategy.cancel(id="BBandLE")
 
-if (ta.crossunder(source, upper) and belowMA)
-    strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+if (ta.crossunder(source, upper) and belowMA and expanding)
+    strategy.entry("BBandSE", strategy.short, comment="BBandSE")
 else
     strategy.cancel(id="BBandSE")
+
+// Dynamic exits based on ATR
+if strategy.position_size > 0
+    slPrice = strategy.position_avg_price - atr * slMult
+    tpPrice = strategy.position_avg_price + atr * tpMult
+    if useTrailing
+        strategy.exit("Long Exit", "BBandLE", stop=slPrice, limit=tpPrice, trail_points=atr * trailMult / syminfo.mintick, trail_offset=atr * trailMult / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "BBandLE", stop=slPrice, limit=tpPrice)
+
+if strategy.position_size < 0
+    slPrice = strategy.position_avg_price + atr * slMult
+    tpPrice = strategy.position_avg_price - atr * tpMult
+    if useTrailing
+        strategy.exit("Short Exit", "BBandSE", stop=slPrice, limit=tpPrice, trail_points=atr * trailMult / syminfo.mintick, trail_offset=atr * trailMult / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "BBandSE", stop=slPrice, limit=tpPrice)
 
 plot(basis, "Basis", color=color.orange)
 plot(upper, "Upper", color=color.blue)
 plot(lower, "Lower", color=color.blue)
+plot(trendMA, "Trend MA", color=color.purple, linewidth=2)
