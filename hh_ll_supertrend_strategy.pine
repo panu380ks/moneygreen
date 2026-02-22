@@ -4,7 +4,7 @@
 // (c) moneygreen
 strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overlay=true,
      process_orders_on_close=true, initial_capital=100000,
-     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=35,
      currency=currency.USD, pyramiding=0)
 
 // --------------------------------------------------------------------------
@@ -22,6 +22,12 @@ strategy("HH LL + Supertrend Strategy", shorttitle="HH LL + ST Strategy", overla
 // R:R:   1:10 (default) or 1:5 risk-reward ratio enforced on every trade.
 // Session: New York only (09:30-16:00 ET).
 // Exits: SL/TP (1:10 R:R), lower low breakdown, or Supertrend flip.
+//
+// DRAWDOWN PROTECTION:
+// - Position sizing at 35% equity (not 100%)
+// - Consecutive loss cooldown (pause after N losses)
+// - Equity curve filter (stop trading when equity < its SMA)
+// - Daily loss cap (max losses per day)
 // --------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------
@@ -62,6 +68,23 @@ sl_pct      = input.float(1.0,   "Stop Loss %",        minval=0.1, step=0.1, gro
 rr_ratio    = input.float(10.0,  "Reward:Risk Ratio",  minval=1.0, step=1.0, group=risk_group,
      tooltip="TP = SL x ratio. Use 10 for 1:10 R:R or 5 for 1:5 R:R")
 tp_pct      = sl_pct * rr_ratio  // TP auto-calculated: 1% SL x 10 = 10% TP (1:10 R:R)
+
+// -- Drawdown Protection --
+dd_group        = "== Drawdown Protection =="
+use_consec_cool = input.bool(true, "Use Consecutive Loss Cooldown", group=dd_group,
+     tooltip="Pause trading after a streak of consecutive losses")
+max_consec_loss = input.int(3, "Max Consecutive Losses", minval=1, maxval=10, group=dd_group,
+     tooltip="After this many losses in a row, pause trading")
+cooldown_bars   = input.int(10, "Cooldown Bars", minval=1, maxval=50, group=dd_group,
+     tooltip="How many bars to sit out after hitting max consecutive losses")
+use_eq_filter   = input.bool(true, "Use Equity Curve Filter", group=dd_group,
+     tooltip="Only trade when strategy equity is above its moving average -- stops trading during drawdowns")
+eq_sma_len      = input.int(50, "Equity SMA Length", minval=10, maxval=200, group=dd_group,
+     tooltip="Length of the equity moving average. Longer = smoother but slower to recover")
+use_daily_cap   = input.bool(true, "Use Daily Loss Cap", group=dd_group,
+     tooltip="Stop trading for the day after hitting the max daily loss count")
+max_daily_losses = input.int(2, "Max Losses Per Day", minval=1, maxval=10, group=dd_group,
+     tooltip="Maximum number of losing trades allowed per day before pausing")
 
 // -- New York Session Filter --
 sess_group  = "== Session Filter =="
@@ -111,6 +134,56 @@ in_date = not use_date or (time >= start_date and time <= end_date)
 in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "America/New_York"))
 
 // --------------------------------------------------------------------------
+// DRAWDOWN PROTECTION
+// --------------------------------------------------------------------------
+
+// -- Consecutive Loss Cooldown --
+var int consecLosses = 0
+var int barsSinceCooldown = 999
+
+if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) == 1
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastProfit < 0
+        consecLosses := consecLosses + 1
+        if consecLosses >= max_consec_loss
+            barsSinceCooldown := 0
+    else
+        consecLosses := 0
+
+barsSinceCooldown := barsSinceCooldown + 1
+cooldownActive = use_consec_cool and consecLosses >= max_consec_loss and barsSinceCooldown <= cooldown_bars
+
+// -- Equity Curve Filter --
+// Only trade when equity is above its own SMA (means we're not in a drawdown)
+eq = strategy.equity
+var float[] eqArray = array.new_float(0)
+array.push(eqArray, eq)
+if array.size(eqArray) > eq_sma_len
+    array.shift(eqArray)
+eqSMA = array.avg(eqArray)
+equityOK = not use_eq_filter or eq >= eqSMA
+
+// -- Daily Loss Cap --
+// Track losses per calendar day and stop after max
+var int dailyLosses = 0
+var int lastTradeDay = 0
+currentDay = dayofmonth
+
+if currentDay != lastTradeDay
+    dailyLosses := 0
+    lastTradeDay := currentDay
+
+if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) == 1
+    lastPnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnl < 0
+        dailyLosses := dailyLosses + 1
+
+dailyCapHit = use_daily_cap and dailyLosses >= max_daily_losses
+
+// Combined drawdown filter -- all must pass
+drawdownOK = not cooldownActive and equityOK and not dailyCapHit
+
+// --------------------------------------------------------------------------
 // ENTRY / EXIT CONDITIONS
 // --------------------------------------------------------------------------
 
@@ -118,8 +191,8 @@ in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "Am
 st_long_ok  = not use_st or st_uptrend
 st_short_ok = not use_st or st_downtrend
 
-long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session
-short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session
+long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session and drawdownOK
+short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session and drawdownOK
 
 // Exit long when price breaks down (lower low) or Supertrend flips to downtrend
 exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
@@ -130,14 +203,14 @@ exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
 // STRATEGY EXECUTION
 // --------------------------------------------------------------------------
 
-// Long entries -- SL and TP always active (5:10 R:R enforced)
+// Long entries -- SL and TP always active (1:10 R:R enforced)
 if long_entry
     strategy.entry("Long", strategy.long)
     sl_price_l = close * (1 - sl_pct / 100)
     tp_price_l = close * (1 + tp_pct / 100)
     strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l)
 
-// Short entries -- SL and TP always active (5:10 R:R enforced)
+// Short entries -- SL and TP always active (1:10 R:R enforced)
 if short_entry
     strategy.entry("Short", strategy.short)
     sl_price_s = close * (1 + sl_pct / 100)
@@ -182,6 +255,9 @@ plotshape(short_entry and strategy.position_size >= 0, "Sell Signal",
 // NY session background
 bgcolor(use_session and in_ny_session ? color.new(color.blue, 95) : na, title="NY Session BG")
 
+// Drawdown protection active warning
+bgcolor(not drawdownOK ? color.new(color.orange, 90) : na, title="Drawdown Protection Active")
+
 // Background color for position
 bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
      strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position BG")
@@ -190,7 +266,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
 // INFO TABLE
 // --------------------------------------------------------------------------
 
-var info = table.new(position.top_right, 2, 11, border_width=1)
+var info = table.new(position.top_right, 2, 14, border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Indicator",    bgcolor=color.new(color.gray, 80), text_color=color.white)
     table.cell(info, 1, 0, "Value",        bgcolor=color.new(color.gray, 80), text_color=color.white)
@@ -233,29 +309,15 @@ if barstate.islast
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
 
-// --------------------------------------------------------------------------
-// STRATEGY LOGIC SUMMARY
-// --------------------------------------------------------------------------
-//
-// +-----------+-----------------------------------------------+
-// | BUY LONG  | Price breaks above highest high (41 bars)    |
-// |           | + Guard confirms higher high structure        |
-// |           | + Supertrend in uptrend (optional)            |
-// |           | + NY session active (09:30-16:00 ET)          |
-// |           | SL = 1%, TP = 10% (1:10 R:R default)         |
-// +-----------+-----------------------------------------------+
-// | SELL SHORT| Price breaks below lowest low (41 bars)      |
-// |           | + Guard confirms lower low structure          |
-// |           | + Supertrend in downtrend (optional)          |
-// |           | + NY session active (09:30-16:00 ET)          |
-// |           | SL = 1%, TP = 10% (1:10 R:R default)         |
-// +-----------+-----------------------------------------------+
-// | EXIT LONG | Hit TP (10%) or SL (1%)                      |
-// |           | OR lower low breakdown (reversal)             |
-// |           | OR Supertrend flips to downtrend (optional)   |
-// +-----------+-----------------------------------------------+
-// | EXIT SHORT| Hit TP (10%) or SL (1%)                      |
-// |           | OR higher high breakout (reversal)            |
-// |           | OR Supertrend flips to uptrend (optional)     |
-// +-----------+-----------------------------------------------+
-// --------------------------------------------------------------------------
+    // Drawdown protection status
+    table.cell(info, 0, 11, "Consec Losses", text_color=color.white)
+    table.cell(info, 1, 11, str.tostring(consecLosses) + " / " + str.tostring(max_consec_loss),
+         text_color=consecLosses >= max_consec_loss ? color.red : color.green)
+
+    table.cell(info, 0, 12, "Daily Losses", text_color=color.white)
+    table.cell(info, 1, 12, str.tostring(dailyLosses) + " / " + str.tostring(max_daily_losses),
+         text_color=dailyCapHit ? color.red : color.green)
+
+    table.cell(info, 0, 13, "DD Protection", text_color=color.white)
+    table.cell(info, 1, 13, drawdownOK ? "OK" : "ACTIVE",
+         text_color=drawdownOK ? color.green : color.red)
