@@ -1,0 +1,594 @@
+//@version=6
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// (c) moneygreen
+//
+// Combined: HH LL + Supertrend Strategy + Structured Zigzag S/R
+// - Zigzag draws S/R levels, diagonal trend lines, and HH/HL/LH/LL labels
+// - Strategy trades breakouts confirmed by Supertrend + quality filters
+// - Zigzag structure filter: longs only in bullish structure (HL), shorts only in bearish (LH)
+
+strategy("HH LL + Zigzag S/R Strategy", shorttitle="HH LL + ZZ S/R", overlay=true,
+     process_orders_on_close=true, initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=50,
+     currency=currency.USD, pyramiding=0,
+     max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// --------------------------------------------------------------------------
+// CONSTANTS
+// --------------------------------------------------------------------------
+var ZZ_HIGH = 1, ZZ_LOW = -1
+var ZZ_BOXES = 'boxes', ZZ_LINES = 'lines'
+
+// ==========================================================================
+// INPUTS
+// ==========================================================================
+
+// -- Zigzag S/R Settings --
+zz_group                    = "== Zigzag S/R =="
+i_horizontalType            = input.string(ZZ_LINES, 'Horizontal type', options=[ZZ_LINES, ZZ_BOXES], group=zz_group)
+i_firstDepth                = input.int(34, 'Depth', group=zz_group)
+i_firstDeviation            = input.float(6.0, 'Deviation', group=zz_group)
+i_firstColor                = input.color(color.blue, 'Color', group=zz_group)
+i_extendLines               = input.bool(true, 'Extend lines', group=zz_group)
+i_lineCount                 = input.int(6, 'Line count', group=zz_group)
+
+// -- Zigzag Diagonal Settings --
+zz_diag_group               = "== Zigzag Diagonal =="
+i_diagonalThickness         = input.int(1, 'Line thickness', minval=1, group=zz_diag_group, inline='12')
+i_diagonalLineStyle         = input.string(line.style_dashed, 'Line style', options=[line.style_dotted, line.style_solid, line.style_dashed], group=zz_diag_group, inline='12')
+i_diagonalColor             = input.color(color.gray, 'Diagonal color', group=zz_diag_group, inline='13')
+i_zigzagCount               = input.int(200, 'Zigzag count', group=zz_diag_group, inline='14')
+i_boxHighColor              = input.color(color.green, 'Box high color', group=zz_diag_group, inline='15a')
+i_boxLowColor               = input.color(color.red, 'Box low color', group=zz_diag_group, inline='15a')
+i_diagonalHighColor         = input.color(color.green, 'Diagonal high color', group=zz_diag_group, inline='15b')
+i_diagonalLowColor          = input.color(color.red, 'Diagonal low color', group=zz_diag_group, inline='15b')
+i_diagonalSRLineCount       = input.int(2, 'Diagonal S/R line count', group=zz_diag_group, inline='16')
+i_showDiagonalSRLines       = input.bool(true, 'Show diagonal S/R lines', group=zz_diag_group, inline='16')
+
+// -- Breakout Detection --
+bo_group    = "== Breakout Detection =="
+price       = input.source(close, "Price Source", group=bo_group)
+lookback    = input.int(41, "Lookback Period", minval=5, maxval=200, group=bo_group,
+     tooltip="Number of bars to find the highest high / lowest low")
+
+// -- Safety Guard --
+guard_group = "== Safety Guard =="
+guard_len   = input.int(10, "Guard Length", minval=2, maxval=100, group=guard_group,
+     tooltip="Secondary lookback to confirm breakout is genuine")
+guard_delay = input.int(1, "Guard Delay (bars)", minval=1, maxval=10, group=guard_group)
+
+// -- Supertrend Filter --
+st_group    = "== Supertrend Filter =="
+use_st      = input.bool(true,  "Use Supertrend Filter", group=st_group)
+st_atr_len  = input.int(10,    "ATR Length",  minval=1, group=st_group)
+st_factor   = input.float(3.0, "Factor",      minval=0.01, step=0.01, group=st_group)
+use_st_exit = input.bool(true,  "Exit on Supertrend Flip", group=st_group)
+
+// -- Mode --
+mode_group    = "== Trading Mode =="
+allow_longs   = input.bool(true, "Allow Long Entries", group=mode_group)
+allow_shorts  = input.bool(true, "Allow Short Entries", group=mode_group)
+
+// -- Risk Management --
+risk_group  = "== Risk Management =="
+sl_pct      = input.float(1.0,   "Stop Loss %",        minval=0.1, step=0.1, group=risk_group)
+rr_ratio    = input.float(10.0,  "Reward:Risk Ratio",  minval=1.0, step=1.0, group=risk_group)
+tp_pct      = sl_pct * rr_ratio
+use_trail   = input.bool(true, "Use Trailing Stop", group=risk_group,
+     tooltip="Trail stop behind price to lock in profits")
+trail_pct   = input.float(0.5, "Trailing Stop %", minval=0.1, step=0.1, group=risk_group)
+
+// -- Entry Quality Filters --
+qual_group      = "== Entry Quality Filters =="
+use_adx         = input.bool(true, "Use ADX Trend Strength Filter", group=qual_group)
+adx_len         = input.int(14, "ADX Length", minval=5, maxval=50, group=qual_group)
+adx_thresh      = input.float(25.0, "ADX Minimum", minval=10.0, maxval=60.0, step=1.0, group=qual_group)
+use_candle_str  = input.bool(true, "Use Candle Strength Filter", group=qual_group)
+candle_body_pct = input.float(60.0, "Min Body % of Range", minval=30.0, maxval=90.0, step=5.0, group=qual_group)
+use_st_dist     = input.bool(true, "Use Supertrend Distance Filter", group=qual_group)
+st_dist_atr_mult = input.float(0.5, "Min ST Distance (ATR mult)", minval=0.1, maxval=3.0, step=0.1, group=qual_group)
+use_confirm     = input.bool(true, "Use Confirmation Bar", group=qual_group)
+use_vol         = input.bool(true, "Use Volume Filter", group=qual_group)
+vol_mult        = input.float(1.2, "Min Volume Multiplier", minval=0.5, maxval=5.0, step=0.1, group=qual_group)
+use_zz_struct   = input.bool(true, "Use Zigzag Structure Filter", group=qual_group,
+     tooltip="Longs only when zigzag shows higher lows (bullish). Shorts only when zigzag shows lower highs (bearish)")
+
+// -- Drawdown Protection --
+dd_group        = "== Drawdown Protection =="
+use_consec_cool = input.bool(true, "Use Consecutive Loss Cooldown", group=dd_group)
+max_consec_loss = input.int(2, "Max Consecutive Losses", minval=1, maxval=10, group=dd_group)
+cooldown_bars   = input.int(15, "Cooldown Bars", minval=1, maxval=50, group=dd_group)
+use_eq_filter   = input.bool(true, "Use Equity Curve Filter", group=dd_group)
+eq_sma_len      = input.int(50, "Equity SMA Length", minval=10, maxval=200, group=dd_group)
+use_daily_cap   = input.bool(true, "Use Daily Loss Cap", group=dd_group)
+max_daily_losses = input.int(1, "Max Losses Per Day", minval=1, maxval=10, group=dd_group)
+
+// -- Session Filter --
+sess_group  = "== Session Filter =="
+use_session = input.bool(true,   "NY Session Only",    group=sess_group)
+ny_session  = input.session("0930-1600", "NY Session (ET)", group=sess_group)
+
+// -- Date Filter --
+date_group  = "== Date Filter =="
+use_date    = input.bool(false,  "Use Date Filter",    group=date_group)
+start_date  = input.time(timestamp("2024-01-01"), "Start Date", group=date_group)
+end_date    = input.time(timestamp("2026-12-31"), "End Date",   group=date_group)
+
+// ==========================================================================
+// ZIGZAG S/R -- ARRAYS & FUNCTIONS
+// ==========================================================================
+
+var zigZagArray = array.new_line()
+var zigZagBoxArray = array.new_box()
+var zigZagLabelArray = array.new_label()
+var diagonalArray = array.new_line()
+var diagonalSRArray = array.new_line()
+var diagonalLabelArray = array.new_label()
+var zzValueArray = array.new_float()
+var zzTypeArray = array.new_int()
+var zzIndexArray = array.new_int()
+
+f_isUpCandle(_index) =>
+    open[_index] <= close[_index]
+
+f_drawDiagonalLine(_x1, _x2, _y1, _y2, _lineColor, _lineThickness, _lineStyle, _extend) =>
+    line.new(x1=_x1, y1=_y1, x2=_x2, y2=_y2, color=_lineColor, style=_lineStyle, width=_lineThickness, extend=_extend)
+
+f_drawDiagonalLabel(_xValue, _yValue, _text, _labelColor, _down) =>
+    adjustedYPosition = _down ? _yValue * 1.005 : _yValue * 0.995
+    dlb = label.new(_xValue, adjustedYPosition, _text, xloc.bar_index, yloc.price, #00000000, label.style_none, _labelColor)
+    if array.size(diagonalLabelArray) == i_zigzagCount
+        label.delete(array.shift(diagonalLabelArray))
+    array.push(diagonalLabelArray, dlb)
+
+f_createDiagonalLabelText(_yValue) =>
+    index = array.size(zzValueArray) - 3
+    if index >= 0
+        previousType = array.get(zzTypeArray, index)
+        previousValue = array.get(zzValueArray, index)
+        previousType == ZZ_HIGH ?
+          previousValue <= _yValue ? 'HH' : 'LH' :
+          previousValue <= _yValue ? 'HL' : 'LL'
+    else
+        ''
+
+f_drawDiagonalLines(_x1, _x2, _y1, _y2, _lineColor, _lineThickness, _lineStyle, _lineCount, _lineArray, _extend) =>
+    line l = f_drawDiagonalLine(_x1, _x2, _y1, _y2, _lineColor, _lineThickness, _lineStyle, _extend)
+    if array.size(_lineArray) == _lineCount
+        line.delete(array.shift(_lineArray))
+    array.push(_lineArray, l)
+
+f_addValuesToArrays(_barIndex, _yValue, _type) =>
+    if array.size(zzValueArray) == i_zigzagCount
+        array.shift(zzValueArray)
+        array.shift(zzIndexArray)
+        array.shift(zzTypeArray)
+    array.push(zzValueArray, _yValue)
+    array.push(zzIndexArray, _barIndex)
+    array.push(zzTypeArray, _type)
+
+f_getLastZigzag() =>
+    int size = array.size(zzValueArray) - 1
+    x1 = array.get(zzIndexArray, size)
+    y1 = array.get(zzValueArray, size)
+    type = array.get(zzTypeArray, size)
+    [x1, y1, type]
+
+f_addDiagonalLine(_x2, _y2) =>
+    hasAtleastOnerecord = array.size(zzValueArray) >= 1
+    if hasAtleastOnerecord
+        [x1, y1, type] = f_getLastZigzag()
+        f_drawDiagonalLines(x1, _x2, y1, _y2, i_diagonalColor, i_diagonalThickness, i_diagonalLineStyle, i_zigzagCount, diagonalArray, extend.none)
+
+f_drawDiagonalSRLine(_xValue, _yValue) =>
+    index = array.size(zzValueArray) - 2
+    if i_showDiagonalSRLines and index >= 0
+        previousType = array.get(zzTypeArray, index)
+        previousValue = array.get(zzValueArray, index)
+        previousXValue = array.get(zzIndexArray, index)
+        diagonalSRColor = previousType == ZZ_HIGH ? i_diagonalHighColor : i_diagonalLowColor
+        f_drawDiagonalLines(previousXValue, _xValue, previousValue, _yValue, diagonalSRColor, i_diagonalThickness, i_diagonalLineStyle, i_diagonalSRLineCount, diagonalSRArray, extend.right)
+
+f_zigzag(_depth, _deviation) =>
+    var lw = 1
+    var hg = 1
+    lw := lw + 1
+    hg := hg + 1
+    lowestValue = -ta.lowestbars(_depth)
+    highestValue = -ta.highestbars(_depth)
+    lowing = lw == lowestValue or low - low[lowestValue] > _deviation * syminfo.mintick
+    highing = hg == highestValue or high[highestValue] - high > _deviation * syminfo.mintick
+    lh = ta.barssince(not highing)
+    ll = ta.barssince(not lowing)
+    down = lh > ll
+    lower = low[lw] > low[lowestValue]
+    higher = high[hg] < high[highestValue]
+    if lw != lowestValue and (not down[1] or lower)
+        lw := lowestValue < hg ? lowestValue : 0
+        lw
+    if hg != highestValue and (down[1] or higher)
+        hg := highestValue < lw ? highestValue : 0
+        hg
+    x1 = down ? lw : hg
+    y1 = down ? low[lw] : high[hg]
+    lb = down ? label.style_label_up : label.style_label_down
+    [down != down[1], x1, y1, lw, hg, down]
+
+f_drawLine(_x1, _x2, _yValue, _lineColor) =>
+    line.new(x1=_x1, y1=_yValue, x2=_x2, y2=_yValue, color=_lineColor, style=line.style_dotted, width=2)
+
+f_drawBox(_x1, _x2, _high, _low, _boxColor) =>
+    box.new(_x1, _high, _x2, _low, bgcolor=_boxColor, border_style=line.style_dashed, border_color=_boxColor)
+
+f_drawLabelCurrent(_x, _y, _textColor) =>
+    label.new(_x, _y, '         ' + str.tostring(_y), xloc.bar_index, yloc.price, #00000000, label.style_none, _textColor)
+
+f_extendArray(_lineArray, _labelArray, _extendLines) =>
+    if array.size(_lineArray) > 0
+        for _i = array.size(_lineArray) - 1 to 0 by 1
+            x2 = line.get_x2(array.get(_lineArray, _i))
+            yValue = line.get_y1(array.get(_lineArray, _i))
+            if _extendLines or bar_index - 1 == x2 and not(high > yValue and low < yValue)
+                line.set_x2(array.get(_lineArray, _i), bar_index)
+                label.set_x(array.get(_labelArray, _i), bar_index)
+
+f_extendBoxArray(_boxArray, _labelArray) =>
+    if array.size(_boxArray) > 0
+        for _i = array.size(_boxArray) - 1 to 0 by 1
+            boxId = array.get(_boxArray, _i)
+            box.set_right(boxId, bar_index)
+            label.set_x(array.get(_labelArray, _i), bar_index)
+
+f_addLines(_switch, _x1, _y1, _lw, _hg, _down, _colorLine) =>
+    if _switch
+        line l = na
+        label lab = na
+        nx = _down ? _hg : _lw
+        yValue = _down ? high[nx] : low[nx]
+        x1 = bar_index - nx
+        x2 = bar_index
+        if _down != _down[1] and not na(yValue)
+            f_addDiagonalLine(x1, yValue)
+            f_drawDiagonalSRLine(x1, yValue)
+            int type = _down ? ZZ_HIGH : ZZ_LOW
+            f_addValuesToArrays(x1, yValue, type)
+            l := f_drawLine(x1, x2, yValue, _colorLine)
+            lab := f_drawLabelCurrent(x2, yValue, _colorLine)
+
+        if array.size(zigZagArray) == i_lineCount
+            line.delete(array.shift(zigZagArray))
+            label.delete(array.shift(zigZagLabelArray))
+        diagonalLabelColor = _down ? i_diagonalHighColor : i_diagonalLowColor
+        f_drawDiagonalLabel(x1, yValue, f_createDiagonalLabelText(yValue), diagonalLabelColor, _down)
+        array.push(zigZagArray, l)
+        array.push(zigZagLabelArray, lab)
+
+f_addBoxes(_switch, _x1, _y1, _lw, _hg, _down) =>
+    if _switch
+        box b = na
+        label lab = na
+        nx = _down ? _hg : _lw
+        yValue = _down ? high[nx] : low[nx]
+        x1 = bar_index - nx
+        x2 = bar_index
+        yValueHigh = _down ? high[nx] : f_isUpCandle(nx) ? open[nx] : close[nx]
+        yValueLow = not _down ? low[nx] : f_isUpCandle(nx) ? close[nx] : open[nx]
+        boxColor = color.new(_down ? i_boxHighColor : i_boxLowColor, 70)
+        if _down != _down[1] and not na(yValue)
+            f_addDiagonalLine(x1, yValue)
+            f_drawDiagonalSRLine(x1, yValue)
+            int type = _down ? ZZ_HIGH : ZZ_LOW
+            f_addValuesToArrays(x1, yValue, type)
+            b := f_drawBox(x1, x2, yValueHigh, yValueLow, boxColor)
+            lab := f_drawLabelCurrent(x2, yValue, boxColor)
+
+        if array.size(zigZagBoxArray) == i_lineCount
+            box.delete(array.shift(zigZagBoxArray))
+            label.delete(array.shift(zigZagLabelArray))
+        diagonalLabelColor = _down ? i_diagonalHighColor : i_diagonalLowColor
+        f_drawDiagonalLabel(x1, yValue, f_createDiagonalLabelText(yValue), diagonalLabelColor, _down)
+        array.push(zigZagBoxArray, b)
+        array.push(zigZagLabelArray, lab)
+
+// ==========================================================================
+// ZIGZAG S/R -- EXECUTION
+// ==========================================================================
+
+[zz_switch, zz_x1, zz_y1, zz_lw, zz_hg, zz_down] = f_zigzag(i_firstDepth, i_firstDeviation)
+
+if i_horizontalType == ZZ_LINES
+    f_addLines(zz_switch, zz_x1, zz_y1, zz_lw, zz_hg, zz_down, i_firstColor)
+    f_extendArray(zigZagArray, zigZagLabelArray, i_extendLines)
+else
+    f_addBoxes(zz_switch, zz_x1, zz_y1, zz_lw, zz_hg, zz_down)
+    f_extendBoxArray(zigZagBoxArray, zigZagLabelArray)
+
+// ==========================================================================
+// ZIGZAG STRUCTURE TRACKING (for trade filter)
+// ==========================================================================
+
+// Track the last two highs and lows from zigzag to determine market structure
+var float zzHigh1 = na   // most recent high pivot
+var float zzHigh2 = na   // previous high pivot
+var float zzLow1 = na    // most recent low pivot
+var float zzLow2 = na    // previous low pivot
+
+if zz_switch
+    if zz_down  // HIGH pivot just confirmed
+        pivotVal = high[zz_hg]
+        if not na(pivotVal) and zz_down != zz_down[1]
+            zzHigh2 := zzHigh1
+            zzHigh1 := pivotVal
+    else  // LOW pivot just confirmed
+        pivotVal = low[zz_lw]
+        if not na(pivotVal) and zz_down != zz_down[1]
+            zzLow2 := zzLow1
+            zzLow1 := pivotVal
+
+// Bullish structure = higher lows (market support is rising)
+// Bearish structure = lower highs (market resistance is falling)
+zzBullishOK = not use_zz_struct or (not na(zzLow1) and not na(zzLow2) and zzLow1 > zzLow2)
+zzBearishOK = not use_zz_struct or (not na(zzHigh1) and not na(zzHigh2) and zzHigh1 < zzHigh2)
+
+// ==========================================================================
+// STRATEGY CALCULATIONS
+// ==========================================================================
+
+hi = ta.highest(high, lookback)
+lo = ta.lowest(low, lookback)
+
+hi_guard = ta.highest(high, guard_len)
+lo_guard = ta.lowest(low, guard_len)
+
+[supertrend, st_direction] = ta.supertrend(st_factor, st_atr_len)
+st_uptrend   = st_direction < 0
+st_downtrend = st_direction > 0
+st_flip_up   = st_direction < 0 and st_direction[1] > 0
+st_flip_down = st_direction > 0 and st_direction[1] < 0
+
+breakout_up   = price > hi[1]
+breakout_down = price < lo[1]
+
+guard_long  = breakout_up  and hi[1] > hi_guard[guard_delay]
+guard_short = breakout_down and lo[1] < lo_guard[guard_delay]
+
+in_date = not use_date or (time >= start_date and time <= end_date)
+in_ny_session = not use_session or not na(time(timeframe.period, ny_session, "America/New_York"))
+
+// ==========================================================================
+// ENTRY QUALITY FILTERS
+// ==========================================================================
+
+// -- ADX Trend Strength --
+dirmov(len) =>
+    upMove = ta.change(high)
+    downMove = -ta.change(low)
+    plusDM  = na(upMove) ? na : (upMove > downMove and upMove > 0 ? upMove : 0)
+    minusDM = na(downMove) ? na : (downMove > upMove and downMove > 0 ? downMove : 0)
+    truerange = ta.rma(ta.tr, len)
+    plus  = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+
+[diplus, diminus] = dirmov(adx_len)
+adx_val = 100 * ta.rma(math.abs(diplus - diminus) / (diplus + diminus == 0 ? 1 : diplus + diminus), adx_len)
+adxOK = not use_adx or adx_val >= adx_thresh
+
+// -- Candle Strength --
+candleRange = high - low
+candleBody  = math.abs(close - open)
+bodyRatio   = candleRange > 0 ? (candleBody / candleRange) * 100 : 0
+candleOK    = not use_candle_str or bodyRatio >= candle_body_pct
+
+// -- Supertrend Distance --
+atr_val     = ta.atr(st_atr_len)
+st_dist     = math.abs(close - supertrend)
+stDistOK_long  = not use_st_dist or (st_uptrend and st_dist > atr_val * st_dist_atr_mult)
+stDistOK_short = not use_st_dist or (st_downtrend and st_dist > atr_val * st_dist_atr_mult)
+
+// -- Confirmation Bar --
+confirmLong  = not use_confirm or (price[1] > hi[2])
+confirmShort = not use_confirm or (price[1] < lo[2])
+
+// -- Volume Confirmation --
+avgVol  = ta.sma(volume, 20)
+volOK   = not use_vol or (volume > avgVol * vol_mult)
+
+// ==========================================================================
+// DRAWDOWN PROTECTION
+// ==========================================================================
+
+var int consecLosses = 0
+var int barsSinceCooldown = 999
+
+if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) == 1
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastProfit < 0
+        consecLosses := consecLosses + 1
+        if consecLosses >= max_consec_loss
+            barsSinceCooldown := 0
+    else
+        consecLosses := 0
+
+barsSinceCooldown := barsSinceCooldown + 1
+cooldownActive = use_consec_cool and consecLosses >= max_consec_loss and barsSinceCooldown <= cooldown_bars
+
+eq = strategy.equity
+var float[] eqArray = array.new_float(0)
+array.push(eqArray, eq)
+if array.size(eqArray) > eq_sma_len
+    array.shift(eqArray)
+eqSMA = array.avg(eqArray)
+equityOK = not use_eq_filter or eq >= eqSMA
+
+var int dailyLosses = 0
+var int lastTradeDay = 0
+currentDay = dayofmonth
+
+if currentDay != lastTradeDay
+    dailyLosses := 0
+    lastTradeDay := currentDay
+
+if strategy.closedtrades > 0 and ta.change(strategy.closedtrades) == 1
+    lastPnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnl < 0
+        dailyLosses := dailyLosses + 1
+
+dailyCapHit = use_daily_cap and dailyLosses >= max_daily_losses
+drawdownOK = not cooldownActive and equityOK and not dailyCapHit
+
+// ==========================================================================
+// ENTRY / EXIT CONDITIONS
+// ==========================================================================
+
+st_long_ok  = not use_st or st_uptrend
+st_short_ok = not use_st or st_downtrend
+
+// ALL filters must pass -- ultra selective entries
+long_entry  = allow_longs  and guard_long  and st_long_ok  and in_date and in_ny_session and drawdownOK and adxOK and candleOK and stDistOK_long  and confirmLong  and volOK and zzBullishOK
+short_entry = allow_shorts and guard_short and st_short_ok and in_date and in_ny_session and drawdownOK and adxOK and candleOK and stDistOK_short and confirmShort and volOK and zzBearishOK
+
+exit_long  = breakout_down or (use_st_exit and use_st and st_flip_down)
+exit_short = breakout_up   or (use_st_exit and use_st and st_flip_up)
+
+// ==========================================================================
+// STRATEGY EXECUTION
+// ==========================================================================
+
+if long_entry
+    strategy.entry("Long", strategy.long)
+    sl_price_l = close * (1 - sl_pct / 100)
+    tp_price_l = close * (1 + tp_pct / 100)
+    if use_trail
+        trail_points = close * trail_pct / 100 / syminfo.mintick
+        strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l, trail_points=trail_points, trail_offset=trail_points)
+    else
+        strategy.exit("Long SL/TP", "Long", stop=sl_price_l, limit=tp_price_l)
+
+if short_entry
+    strategy.entry("Short", strategy.short)
+    sl_price_s = close * (1 + sl_pct / 100)
+    tp_price_s = close * (1 - tp_pct / 100)
+    if use_trail
+        trail_points = close * trail_pct / 100 / syminfo.mintick
+        strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s, trail_points=trail_points, trail_offset=trail_points)
+    else
+        strategy.exit("Short SL/TP", "Short", stop=sl_price_s, limit=tp_price_s)
+
+if strategy.position_size > 0 and exit_long
+    strategy.close("Long", comment="Lower Low Breakdown")
+
+if strategy.position_size < 0 and exit_short
+    strategy.close("Short", comment="Higher High Breakout")
+
+// ==========================================================================
+// PLOTS
+// ==========================================================================
+
+// Highest high / lowest low channels
+plot(hi, "Highest High", color=color.new(color.green, 30), linewidth=2)
+plot(lo, "Lowest Low",   color=color.new(color.red, 30),   linewidth=2)
+
+// Guard levels
+plot(hi_guard, "Guard High", color=color.new(color.green, 70), linewidth=1, style=plot.style_stepline)
+plot(lo_guard, "Guard Low",  color=color.new(color.red, 70),   linewidth=1, style=plot.style_stepline)
+
+// Supertrend
+st_plot_up   = plot(use_st and st_direction < 0 ? supertrend : na, "ST Up Trend",
+     color=color.green, style=plot.style_linebr, linewidth=2)
+st_plot_down = plot(use_st and st_direction < 0 ? na : (use_st ? supertrend : na), "ST Down Trend",
+     color=color.red, style=plot.style_linebr, linewidth=2)
+body_mid     = plot(use_st and not barstate.isfirst ? (open + close) / 2 : na, "Body Middle",
+     display=display.none)
+fill(body_mid, st_plot_up,   title="ST Uptrend BG",   color=color.new(color.green, 90), fillgaps=false)
+fill(body_mid, st_plot_down, title="ST Downtrend BG",  color=color.new(color.red,   90), fillgaps=false)
+
+// Entry signals
+plotshape(long_entry and strategy.position_size <= 0,  "Buy Signal",
+     shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(short_entry and strategy.position_size >= 0, "Sell Signal",
+     shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+// Session & protection backgrounds
+bgcolor(use_session and in_ny_session ? color.new(color.blue, 95) : na, title="NY Session BG")
+bgcolor(not drawdownOK ? color.new(color.orange, 90) : na, title="Drawdown Protection Active")
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) :
+     strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position BG")
+
+// ==========================================================================
+// INFO TABLE
+// ==========================================================================
+
+var info = table.new(position.top_right, 2, 18, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Indicator",    bgcolor=color.new(color.gray, 80), text_color=color.white)
+    table.cell(info, 1, 0, "Value",        bgcolor=color.new(color.gray, 80), text_color=color.white)
+
+    table.cell(info, 0, 1, "Highest (" + str.tostring(lookback) + ")", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(hi, "#.##"), text_color=color.green)
+
+    table.cell(info, 0, 2, "Lowest (" + str.tostring(lookback) + ")", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(lo, "#.##"), text_color=color.red)
+
+    table.cell(info, 0, 3, "Guard High", text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(hi_guard, "#.##"), text_color=color.green)
+
+    table.cell(info, 0, 4, "Guard Low", text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(lo_guard, "#.##"), text_color=color.red)
+
+    table.cell(info, 0, 5, "Supertrend", text_color=color.white)
+    table.cell(info, 1, 5,
+         use_st ? (st_uptrend ? "UPTREND" : "DOWNTREND") : "OFF",
+         text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
+
+    table.cell(info, 0, 6, "ST Value", text_color=color.white)
+    table.cell(info, 1, 6, use_st ? str.tostring(supertrend, "#.##") : "---",
+         text_color=use_st ? (st_uptrend ? color.green : color.red) : color.gray)
+
+    table.cell(info, 0, 7, "R:R Ratio", text_color=color.white)
+    table.cell(info, 1, 7, str.tostring(sl_pct, "#.#") + " : " + str.tostring(tp_pct, "#.#"),
+         text_color=color.yellow)
+
+    table.cell(info, 0, 8, "ADX", text_color=color.white)
+    table.cell(info, 1, 8, str.tostring(adx_val, "#.#") + (adxOK ? " OK" : " WEAK"),
+         text_color=adxOK ? color.green : color.red)
+
+    table.cell(info, 0, 9, "Candle Body", text_color=color.white)
+    table.cell(info, 1, 9, str.tostring(bodyRatio, "#.#") + "%" + (candleOK ? " OK" : " WEAK"),
+         text_color=candleOK ? color.green : color.red)
+
+    table.cell(info, 0, 10, "ZZ Structure", text_color=color.white)
+    zzStructText = (zzBullishOK and not zzBearishOK ? "BULLISH" : not zzBullishOK and zzBearishOK ? "BEARISH" : zzBullishOK and zzBearishOK ? "MIXED" : "NEUTRAL")
+    table.cell(info, 1, 10, zzStructText,
+         text_color=zzBullishOK and not zzBearishOK ? color.green : not zzBullishOK and zzBearishOK ? color.red : color.yellow)
+
+    table.cell(info, 0, 11, "ZZ Last HL", text_color=color.white)
+    zzHLText = not na(zzLow1) and not na(zzLow2) ? (zzLow1 > zzLow2 ? "HL (Bullish)" : "LL (Bearish)") : "---"
+    table.cell(info, 1, 11, zzHLText,
+         text_color=not na(zzLow1) and not na(zzLow2) and zzLow1 > zzLow2 ? color.green : color.red)
+
+    table.cell(info, 0, 12, "NY Session", text_color=color.white)
+    table.cell(info, 1, 12, in_ny_session ? "ACTIVE" : "CLOSED",
+         text_color=in_ny_session ? color.lime : color.gray)
+
+    table.cell(info, 0, 13, "Breakout", text_color=color.white)
+    table.cell(info, 1, 13, breakout_up ? "HIGHER HIGH ^" : breakout_down ? "LOWER LOW v" : "---",
+         text_color=breakout_up ? color.green : breakout_down ? color.red : color.gray)
+
+    table.cell(info, 0, 14, "Position", text_color=color.white)
+    table.cell(info, 1, 14,
+         strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
+
+    table.cell(info, 0, 15, "Consec Losses", text_color=color.white)
+    table.cell(info, 1, 15, str.tostring(consecLosses) + " / " + str.tostring(max_consec_loss),
+         text_color=consecLosses >= max_consec_loss ? color.red : color.green)
+
+    table.cell(info, 0, 16, "Daily Losses", text_color=color.white)
+    table.cell(info, 1, 16, str.tostring(dailyLosses) + " / " + str.tostring(max_daily_losses),
+         text_color=dailyCapHit ? color.red : color.green)
+
+    table.cell(info, 0, 17, "DD Protection", text_color=color.white)
+    table.cell(info, 1, 17, drawdownOK ? "OK" : "ACTIVE",
+         text_color=drawdownOK ? color.green : color.red)

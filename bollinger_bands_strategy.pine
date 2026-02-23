@@ -1,0 +1,118 @@
+//@version=6
+// (c) moneygreen
+// Bollinger Bands Strategy -- 3% max drawdown, 1:20 leverage, 0.20% risk per trade
+strategy("Bollinger Bands Strategy directed", overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=0,
+     currency=currency.USD,
+     margin_long=5, margin_short=5,
+     pyramiding=0)
+
+// --------------------------------------------------------------------------
+// INPUTS
+// --------------------------------------------------------------------------
+source    = close
+length    = input.int(20, minval=1)
+mult      = input.float(2.0, minval=0.001, maxval=50)
+direction = input.int(0, title="Strategy Direction", minval=-1, maxval=1)
+
+// Risk inputs
+riskPct   = input.float(0.20, "Risk Per Trade %", minval=0.01, maxval=5.0, step=0.01,
+     tooltip="Max loss per trade as % of equity. 0.20 = risk $200 on $100k account")
+atrLen    = input.int(14, "ATR Length (for stop)", minval=1)
+slMult    = input.float(1.5, "Stop Loss ATR Mult", minval=0.1, step=0.1,
+     tooltip="Stop loss distance = ATR x this multiplier")
+tpMult    = input.float(3.0, "Take Profit ATR Mult", minval=0.1, step=0.1,
+     tooltip="Take profit distance = ATR x this multiplier")
+
+// --------------------------------------------------------------------------
+// DIRECTION FILTER
+// --------------------------------------------------------------------------
+strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
+
+// --------------------------------------------------------------------------
+// 3% MAX DRAWDOWN -- hard stop, no more trades after 3% DD
+// --------------------------------------------------------------------------
+strategy.risk.max_drawdown(3, strategy.percent_of_equity)
+
+// --------------------------------------------------------------------------
+// BOLLINGER BANDS
+// --------------------------------------------------------------------------
+basis = ta.sma(source, length)
+dev   = mult * ta.stdev(source, length)
+upper = basis + dev
+lower = basis - dev
+
+// --------------------------------------------------------------------------
+// POSITION SIZING -- 0.20% risk per trade
+// --------------------------------------------------------------------------
+atr = ta.atr(atrLen)
+slDist = atr * slMult
+
+// qty = (equity * riskPct/100) / (stop distance)
+// This sizes every trade so a stop-loss hit only costs 0.20% of equity
+riskAmount = strategy.equity * riskPct / 100
+qty = slDist > 0 ? math.floor(riskAmount / slDist) : 0
+
+// --------------------------------------------------------------------------
+// ENTRIES -- original BB crossover logic preserved exactly
+// --------------------------------------------------------------------------
+if ta.crossover(source, lower) and qty > 0
+    strategy.entry("BBandLE", strategy.long, qty=qty, comment="BBandLE")
+    sl_l = close - slDist
+    tp_l = close + atr * tpMult
+    strategy.exit("Long Exit", "BBandLE", stop=sl_l, limit=tp_l)
+else
+    strategy.cancel(id="BBandLE")
+
+if ta.crossunder(source, upper) and qty > 0
+    strategy.entry("BBandSE", strategy.short, qty=qty, comment="BBandSE")
+    sl_s = close + slDist
+    tp_s = close - atr * tpMult
+    strategy.exit("Short Exit", "BBandSE", stop=sl_s, limit=tp_s)
+else
+    strategy.cancel(id="BBandSE")
+
+// --------------------------------------------------------------------------
+// PLOTS
+// --------------------------------------------------------------------------
+plot(basis, "Basis", color=color.orange)
+p1 = plot(upper, "Upper", color=color.blue)
+p2 = plot(lower, "Lower", color=color.blue)
+fill(p1, p2, title="BB Fill", color=color.new(color.blue, 93))
+
+// Position background
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 93) :
+     strategy.position_size < 0 ? color.new(color.red, 93) : na, title="Position BG")
+
+// --------------------------------------------------------------------------
+// INFO TABLE
+// --------------------------------------------------------------------------
+var info = table.new(position.top_right, 2, 8, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Setting",  bgcolor=color.new(color.gray, 80), text_color=color.white)
+    table.cell(info, 1, 0, "Value",    bgcolor=color.new(color.gray, 80), text_color=color.white)
+
+    table.cell(info, 0, 1, "Leverage", text_color=color.white)
+    table.cell(info, 1, 1, "1:20", text_color=color.yellow)
+
+    table.cell(info, 0, 2, "Risk/Trade", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(riskPct, "#.##") + "%", text_color=color.yellow)
+
+    table.cell(info, 0, 3, "Max DD", text_color=color.white)
+    table.cell(info, 1, 3, "3%", text_color=color.red)
+
+    table.cell(info, 0, 4, "Qty", text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(qty), text_color=color.lime)
+
+    table.cell(info, 0, 5, "SL Dist", text_color=color.white)
+    table.cell(info, 1, 5, str.tostring(slDist, "#.##"), text_color=color.red)
+
+    table.cell(info, 0, 6, "BB Width", text_color=color.white)
+    table.cell(info, 1, 6, str.tostring(upper - lower, "#.##"), text_color=color.blue)
+
+    table.cell(info, 0, 7, "Position", text_color=color.white)
+    table.cell(info, 1, 7,
+         strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
