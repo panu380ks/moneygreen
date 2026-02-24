@@ -1,5 +1,5 @@
 //@version=6
-strategy("BB USDJPY", overlay=true, currency=currency.USD, initial_capital=10000)
+strategy("BB USDJPY", overlay=true, currency=currency.USD, initial_capital=10000, margin_long=5, margin_short=5, default_qty_type=strategy.fixed, default_qty_value=10000, commission_type=strategy.commission.cash_per_order, commission_value=0)
 
 source = close
 length = input.int(20, minval=1)
@@ -28,10 +28,11 @@ dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
 
-// Position sizing
+// Position sizing: risk riskPct% of equity per trade based on ATR stop distance
 stopDist = atrVal * atrMult
 riskAmount = strategy.equity * (riskPct / 100.0)
-qty = nz(math.max(math.floor(riskAmount * source / stopDist), 1), 1)
+qtyRaw = riskAmount * source / stopDist
+qty = na(qtyRaw) ? 10000 : int(math.max(math.floor(qtyRaw), 1))
 
 // Entry conditions
 longCond = ta.crossover(source, lower) and bullTrend and not na(atrVal)
@@ -39,11 +40,16 @@ shortCond = ta.crossunder(source, upper) and bearTrend and not na(atrVal)
 
 if longCond
     strategy.entry("BBandLE", strategy.long, qty=qty)
-    strategy.exit("LE Exit", "BBandLE", stop=close - stopDist, limit=close + atrVal * tpMult)
 
 if shortCond
     strategy.entry("BBandSE", strategy.short, qty=qty)
-    strategy.exit("SE Exit", "BBandSE", stop=close + stopDist, limit=close - atrVal * tpMult)
+
+// Exits — anchored to fill price, updated each bar
+if strategy.position_size > 0
+    strategy.exit("LE Exit", "BBandLE", stop=strategy.position_avg_price - stopDist, limit=strategy.position_avg_price + atrVal * tpMult)
+
+if strategy.position_size < 0
+    strategy.exit("SE Exit", "BBandSE", stop=strategy.position_avg_price + stopDist, limit=strategy.position_avg_price - atrVal * tpMult)
 
 plot(trendSma, title="Trend SMA", color=color.orange, linewidth=2)
 plot(upper, title="BB Upper", color=color.red)
