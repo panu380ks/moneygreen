@@ -5,6 +5,28 @@ length = input.int(20, minval=1)
 mult = input.float(2.0, minval=0.001, maxval=50)
 earlyPct = input.float(0.5, title="Early Entry Offset (bands)", minval=0.0, maxval=1.0, step=0.1)
 direction = input.int(0, title="Strategy Direction", minval=-1, maxval=1)
+
+// Trend filter — only long above SMA, only short below
+trendLen = input.int(200, title="Trend SMA Length", minval=1)
+trendSma = ta.sma(source, trendLen)
+
+// RSI confirmation — avoid entries in no-man's land
+rsiLen = input.int(14, title="RSI Length", minval=1)
+rsiOB = input.int(70, title="RSI Overbought", minval=50, maxval=90)
+rsiOS = input.int(30, title="RSI Oversold", minval=10, maxval=50)
+rsiVal = ta.rsi(source, rsiLen)
+
+// ATR stops & take profit
+atrLen = input.int(14, title="ATR Length", minval=1)
+atrSlMult = input.float(1.5, title="ATR SL Multiplier", minval=0.1, step=0.1)
+atrTpMult = input.float(2.5, title="ATR TP Multiplier", minval=0.1, step=0.1)
+atrVal = ta.atr(atrLen)
+
+// Cooldown — minimum bars between trades
+cooldown = input.int(10, title="Min Bars Between Trades", minval=1)
+var int lastTradeBar = 0
+canTrade = bar_index - lastTradeBar >= cooldown
+
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
 
 basis = ta.sma(source, length)
@@ -12,21 +34,35 @@ dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
 
-// Early trigger bands — shifted inward by earlyPct * dev
+// Early trigger bands
 earlyUpper = upper - earlyPct * dev
 earlyLower = lower + earlyPct * dev
 
-if (ta.crossover(source, earlyLower))
-    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+// Entry conditions with filters
+longCond = ta.crossover(source, earlyLower) and source > trendSma and rsiVal < rsiOS and canTrade
+shortCond = ta.crossunder(source, earlyUpper) and source < trendSma and rsiVal > rsiOB and canTrade
+
+if longCond
+    strategy.entry("BBandLE", strategy.long, comment="BBandLE")
+    lastTradeBar := bar_index
 else
     strategy.cancel(id="BBandLE")
-if (ta.crossunder(source, earlyUpper))
-    strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+
+if shortCond
+    strategy.entry("BBandSE", strategy.short, comment="BBandSE")
+    lastTradeBar := bar_index
 else
     strategy.cancel(id="BBandSE")
+
+// ATR-based exits
+if strategy.position_size > 0
+    strategy.exit("LE Exit", "BBandLE", stop=strategy.position_avg_price - atrVal * atrSlMult, limit=strategy.position_avg_price + atrVal * atrTpMult)
+if strategy.position_size < 0
+    strategy.exit("SE Exit", "BBandSE", stop=strategy.position_avg_price + atrVal * atrSlMult, limit=strategy.position_avg_price - atrVal * atrTpMult)
 
 plot(upper, title="BB Upper", color=color.red)
 plot(lower, title="BB Lower", color=color.green)
 plot(basis, title="BB Basis", color=color.blue)
 plot(earlyUpper, title="Early Upper", color=color.new(color.red, 60), style=plot.style_circles)
 plot(earlyLower, title="Early Lower", color=color.new(color.green, 60), style=plot.style_circles)
+plot(trendSma, title="Trend SMA", color=color.orange, linewidth=2)
