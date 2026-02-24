@@ -1,5 +1,5 @@
 //@version=6
-strategy("BB USDJPY", overlay=true, currency=currency.USD, initial_capital=10000, margin_long=5, margin_short=5, default_qty_type=strategy.fixed, default_qty_value=10000, commission_type=strategy.commission.cash_per_order, commission_value=0)
+strategy("BB USDJPY + Cipher B", overlay=true, currency=currency.USD, initial_capital=20, margin_long=1, margin_short=1, default_qty_type=strategy.fixed, default_qty_value=100, commission_type=strategy.commission.cash_per_order, commission_value=0)
 
 source = close
 length = input.int(20, minval=1)
@@ -32,7 +32,7 @@ lower = basis - dev
 stopDist = atrVal * atrMult
 riskAmount = strategy.equity * (riskPct / 100.0)
 qtyRaw = riskAmount * source / stopDist
-qty = na(qtyRaw) ? 10000 : int(math.max(math.floor(qtyRaw), 1))
+qty = na(qtyRaw) ? 100 : int(math.max(math.floor(qtyRaw), 1))
 
 // Entry conditions
 longCond = ta.crossover(source, lower) and bullTrend and not na(atrVal)
@@ -51,7 +51,38 @@ if strategy.position_size > 0
 if strategy.position_size < 0
     strategy.exit("SE Exit", "BBandSE", stop=strategy.position_avg_price + stopDist, limit=strategy.position_avg_price - atrVal * tpMult)
 
+// BB + Trend plots (price overlay)
 plot(trendSma, title="Trend SMA", color=color.orange, linewidth=2)
 plot(upper, title="BB Upper", color=color.red)
 plot(lower, title="BB Lower", color=color.green)
 plot(basis, title="BB Basis", color=color.blue)
+
+// ═══════════════════════════════════════════════════
+// Market Cipher B — separate pane
+// ═══════════════════════════════════════════════════
+n1 = input.int(10, "Channel Length")
+n2 = input.int(21, "Average Length")
+obLevel1 = input.int(60, "Over Bought Level 1")
+obLevel2 = input.int(53, "Over Bought Level 2")
+osLevel1 = input.int(-60, "Over Sold Level 1")
+osLevel2 = input.int(-53, "Over Sold Level 2")
+
+ap = hlc3
+esa = ta.ema(ap, n1)
+d = ta.ema(math.abs(ap - esa), n1)
+ci = (ap - esa) / (0.015 * d)
+tci = ta.ema(ci, n2)
+
+wt1 = tci
+wt2 = ta.sma(wt1, 4)
+
+plot(0, color=color.gray, force_overlay=false, title="Zero")
+plot(obLevel1, color=color.red, force_overlay=false, title="OB1")
+plot(osLevel1, color=color.green, force_overlay=false, title="OS1")
+plot(obLevel2, color=color.red, force_overlay=false, title="OB2")
+plot(osLevel2, color=color.green, force_overlay=false, title="OS2")
+plot(wt1, style=plot.style_area, color=color.new(#2196F3, 10), force_overlay=false, title="WT1")
+plot(wt2, style=plot.style_area, color=color.new(color.blue, 10), force_overlay=false, title="WT2")
+plot(wt1 - wt2, color=color.yellow, style=plot.style_area, force_overlay=false, title="WT Diff")
+plot(ta.cross(wt1, wt2) ? wt2 : na, color=color.black, style=plot.style_line, linewidth=5, force_overlay=false, title="Cross BG")
+plot(ta.cross(wt1, wt2) ? wt2 : na, color=(wt2 - wt1 > 0 ? color.red : color.lime), style=plot.style_circles, linewidth=6, force_overlay=false, title="Cross Signal")
