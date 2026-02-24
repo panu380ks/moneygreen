@@ -1,0 +1,118 @@
+//@version=6
+// Gaussian Channel Strategy
+// Based on Ehlers' Gaussian Filter applied as a channel overlay
+strategy("Gaussian Channel Strategy", overlay=true, pyramiding=1, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ── Inputs ──
+src = input(close, title="Source")
+length = input.int(20, title="Gaussian Length", minval=1)
+mult = input.float(2.0, title="Channel Multiplier", minval=0.1, step=0.1)
+poles = input.int(4, title="Poles (1-4)", minval=1, maxval=4)
+
+strat_dir_input = input.string("long", title="Strategy Direction", options=["long", "short", "all"])
+strat_dir_value = strat_dir_input == "long" ? strategy.direction.long : strat_dir_input == "short" ? strategy.direction.short : strategy.direction.all
+strategy.risk.allow_entry_in(strat_dir_value)
+
+// ── R:R Exits ──
+atrLen = input.int(14, title="ATR Length", minval=1)
+atrSlMult = input.float(1.0, title="ATR SL Multiplier (Risk)", minval=0.1, step=0.1)
+rrRatio = input.float(5.0, title="Reward : Risk Ratio", minval=0.5, step=0.5)
+useTrail = input.bool(true, title="Use Trailing Stop?")
+atrTrailMult = input.float(2.0, title="ATR Trail Offset", minval=0.1, step=0.1)
+atrVal = ta.atr(atrLen)
+
+// ── Backtest Period ──
+testStartYear = input.int(2016, "Backtest Start Year")
+testStartMonth = input.int(1, "Backtest Start Month")
+testStartDay = input.int(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+testStopYear = input.int(2030, "Backtest Stop Year")
+testStopMonth = input.int(12, "Backtest Stop Month")
+testStopDay = input.int(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop
+
+// ── Gaussian Filter (Ehlers) ──
+// Attempt to approximate a multi-pole Gaussian filter using cascaded EMA passes
+// Each pass smooths further, approximating the Gaussian bell curve response
+gauss1(_src, _len) =>
+    ta.ema(_src, _len)
+
+gauss2(_src, _len) =>
+    ta.ema(ta.ema(_src, _len), _len)
+
+gauss3(_src, _len) =>
+    ta.ema(ta.ema(ta.ema(_src, _len), _len), _len)
+
+gauss4(_src, _len) =>
+    ta.ema(ta.ema(ta.ema(ta.ema(_src, _len), _len), _len), _len)
+
+gaussFilter(src, len, poles) =>
+    poles == 1 ? gauss1(src, len) :
+      poles == 2 ? gauss2(src, len) :
+      poles == 3 ? gauss3(src, len) :
+      gauss4(src, len)
+
+// ── Channel Calculation ──
+filt = gaussFilter(src, length, poles)
+
+// True Range filtered for channel width
+trFilt = gaussFilter(ta.tr, length, poles)
+upper = filt + trFilt * mult
+lower = filt - trFilt * mult
+
+// ── Trend Detection ──
+isBullish = filt > filt[1]
+isBearish = filt < filt[1]
+
+// ── Colors ──
+trendColor = isBullish ? color.green : isBearish ? color.red : color.gray
+fillColor = isBullish ? color.new(color.green, 75) : isBearish ? color.new(color.red, 75) : color.new(color.gray, 75)
+
+// ── Plots ──
+pUpper = plot(upper, title="Upper Band", color=trendColor, linewidth=1)
+pLower = plot(lower, title="Lower Band", color=trendColor, linewidth=1)
+pMid = plot(filt, title="Gaussian Mid", color=trendColor, linewidth=2)
+fill(pUpper, pLower, title="Channel Fill", color=fillColor)
+
+// ── Entry Logic ──
+// Long:  bullish trend + price pulls back to lower band then crosses back above
+// Short: bearish trend + price rallies to upper band then crosses back below
+longCond = isBullish and ta.crossover(src, lower) and testPeriod()
+shortCond = isBearish and ta.crossunder(src, upper) and testPeriod()
+
+// Alternative: enter when price crosses above/below the midline with trend
+longCond2 = isBullish and ta.crossover(src, filt) and src > lower and testPeriod()
+shortCond2 = isBearish and ta.crossunder(src, filt) and src < upper and testPeriod()
+
+entryMode = input.string("Pullback to Band", title="Entry Mode", options=["Pullback to Band", "Cross Midline"])
+
+longSignal = entryMode == "Pullback to Band" ? longCond : longCond2
+shortSignal = entryMode == "Pullback to Band" ? shortCond : shortCond2
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+// ── Signal Arrows ──
+plotshape(longSignal, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small)
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// ── 1:5 R:R Exits ──
+if strategy.position_size > 0
+    sl = strategy.position_avg_price - atrVal * atrSlMult
+    tp = strategy.position_avg_price + atrVal * atrSlMult * rrRatio
+    if useTrail
+        strategy.exit("Long Exit", "Long", stop=sl, limit=tp, trail_points=atrVal * atrTrailMult / syminfo.mintick, trail_offset=atrVal * atrTrailMult / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+if strategy.position_size < 0
+    sl = strategy.position_avg_price + atrVal * atrSlMult
+    tp = strategy.position_avg_price - atrVal * atrSlMult * rrRatio
+    if useTrail
+        strategy.exit("Short Exit", "Short", stop=sl, limit=tp, trail_points=atrVal * atrTrailMult / syminfo.mintick, trail_offset=atrVal * atrTrailMult / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
