@@ -1,11 +1,12 @@
 //@version=6
-strategy("Bollinger Bands Strategy directed", overlay=true)
+strategy("BB USDJPY", overlay=true, currency=currency.USD, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=0, commission_type=strategy.commission.cash_per_order, commission_value=0)
 
 source = close
 length = input.int(20, minval=1)
 mult = input.float(1.5, minval=0.001, maxval=50)
 direction = input.int(0, title="Strategy Direction", minval=-1, maxval=1)
-max_dd = input.float(2.0, title="Max Drawdown %", minval=1.0, maxval=2.0, step=0.1)
+max_dd = input.float(10.0, title="Max Drawdown %", minval=1.0, maxval=50.0, step=0.5)
+riskPct = input.float(1.5, title="Risk Per Trade %", minval=0.5, maxval=5.0, step=0.5)
 
 // Trend filter
 trendLen = input.int(200, title="Trend SMA Length", minval=1)
@@ -13,9 +14,10 @@ trendSma = ta.sma(source, trendLen)
 bullTrend = source > trendSma
 bearTrend = source < trendSma
 
-// ATR exit
+// ATR for stops and position sizing
 atrLen = input.int(14, title="ATR Length", minval=1)
-atrMult = input.float(1.5, title="ATR Multiplier", minval=0.1, step=0.1)
+atrMult = input.float(1.5, title="ATR SL Multiplier", minval=0.1, step=0.1)
+tpMult = input.float(2.0, title="ATR TP Multiplier", minval=0.1, step=0.1)
 atrVal = ta.atr(atrLen)
 
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
@@ -26,21 +28,42 @@ dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
 
+// Position sizing: risk riskPct% of equity per trade based on ATR stop distance
+// For USDJPY: 1 pip = 0.01, point = 0.001
+// stop distance in price terms
+stopDist = atrVal * atrMult
+riskAmount = strategy.equity * (riskPct / 100.0)
+// qty in units — for USDJPY each unit profit per 0.01 move = 1/price in USD terms
+// Simplified: risk$ = qty * stopDist / price => qty = risk$ * price / stopDist
+qtyUnits = math.floor(riskAmount * source / stopDist)
+qty = math.max(qtyUnits, 1)
+
+// Long entry
 if (ta.crossover(source, lower)) and bullTrend
-    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
-else
+    longStop = close - stopDist
+    longTP = close + atrVal * tpMult
+    strategy.entry("BBandLE", strategy.long, qty=qty, comment="BBandLE")
+    strategy.exit("LE Exit", "BBandLE", stop=longStop, limit=longTP)
+else if strategy.position_size <= 0
     strategy.cancel(id="BBandLE")
 
+// Short entry
 if (ta.crossunder(source, upper)) and bearTrend
-    strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
-else
+    shortStop = close + stopDist
+    shortTP = close - atrVal * tpMult
+    strategy.entry("BBandSE", strategy.short, qty=qty, comment="BBandSE")
+    strategy.exit("SE Exit", "BBandSE", stop=shortStop, limit=shortTP)
+else if strategy.position_size >= 0
     strategy.cancel(id="BBandSE")
 
-// ATR-based exits
+// Trailing update exits for open positions
 if strategy.position_size > 0
-    strategy.exit("LE Exit", "BBandLE", stop=close - atrVal * atrMult, limit=close + atrVal * atrMult)
+    strategy.exit("LE Exit", "BBandLE", stop=close - stopDist, limit=close + atrVal * tpMult)
 if strategy.position_size < 0
-    strategy.exit("SE Exit", "BBandSE", stop=close + atrVal * atrMult, limit=close - atrVal * atrMult)
+    strategy.exit("SE Exit", "BBandSE", stop=close + stopDist, limit=close - atrVal * tpMult)
 
 plot(trendSma, title="Trend SMA", color=color.orange, linewidth=2)
+plot(upper, title="BB Upper", color=color.red)
+plot(lower, title="BB Lower", color=color.green)
+plot(basis, title="BB Basis", color=color.blue)
 //plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
