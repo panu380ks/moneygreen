@@ -1,66 +1,79 @@
 // This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 //
-// MarketCipher B Strategy
-// Components: Wave Trend Oscillator, Money Flow, Stochastic RSI, Buy/Sell Signals
+// MarketCipher B Strategy — Low Drawdown 1:5 R:R
+// Optimized for XAUUSD 1H | Buy green signals, Sell red dot signals
 
 //@version=6
-strategy("MarketCipher B Strategy", shorttitle="MCB Strat", overlay=true,
-     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
-     default_qty_value=100, commission_type=strategy.commission.percent,
-     commission_value=0.04, slippage=1, pyramiding=0)
+strategy("MCB Low DD 1:5", shorttitle="MCB 1:5", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.fixed,
+     default_qty_value=1, commission_type=strategy.commission.percent,
+     commission_value=0.04, slippage=2, pyramiding=0,
+     calc_on_every_tick=false, process_orders_on_close=false)
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Inputs
+// INPUTS
 // ──────────────────────────────────────────────────────────────────────────────
 
 // Wave Trend
-wtChannelLen  = input.int(9,   "Wave Trend Channel Length")
-wtAverageLen  = input.int(12,  "Wave Trend Average Length")
-wtMALen       = input.int(3,   "Wave Trend MA Length")
+wtChannelLen = input.int(9,  "WT Channel Length")
+wtAverageLen = input.int(12, "WT Average Length")
+wtMALen      = input.int(3,  "WT MA Length")
 
-// Overbought / Oversold Levels
+// OB / OS Levels
 obLevel1 = input.int(60,  "Overbought Level 1")
 obLevel2 = input.int(53,  "Overbought Level 2")
 osLevel1 = input.int(-60, "Oversold Level 1")
 osLevel2 = input.int(-53, "Oversold Level 2")
 
 // Money Flow
-mfLength   = input.int(50, "Money Flow Length")
-mfMultiply = input.float(150.0, "Money Flow Multiplier")
+mfLength   = input.int(50,    "Money Flow Length")
+mfMultiply = input.float(150, "Money Flow Multiplier")
 
 // Stochastic RSI
-srsiLength  = input.int(14, "Stochastic RSI Length")
+srsiLength  = input.int(14, "SRSI Length")
 stochLength = input.int(14, "Stochastic K Length")
-smoothK     = input.int(3,  "Stochastic Smooth K")
-smoothD     = input.int(3,  "Stochastic Smooth D")
+smoothK     = input.int(3,  "Smooth K")
+smoothD     = input.int(3,  "Smooth D")
 
-// Strategy Settings
-tradeDirection = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"])
-useWeakSignals = input.bool(false, "Trade Weak Signals")
-useDivergence  = input.bool(false, "Trade Divergence Signals")
-useMFFilter    = input.bool(false, "Money Flow Confirmation Filter")
-useSLTP        = input.bool(false, "Use Stop Loss / Take Profit")
-slPercent      = input.float(3.0, "Stop Loss %", minval=0.1, step=0.1)
-tpPercent      = input.float(6.0, "Take Profit %", minval=0.1, step=0.1)
+// Trend Filter
+trendLen = input.int(200, "Trend EMA Length", group="Filters")
+useTrend = input.bool(true, "Use EMA Trend Filter", group="Filters")
+useMF    = input.bool(true, "Use Money Flow Filter", group="Filters")
+useSRSI  = input.bool(true, "Use Stoch RSI Filter", group="Filters")
+
+// Risk Management
+riskPerTrade = input.float(1.5, "Risk Per Trade %", minval=0.1, maxval=5.0, step=0.1, group="Risk")
+atrLen       = input.int(14,  "ATR Length", group="Risk")
+slMultiplier = input.float(1.5, "SL ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group="Risk")
+rrRatio      = input.float(5.0, "Risk:Reward Ratio", minval=1.0, maxval=10.0, step=0.5, group="Risk")
+useTrailing  = input.bool(true, "Trailing Stop After 3R", group="Risk")
+trailTrigger = input.float(3.0, "Trail Trigger (R multiple)", minval=1.0, step=0.5, group="Risk")
+trailOffset  = input.float(1.5, "Trail Lock-In (R multiple)", minval=0.5, step=0.5, group="Risk")
+
+// Trade Direction
+tradeDir = input.string("Both", "Direction", options=["Long", "Short", "Both"], group="Risk")
+
+// Cooldown
+useCooldown    = input.bool(true, "Cooldown After Loss", group="Filters")
+cooldownBars   = input.int(5, "Cooldown Bars", minval=1, maxval=50, group="Filters")
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Wave Trend Oscillator
+// WAVE TREND OSCILLATOR
 // ──────────────────────────────────────────────────────────────────────────────
 
 wtSrc = hlc3
 esa   = ta.ema(wtSrc, wtChannelLen)
 de    = ta.ema(math.abs(wtSrc - esa), wtChannelLen)
 ci    = (wtSrc - esa) / (0.015 * de)
-
-wt1 = ta.ema(ci, wtAverageLen)
-wt2 = ta.sma(wt1, wtMALen)
+wt1   = ta.ema(ci, wtAverageLen)
+wt2   = ta.sma(wt1, wtMALen)
 
 wtCrossUp   = ta.crossover(wt1, wt2)
 wtCrossDown = ta.crossunder(wt1, wt2)
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Money Flow Index
+// MONEY FLOW
 // ──────────────────────────────────────────────────────────────────────────────
 
 f_moneyFlow(_src, _len, _mult) =>
@@ -73,100 +86,161 @@ f_moneyFlow(_src, _len, _mult) =>
 mfValue = f_moneyFlow(hlc3, mfLength, mfMultiply)
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Stochastic RSI
+// STOCHASTIC RSI
 // ──────────────────────────────────────────────────────────────────────────────
 
-rsiValue  = ta.rsi(close, srsiLength)
-stochRSI  = ta.stoch(rsiValue, rsiValue, rsiValue, stochLength)
-srsiK     = ta.sma(stochRSI, smoothK)
-srsiD     = ta.sma(srsiK, smoothD)
-
-srsiScaled = srsiK - 80
+rsiVal   = ta.rsi(close, srsiLength)
+stochRSI = ta.stoch(rsiVal, rsiVal, rsiVal, stochLength)
+srsiK    = ta.sma(stochRSI, smoothK)
+srsiD    = ta.sma(srsiK, smoothD)
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Divergence Detection
+// TREND FILTER
 // ──────────────────────────────────────────────────────────────────────────────
 
-f_findDivergence(_src, _lkbk) =>
-    _pLow = ta.pivotlow(_src, _lkbk, _lkbk)
-    _pHigh = ta.pivothigh(_src, _lkbk, _lkbk)
-    _pLow_prev = ta.valuewhen(not na(_pLow), _src[_lkbk], 1)
-    _pLow_curr = ta.valuewhen(not na(_pLow), _src[_lkbk], 0)
-    _price_low_prev = ta.valuewhen(not na(_pLow), low[_lkbk], 1)
-    _price_low_curr = ta.valuewhen(not na(_pLow), low[_lkbk], 0)
-    _pHigh_prev = ta.valuewhen(not na(_pHigh), _src[_lkbk], 1)
-    _pHigh_curr = ta.valuewhen(not na(_pHigh), _src[_lkbk], 0)
-    _price_high_prev = ta.valuewhen(not na(_pHigh), high[_lkbk], 1)
-    _price_high_curr = ta.valuewhen(not na(_pHigh), high[_lkbk], 0)
-    _bullDiv = (not na(_pLow)) and (_price_low_curr < _price_low_prev) and (_pLow_curr > _pLow_prev)
-    _bearDiv = (not na(_pHigh)) and (_price_high_curr > _price_high_prev) and (_pHigh_curr < _pHigh_prev)
-    [_bullDiv, _bearDiv]
-
-lkbk = 5
-[bullDiv, bearDiv] = f_findDivergence(wt2, lkbk)
+ema200   = ta.ema(close, trendLen)
+trendUp  = not useTrend or close > ema200
+trendDn  = not useTrend or close < ema200
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Signal Logic
+// ATR FOR STOP LOSS
 // ──────────────────────────────────────────────────────────────────────────────
 
-// Strong signals
-buySignal  = wtCrossUp and wt2 < osLevel1
-sellSignal = wtCrossDown and wt2 > obLevel1
-
-// Weak signals
-buySignalWeak  = wtCrossUp and wt2 < osLevel2 and not buySignal
-sellSignalWeak = wtCrossDown and wt2 > obLevel2 and not sellSignal
-
-// Money Flow filter
-mfLongOK  = not useMFFilter or mfValue > 0
-mfShortOK = not useMFFilter or mfValue < 0
-
-// Combined entry conditions
-goLong  = (buySignal or (useWeakSignals and buySignalWeak) or (useDivergence and bullDiv)) and mfLongOK
-goShort = (sellSignal or (useWeakSignals and sellSignalWeak) or (useDivergence and bearDiv)) and mfShortOK
-
-// Exit conditions: opposite zone cross
-exitLong  = wtCrossDown and wt2 > obLevel2
-exitShort = wtCrossUp and wt2 < osLevel2
+atrValue = ta.atr(atrLen)
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Strategy Execution
+// COOLDOWN LOGIC
 // ──────────────────────────────────────────────────────────────────────────────
 
-allowLong  = tradeDirection == "Long" or tradeDirection == "Both"
-allowShort = tradeDirection == "Short" or tradeDirection == "Both"
-
-// Entries
-if goLong and allowLong
-    strategy.entry("Long", strategy.long)
-if goShort and allowShort
-    strategy.entry("Short", strategy.short)
-
-// Exits
-if exitLong and strategy.position_size > 0
-    strategy.close("Long", comment="WT Exit")
-if exitShort and strategy.position_size < 0
-    strategy.close("Short", comment="WT Exit")
-
-// Stop Loss / Take Profit
-if useSLTP and strategy.position_size > 0
-    strategy.exit("Long SL/TP", "Long",
-         stop=strategy.position_avg_price * (1 - slPercent / 100),
-         limit=strategy.position_avg_price * (1 + tpPercent / 100))
-if useSLTP and strategy.position_size < 0
-    strategy.exit("Short SL/TP", "Short",
-         stop=strategy.position_avg_price * (1 + slPercent / 100),
-         limit=strategy.position_avg_price * (1 - tpPercent / 100))
+var int barsSinceLoss = 999
+if strategy.closedtrades > 0
+    lastPL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPL < 0 and strategy.closedtrades != strategy.closedtrades[1]
+        barsSinceLoss := 0
+barsSinceLoss := barsSinceLoss + 1
+cooldownOK = not useCooldown or barsSinceLoss > cooldownBars
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Plotting (on price chart)
+// SIGNAL LOGIC — GREEN BUY / RED SELL
 // ──────────────────────────────────────────────────────────────────────────────
 
-plotshape(goLong and allowLong, "Long Entry", shape.triangleup,
-     location.belowbar, color.new(color.lime, 0), size=size.small)
-plotshape(goShort and allowShort, "Short Entry", shape.triangledown,
-     location.abovebar, color.new(color.red, 0), size=size.small)
-plotshape(exitLong and strategy.position_size > 0, "Exit Long", shape.xcross,
-     location.abovebar, color.new(color.orange, 0), size=size.tiny)
-plotshape(exitShort and strategy.position_size < 0, "Exit Short", shape.xcross,
-     location.belowbar, color.new(color.orange, 0), size=size.tiny)
+// Green signal: WT crosses up in oversold zone
+buyStrong = wtCrossUp and wt2 < osLevel1
+buyWeak   = wtCrossUp and wt2 < osLevel2 and not buyStrong
+
+// Red dot signal: WT crosses down in overbought zone
+sellStrong = wtCrossDown and wt2 > obLevel1
+sellWeak   = wtCrossDown and wt2 > obLevel2 and not sellStrong
+
+// Money Flow confirmation
+mfBullish = not useMF or mfValue > 0
+mfBearish = not useMF or mfValue < 0
+
+// SRSI confirmation
+srsiBullish = not useSRSI or (srsiK < 30 or ta.crossover(srsiK, srsiD))
+srsiBearish = not useSRSI or (srsiK > 70 or ta.crossunder(srsiK, srsiD))
+
+// Final entry signals with all filters
+goLong  = (buyStrong or buyWeak) and trendUp and mfBullish and srsiBullish and cooldownOK
+goShort = (sellStrong or sellWeak) and trendDn and mfBearish and srsiBearish and cooldownOK
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POSITION SIZING — RISK-BASED
+// ──────────────────────────────────────────────────────────────────────────────
+
+riskAmt    = strategy.equity * (riskPerTrade / 100)
+slPoints   = atrValue * slMultiplier
+qtyLong    = slPoints > 0 ? math.floor(riskAmt / slPoints) : 1
+qtyShort   = slPoints > 0 ? math.floor(riskAmt / slPoints) : 1
+
+// ──────────────────────────────────────────────────────────────────────────────
+// STRATEGY EXECUTION
+// ──────────────────────────────────────────────────────────────────────────────
+
+allowLong  = tradeDir == "Long" or tradeDir == "Both"
+allowShort = tradeDir == "Short" or tradeDir == "Both"
+
+var float entrySL = na
+var float entryTP = na
+var float entryPrice = na
+
+// Long Entry
+if goLong and allowLong and strategy.position_size == 0
+    slDist     = atrValue * slMultiplier
+    stopPrice  = close - slDist
+    takePrice  = close + (slDist * rrRatio)
+    entryQty   = math.max(math.floor(riskAmt / slDist), 1)
+    strategy.entry("Long", strategy.long, qty=entryQty)
+    entrySL    := stopPrice
+    entryTP    := takePrice
+    entryPrice := close
+
+// Short Entry
+if goShort and allowShort and strategy.position_size == 0
+    slDist     = atrValue * slMultiplier
+    stopPrice  = close + slDist
+    takePrice  = close - (slDist * rrRatio)
+    entryQty   = math.max(math.floor(riskAmt / slDist), 1)
+    strategy.entry("Short", strategy.short, qty=entryQty)
+    entrySL    := stopPrice
+    entryTP    := takePrice
+    entryPrice := close
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EXIT MANAGEMENT — SL / TP / TRAILING
+// ──────────────────────────────────────────────────────────────────────────────
+
+if strategy.position_size > 0
+    slDist = math.abs(entryPrice - entrySL)
+
+    // Trailing stop: after price moves trailTrigger * R in profit, move SL to lock in trailOffset * R
+    if useTrailing and not na(entryPrice) and not na(slDist) and slDist > 0
+        profitR = (high - entryPrice) / slDist
+        if profitR >= trailTrigger
+            newSL = entryPrice + (slDist * trailOffset)
+            entrySL := math.max(entrySL, newSL)
+
+    strategy.exit("Long Exit", "Long", stop=entrySL, limit=entryTP)
+
+if strategy.position_size < 0
+    slDist = math.abs(entrySL - entryPrice)
+
+    if useTrailing and not na(entryPrice) and not na(slDist) and slDist > 0
+        profitR = (entryPrice - low) / slDist
+        if profitR >= trailTrigger
+            newSL = entryPrice - (slDist * trailOffset)
+            entrySL := math.min(entrySL, newSL)
+
+    strategy.exit("Short Exit", "Short", stop=entrySL, limit=entryTP)
+
+// Reset on flat
+if strategy.position_size == 0
+    entrySL    := na
+    entryTP    := na
+    entryPrice := na
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PLOTTING
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Trend EMA
+plot(useTrend ? ema200 : na, "EMA 200", color=color.new(color.white, 50), linewidth=2)
+
+// Entry markers
+plotshape(goLong and allowLong and strategy.position_size[1] == 0, "Buy",
+     shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.normal)
+plotshape(goShort and allowShort and strategy.position_size[1] == 0, "Sell",
+     shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal)
+
+// SL/TP levels
+plot(strategy.position_size > 0 ? entrySL : na, "Long SL", color=color.new(color.red, 30),
+     style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size > 0 ? entryTP : na, "Long TP", color=color.new(color.lime, 30),
+     style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 ? entrySL : na, "Short SL", color=color.new(color.red, 30),
+     style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 ? entryTP : na, "Short TP", color=color.new(color.lime, 30),
+     style=plot.style_linebr, linewidth=1)
+
+// Background tint when in trade
+bgcolor(strategy.position_size > 0 ? color.new(color.lime, 93) : strategy.position_size < 0 ? color.new(color.red, 93) : na)
