@@ -1,20 +1,76 @@
 //@version=6
-strategy("Bollinger Bands BTC Strategy", overlay=true)
+strategy("Bollinger Bands BTC Strategy", overlay=true,
+     initial_capital=1000000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.04, slippage=2, pyramiding=0)
+
 source = close
 length = input.int(20, minval=1)
 mult = input.float(2.0, minval=0.001, maxval=50)
-direction = input.int(0, title = "Strategy Direction", minval=-1, maxval=1)
+direction = input.int(0, title="Strategy Direction", minval=-1, maxval=1)
+
+// ── Trend Filter ──
+trendLen = input.int(200, "Trend EMA Length", group="Filters")
+useTrend = input.bool(true, "Use Trend Filter", group="Filters")
+
+// ── Risk ──
+atrLen   = input.int(14, "ATR Length", group="Risk")
+slMult   = input.float(1.5, "Stop Loss ATR Mult", minval=0.5, maxval=5.0, step=0.1, group="Risk")
+tpMult   = input.float(2.5, "Take Profit ATR Mult", minval=1.0, maxval=10.0, step=0.5, group="Risk")
+useTrail = input.bool(true, "Trailing Stop", group="Risk")
+trailMult = input.float(2.0, "Trail ATR Mult", minval=0.5, maxval=5.0, step=0.1, group="Risk")
+
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
+
+// ── Bollinger Bands ──
 basis = ta.sma(source, length)
 dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
-if (ta.crossover(source, lower))
-    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+
+// ── Trend Filter (200 EMA) ──
+trendEMA = ta.ema(source, trendLen)
+trendUp  = not useTrend or source > trendEMA
+trendDn  = not useTrend or source < trendEMA
+
+// ── ATR for stops ──
+atrVal = ta.atr(atrLen)
+
+// ── Entries with trend filter ──
+longCond  = ta.crossover(source, lower) and trendUp
+shortCond = ta.crossunder(source, upper) and trendDn
+
+if longCond
+    strategy.entry("BBandLE", strategy.long, comment="BBandLE")
 else
     strategy.cancel(id="BBandLE")
-if (ta.crossunder(source, upper))
-    strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+
+if shortCond
+    strategy.entry("BBandSE", strategy.short, comment="BBandSE")
 else
     strategy.cancel(id="BBandSE")
+
+// ── Exits: SL + TP + Trailing ──
+if strategy.position_size > 0
+    sl = strategy.position_avg_price - atrVal * slMult
+    tp = strategy.position_avg_price + atrVal * tpMult
+    if useTrail
+        strategy.exit("Long Exit", "BBandLE", stop=sl, limit=tp, trail_points=atrVal * trailMult / syminfo.mintick, trail_offset=atrVal * trailMult / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "BBandLE", stop=sl, limit=tp)
+
+if strategy.position_size < 0
+    sl = strategy.position_avg_price + atrVal * slMult
+    tp = strategy.position_avg_price - atrVal * tpMult
+    if useTrail
+        strategy.exit("Short Exit", "BBandSE", stop=sl, limit=tp, trail_points=atrVal * trailMult / syminfo.mintick, trail_offset=atrVal * trailMult / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "BBandSE", stop=sl, limit=tp)
+
+// ── Plots ──
+plot(basis, "Basis", color=color.new(#ffeb3b, 0))
+p1 = plot(upper, "Upper", color=color.new(#ff5252, 0))
+p2 = plot(lower, "Lower", color=color.new(#00e676, 0))
+fill(p1, p2, color=color.new(#2196f3, 90), title="BB Fill")
+plot(useTrend ? trendEMA : na, "Trend EMA", color=color.new(#ff9800, 0), linewidth=2)
 //plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
