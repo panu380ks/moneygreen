@@ -1,0 +1,150 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// BTC Market Structure Strategy
+// Reads swing highs/lows, BOS, CHoCH, and liquidity sweeps
+// No lookahead — honest backtest results
+//@version=6
+strategy("BTC Market Structure", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.075, slippage=2, pyramiding=0)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+strat_dir = input.string("long", "Direction", options=["long", "short", "all"])
+strategy.risk.allow_entry_in(strat_dir == "long" ? strategy.direction.long : strat_dir == "short" ? strategy.direction.short : strategy.direction.all)
+
+// Structure
+swingLen   = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure")
+useHTF     = input.bool(true, "Use HTF Filter", group="Structure")
+htfTF      = input.timeframe("D", "HTF Timeframe", group="Structure")
+
+// Filters
+emaFastLen = input.int(21, "Fast EMA", group="Filters")
+emaSlowLen = input.int(50, "Slow EMA", group="Filters")
+rsiLen     = input.int(14, "RSI Length", group="Filters")
+volLen     = input.int(20, "Volume MA Length", group="Filters")
+
+// Risk — tiered exits
+q1  = input.int(25, "TP1 Qty %", group="Risk")
+q2  = input.int(25, "TP2 Qty %", group="Risk")
+q3  = input.int(25, "TP3 Qty %", group="Risk")
+tp1 = input.float(3.0, "TP1 %", step=0.5, group="Risk")
+tp2 = input.float(6.0, "TP2 %", step=0.5, group="Risk")
+tp3 = input.float(10.0, "TP3 %", step=1.0, group="Risk")
+tp4 = input.float(16.0, "TP4 %", step=1.0, group="Risk")
+sl  = input.float(6.0, "Stop Loss %", step=0.5, group="Risk")
+
+// ═══════════════════════════════════════════════════════════════
+// SWING DETECTION
+// ═══════════════════════════════════════════════════════════════
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+
+// Detect breaks BEFORE updating levels (prevents same-bar contamination)
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+
+// Liquidity sweeps: wick beyond level, close back inside (stop hunts)
+sweepHigh = not na(lastSH) and high > lastSH and close < lastSH
+sweepLow  = not na(lastSL) and low < lastSL and close > lastSL
+
+// Now update swing levels for next bar
+if not na(swH)
+    lastSH := swH
+if not na(swL)
+    lastSL := swL
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE TREND
+// ═══════════════════════════════════════════════════════════════
+var int msTrend = 0
+
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+// CHoCH = first break AGAINST prior trend (reversal signal)
+chochBull = breakAbove and msTrend[1] <= 0
+chochBear = breakBelow and msTrend[1] >= 0
+
+// BOS = break WITH trend (continuation signal)
+bosLong  = breakAbove and msTrend[1] == 1
+bosShort = breakBelow and msTrend[1] == -1
+
+// ═══════════════════════════════════════════════════════════════
+// CONFLUENCE FILTERS
+// ═══════════════════════════════════════════════════════════════
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaBull = emaFast > emaSlow
+emaBear = emaFast < emaSlow
+
+rsiVal     = ta.rsi(close, rsiLen)
+rsiOKlong  = rsiVal > 35 and rsiVal < 75
+rsiOKshort = rsiVal > 25 and rsiVal < 65
+
+volMA = ta.sma(volume, volLen)
+volOK = na(volume) or volume > volMA * 0.8
+
+// HTF trend — no lookahead
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBull = not useHTF or na(htfEma) or close > htfEma
+htfBear = not useHTF or na(htfEma) or close < htfEma
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+// Type 1 — Structure break: CHoCH (reversal) or BOS near EMA (continuation)
+longBreak  = (chochBull or (bosLong and close > emaFast)) and htfBull and rsiOKlong and volOK
+shortBreak = (chochBear or (bosShort and close < emaFast)) and htfBear and rsiOKshort and volOK
+
+// Type 2 — Liquidity sweep: stop hunt reversal + confluence
+longSweep  = sweepLow and msTrend >= 0 and htfBull and rsiVal < 40 and volOK
+shortSweep = sweepHigh and msTrend <= 0 and htfBear and rsiVal > 60 and volOK
+
+if longBreak or longSweep
+    strategy.entry("Long", strategy.long)
+if shortBreak or shortSweep
+    strategy.entry("Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════
+// EXITS — Tiered TP + SL + Structure Exit
+// ═══════════════════════════════════════════════════════════════
+per(pcnt) =>
+    strategy.position_size != 0 ? math.round(pcnt / 100 * strategy.position_avg_price / syminfo.mintick) : float(na)
+
+strategy.exit("x1", qty_percent=q1, profit=per(tp1), loss=per(sl))
+strategy.exit("x2", qty_percent=q2, profit=per(tp2), loss=per(sl))
+strategy.exit("x3", qty_percent=q3, profit=per(tp3), loss=per(sl))
+strategy.exit("x4", profit=per(tp4), loss=per(sl))
+
+// Structure-based exit: close on opposing CHoCH
+if strategy.position_size > 0 and chochBear
+    strategy.close("Long", comment="CHoCH Exit")
+if strategy.position_size < 0 and chochBull
+    strategy.close("Short", comment="CHoCH Exit")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+plot(lastSH, "Swing High", color.new(#ff5252, 30), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 30), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+// Structure labels
+plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="CHoCH")
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="CHoCH")
+plotshape(bosLong and not chochBull, "BOS Long", shape.circle, location.belowbar, color.new(#2196f3, 0), size=size.tiny)
+plotshape(bosShort and not chochBear, "BOS Short", shape.circle, location.abovebar, color.new(#ff9800, 0), size=size.tiny)
+plotshape(longSweep, "Sweep Long", shape.diamond, location.belowbar, color.new(#00bcd4, 0), size=size.tiny)
+plotshape(shortSweep, "Sweep Short", shape.diamond, location.abovebar, color.new(#ff6f00, 0), size=size.tiny)
+
+// Trend background
+bgcolor(msTrend == 1 ? color.new(#00e676, 95) : msTrend == -1 ? color.new(#ff5252, 95) : na, title="Structure Trend")
