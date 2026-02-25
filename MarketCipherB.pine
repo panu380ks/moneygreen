@@ -1,66 +1,99 @@
 // This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 //
-// MarketCipher B Strategy — Low Drawdown 1:5 R:R
+// MarketCipher B Strategy v2 — Low Drawdown 1:5 R:R
 // Optimized for XAUUSD 1H | Buy green signals, Sell red dot signals
+// Upgrades: HTF trend, ADX filter, session filter, partial TP, stepped trail,
+//           daily loss cap, volume filter, divergence entries, dashboard
 
 //@version=6
-strategy("MCB Low DD 1:5", shorttitle="MCB 1:5", overlay=true,
+strategy("MCB Low DD 1:5 v2", shorttitle="MCB v2", overlay=true,
      initial_capital=10000, default_qty_type=strategy.fixed,
      default_qty_value=1, commission_type=strategy.commission.percent,
      commission_value=0.04, slippage=2, pyramiding=0,
      calc_on_every_tick=false, process_orders_on_close=false)
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 // INPUTS
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
-// Wave Trend
-wtChannelLen = input.int(9,  "WT Channel Length")
-wtAverageLen = input.int(12, "WT Average Length")
-wtMALen      = input.int(3,  "WT MA Length")
+// ── Wave Trend ──
+wtChannelLen = input.int(9,  "WT Channel Length", group="Wave Trend")
+wtAverageLen = input.int(12, "WT Average Length", group="Wave Trend")
+wtMALen      = input.int(3,  "WT MA Length", group="Wave Trend")
 
-// OB / OS Levels
-obLevel1 = input.int(60,  "Overbought Level 1")
-obLevel2 = input.int(53,  "Overbought Level 2")
-osLevel1 = input.int(-60, "Oversold Level 1")
-osLevel2 = input.int(-53, "Oversold Level 2")
+// ── OB / OS Levels ──
+obLevel1 = input.int(60,  "Overbought Level 1", group="Wave Trend")
+obLevel2 = input.int(53,  "Overbought Level 2", group="Wave Trend")
+osLevel1 = input.int(-60, "Oversold Level 1", group="Wave Trend")
+osLevel2 = input.int(-53, "Oversold Level 2", group="Wave Trend")
 
-// Money Flow
-mfLength   = input.int(50,    "Money Flow Length")
-mfMultiply = input.float(150, "Money Flow Multiplier")
+// ── Money Flow ──
+mfLength   = input.int(50,    "Money Flow Length", group="Money Flow")
+mfMultiply = input.float(150, "Money Flow Multiplier", group="Money Flow")
 
-// Stochastic RSI
-srsiLength  = input.int(14, "SRSI Length")
-stochLength = input.int(14, "Stochastic K Length")
-smoothK     = input.int(3,  "Smooth K")
-smoothD     = input.int(3,  "Smooth D")
+// ── Stochastic RSI ──
+srsiLength  = input.int(14, "SRSI Length", group="Stochastic RSI")
+stochLength = input.int(14, "Stochastic K Length", group="Stochastic RSI")
+smoothK     = input.int(3,  "Smooth K", group="Stochastic RSI")
+smoothD     = input.int(3,  "Smooth D", group="Stochastic RSI")
 
-// Trend Filter
-trendLen = input.int(200, "Trend EMA Length", group="Filters")
-useTrend = input.bool(true, "Use EMA Trend Filter", group="Filters")
-useMF    = input.bool(true, "Use Money Flow Filter", group="Filters")
-useSRSI  = input.bool(true, "Use Stoch RSI Filter", group="Filters")
+// ── Filters ──
+trendLen    = input.int(200,  "EMA Trend Length", group="Filters")
+useTrend    = input.bool(true, "EMA Trend Filter", group="Filters")
+useHTF      = input.bool(true, "Higher TF Trend Filter", group="Filters")
+htfTF       = input.timeframe("240", "Higher Timeframe", group="Filters")
+htfEmaLen   = input.int(50, "HTF EMA Length", group="Filters")
+useMF       = input.bool(true, "Money Flow Filter", group="Filters")
+useSRSI     = input.bool(true, "Stoch RSI Filter", group="Filters")
+useADX      = input.bool(true, "ADX Trend Strength Filter", group="Filters")
+adxLen      = input.int(14, "ADX Length", group="Filters")
+adxThresh   = input.int(20, "ADX Min Threshold", minval=10, maxval=50, group="Filters")
+useVolFilter = input.bool(true, "Volume Spike Filter", group="Filters")
+volLen       = input.int(20, "Volume MA Length", group="Filters")
+volMult      = input.float(1.2, "Volume Spike Multiplier", minval=0.5, step=0.1, group="Filters")
+useDivEntry  = input.bool(true, "Divergence Bonus Entries", group="Filters")
 
-// Risk Management
+// ── Session Filter ──
+useSession  = input.bool(true, "Session Filter (London+NY)", group="Session")
+londonStart = input.int(7,  "London Start Hour (UTC)", minval=0, maxval=23, group="Session")
+londonEnd   = input.int(16, "London End Hour (UTC)", minval=0, maxval=23, group="Session")
+nyStart     = input.int(13, "New York Start Hour (UTC)", minval=0, maxval=23, group="Session")
+nyEnd       = input.int(21, "New York End Hour (UTC)", minval=0, maxval=23, group="Session")
+
+// ── Risk Management ──
 riskPerTrade = input.float(1.5, "Risk Per Trade %", minval=0.1, maxval=5.0, step=0.1, group="Risk")
 atrLen       = input.int(14,  "ATR Length", group="Risk")
 slMultiplier = input.float(1.5, "SL ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group="Risk")
-rrRatio      = input.float(5.0, "Risk:Reward Ratio", minval=1.0, maxval=10.0, step=0.5, group="Risk")
-useTrailing  = input.bool(true, "Trailing Stop After 3R", group="Risk")
-trailTrigger = input.float(3.0, "Trail Trigger (R multiple)", minval=1.0, step=0.5, group="Risk")
-trailOffset  = input.float(1.5, "Trail Lock-In (R multiple)", minval=0.5, step=0.5, group="Risk")
+rrRatio      = input.float(5.0, "Final TP (R multiple)", minval=2.0, maxval=15.0, step=0.5, group="Risk")
+usePartialTP = input.bool(true, "Partial TP at 2R (50%)", group="Risk")
+partialR     = input.float(2.0, "Partial TP R-level", minval=1.0, maxval=5.0, step=0.5, group="Risk")
+partialPct   = input.int(50, "Partial TP % to close", minval=10, maxval=90, step=10, group="Risk")
+tradeDir     = input.string("Both", "Direction", options=["Long", "Short", "Both"], group="Risk")
 
-// Trade Direction
-tradeDir = input.string("Both", "Direction", options=["Long", "Short", "Both"], group="Risk")
+// ── Trailing Stop ──
+useTrailing  = input.bool(true, "Stepped Trailing Stop", group="Trailing")
+beR          = input.float(1.0, "Move SL to BE at (R)", minval=0.5, step=0.5, group="Trailing")
+trail1R      = input.float(2.0, "Lock +1R at (R)", minval=1.0, step=0.5, group="Trailing")
+trail2R      = input.float(3.0, "Lock +2R at (R)", minval=1.5, step=0.5, group="Trailing")
+trail3R      = input.float(4.0, "Lock +3R at (R)", minval=2.0, step=0.5, group="Trailing")
 
-// Cooldown
-useCooldown    = input.bool(true, "Cooldown After Loss", group="Filters")
-cooldownBars   = input.int(5, "Cooldown Bars", minval=1, maxval=50, group="Filters")
+// ── Cooldown & Daily Limit ──
+useCooldown  = input.bool(true, "Cooldown After Loss", group="Protection")
+cooldownBars = input.int(5, "Cooldown Bars", minval=1, maxval=50, group="Protection")
+useDailyLoss = input.bool(true, "Daily Loss Limit", group="Protection")
+maxDailyLoss = input.float(3.0, "Max Daily Loss %", minval=0.5, maxval=20.0, step=0.5, group="Protection")
+useMaxTrades = input.bool(true, "Max Trades Per Day", group="Protection")
+maxDayTrades = input.int(3, "Max Trades/Day", minval=1, maxval=20, group="Protection")
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Visuals ──
+showDash     = input.bool(true, "Show Dashboard", group="Visuals")
+showRLines   = input.bool(true, "Show R-Level Lines", group="Visuals")
+showEMA      = input.bool(true, "Show EMA 200", group="Visuals")
+
+// ══════════════════════════════════════════════════════════════════════════════
 // WAVE TREND OSCILLATOR
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
 wtSrc = hlc3
 esa   = ta.ema(wtSrc, wtChannelLen)
@@ -72,9 +105,9 @@ wt2   = ta.sma(wt1, wtMALen)
 wtCrossUp   = ta.crossover(wt1, wt2)
 wtCrossDown = ta.crossunder(wt1, wt2)
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 // MONEY FLOW
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
 f_moneyFlow(_src, _len, _mult) =>
     upperMF  = ta.highest(ta.mfi(_src, _len), _len)
@@ -85,33 +118,86 @@ f_moneyFlow(_src, _len, _mult) =>
 
 mfValue = f_moneyFlow(hlc3, mfLength, mfMultiply)
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 // STOCHASTIC RSI
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
 rsiVal   = ta.rsi(close, srsiLength)
 stochRSI = ta.stoch(rsiVal, rsiVal, rsiVal, stochLength)
 srsiK    = ta.sma(stochRSI, smoothK)
 srsiD    = ta.sma(srsiK, smoothD)
 
-// ──────────────────────────────────────────────────────────────────────────────
-// TREND FILTER
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// DIVERGENCE DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
 
-ema200   = ta.ema(close, trendLen)
-trendUp  = not useTrend or close > ema200
-trendDn  = not useTrend or close < ema200
+lkbk = 5
 
-// ──────────────────────────────────────────────────────────────────────────────
-// ATR FOR STOP LOSS
-// ──────────────────────────────────────────────────────────────────────────────
+f_findDivergence(_src, _lkbk) =>
+    _pLow  = ta.pivotlow(_src, _lkbk, _lkbk)
+    _pHigh = ta.pivothigh(_src, _lkbk, _lkbk)
+    _pLow_prev       = ta.valuewhen(not na(_pLow), _src[_lkbk], 1)
+    _pLow_curr       = ta.valuewhen(not na(_pLow), _src[_lkbk], 0)
+    _price_low_prev  = ta.valuewhen(not na(_pLow), low[_lkbk], 1)
+    _price_low_curr  = ta.valuewhen(not na(_pLow), low[_lkbk], 0)
+    _pHigh_prev      = ta.valuewhen(not na(_pHigh), _src[_lkbk], 1)
+    _pHigh_curr      = ta.valuewhen(not na(_pHigh), _src[_lkbk], 0)
+    _price_high_prev = ta.valuewhen(not na(_pHigh), high[_lkbk], 1)
+    _price_high_curr = ta.valuewhen(not na(_pHigh), high[_lkbk], 0)
+    _bullDiv = (not na(_pLow)) and (_price_low_curr < _price_low_prev) and (_pLow_curr > _pLow_prev)
+    _bearDiv = (not na(_pHigh)) and (_price_high_curr > _price_high_prev) and (_pHigh_curr < _pHigh_prev)
+    [_bullDiv, _bearDiv]
+
+[bullDiv, bearDiv] = f_findDivergence(wt2, lkbk)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TREND FILTERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMA 200 on current timeframe
+ema200  = ta.ema(close, trendLen)
+trendUp = not useTrend or close > ema200
+trendDn = not useTrend or close < ema200
+
+// Higher timeframe EMA confirmation
+htfEma    = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen))
+htfBull   = not useHTF or close > htfEma
+htfBear   = not useHTF or close < htfEma
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADX FILTER (trend strength — avoid chop)
+// ══════════════════════════════════════════════════════════════════════════════
+
+[diPlus, diMinus, adxValue] = ta.dmi(adxLen, adxLen)
+adxOK = not useADX or adxValue > adxThresh
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VOLUME FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+volMA   = ta.sma(volume, volLen)
+volOK   = not useVolFilter or volume > volMA * volMult
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+hourUTC    = hour(time, "UTC")
+inLondon   = hourUTC >= londonStart and hourUTC < londonEnd
+inNY       = hourUTC >= nyStart and hourUTC < nyEnd
+sessionOK  = not useSession or inLondon or inNY
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ATR
+// ══════════════════════════════════════════════════════════════════════════════
 
 atrValue = ta.atr(atrLen)
 
-// ──────────────────────────────────────────────────────────────────────────────
-// COOLDOWN LOGIC
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// COOLDOWN & DAILY LOSS LIMIT
+// ══════════════════════════════════════════════════════════════════════════════
 
+// Cooldown after loss
 var int barsSinceLoss = 999
 if strategy.closedtrades > 0
     lastPL = strategy.closedtrades.profit(strategy.closedtrades - 1)
@@ -120,9 +206,23 @@ if strategy.closedtrades > 0
 barsSinceLoss := barsSinceLoss + 1
 cooldownOK = not useCooldown or barsSinceLoss > cooldownBars
 
-// ──────────────────────────────────────────────────────────────────────────────
-// SIGNAL LOGIC — GREEN BUY / RED SELL
-// ──────────────────────────────────────────────────────────────────────────────
+// Daily loss limit
+var float dayStartEquity = strategy.equity
+if dayofweek != dayofweek[1]
+    dayStartEquity := strategy.equity
+dayPL        = strategy.equity - dayStartEquity
+dayLossLimit = dayStartEquity * (maxDailyLoss / 100)
+dailyLossOK  = not useDailyLoss or dayPL > -dayLossLimit
+
+// Max trades per day
+var int todayTrades = 0
+if dayofweek != dayofweek[1]
+    todayTrades := 0
+maxTradesOK = not useMaxTrades or todayTrades < maxDayTrades
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAL LOGIC — GREEN BUY / RED SELL + DIVERGENCE
+// ══════════════════════════════════════════════════════════════════════════════
 
 // Green signal: WT crosses up in oversold zone
 buyStrong = wtCrossUp and wt2 < osLevel1
@@ -132,6 +232,10 @@ buyWeak   = wtCrossUp and wt2 < osLevel2 and not buyStrong
 sellStrong = wtCrossDown and wt2 > obLevel1
 sellWeak   = wtCrossDown and wt2 > obLevel2 and not sellStrong
 
+// Divergence entries (bonus — WT divergence at extreme)
+divBuySignal  = useDivEntry and bullDiv and wt2 < osLevel2
+divSellSignal = useDivEntry and bearDiv and wt2 > obLevel2
+
 // Money Flow confirmation
 mfBullish = not useMF or mfValue > 0
 mfBearish = not useMF or mfValue < 0
@@ -140,107 +244,217 @@ mfBearish = not useMF or mfValue < 0
 srsiBullish = not useSRSI or (srsiK < 30 or ta.crossover(srsiK, srsiD))
 srsiBearish = not useSRSI or (srsiK > 70 or ta.crossunder(srsiK, srsiD))
 
-// Final entry signals with all filters
-goLong  = (buyStrong or buyWeak) and trendUp and mfBullish and srsiBullish and cooldownOK
-goShort = (sellStrong or sellWeak) and trendDn and mfBearish and srsiBearish and cooldownOK
+// All filters combined
+filtersLong  = trendUp and htfBull and mfBullish and srsiBullish and adxOK and volOK and sessionOK and cooldownOK and dailyLossOK and maxTradesOK
+filtersShort = trendDn and htfBear and mfBearish and srsiBearish and adxOK and volOK and sessionOK and cooldownOK and dailyLossOK and maxTradesOK
 
-// ──────────────────────────────────────────────────────────────────────────────
+// Final entry signals
+goLong  = (buyStrong or buyWeak or divBuySignal) and filtersLong
+goShort = (sellStrong or sellWeak or divSellSignal) and filtersShort
+
+// Signal strength for dashboard
+longStrength  = buyStrong ? 3 : divBuySignal ? 2 : buyWeak ? 1 : 0
+shortStrength = sellStrong ? 3 : divSellSignal ? 2 : sellWeak ? 1 : 0
+
+// ══════════════════════════════════════════════════════════════════════════════
 // POSITION SIZING — RISK-BASED
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
-riskAmt    = strategy.equity * (riskPerTrade / 100)
-slPoints   = atrValue * slMultiplier
-qtyLong    = slPoints > 0 ? math.floor(riskAmt / slPoints) : 1
-qtyShort   = slPoints > 0 ? math.floor(riskAmt / slPoints) : 1
+riskAmt  = strategy.equity * (riskPerTrade / 100)
+slPoints = atrValue * slMultiplier
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 // STRATEGY EXECUTION
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
 allowLong  = tradeDir == "Long" or tradeDir == "Both"
 allowShort = tradeDir == "Short" or tradeDir == "Both"
 
-var float entrySL = na
-var float entryTP = na
+var float entrySL    = na
+var float entryTP    = na
 var float entryPrice = na
+var float slDist0    = na   // original SL distance for R calcs
+var bool  partialDone = false
 
 // Long Entry
 if goLong and allowLong and strategy.position_size == 0
-    slDist     = atrValue * slMultiplier
-    stopPrice  = close - slDist
-    takePrice  = close + (slDist * rrRatio)
-    entryQty   = math.max(math.floor(riskAmt / slDist), 1)
+    slD        = atrValue * slMultiplier
+    stopPrice  = close - slD
+    takePrice  = close + (slD * rrRatio)
+    entryQty   = math.max(math.floor(riskAmt / slD), 1)
     strategy.entry("Long", strategy.long, qty=entryQty)
-    entrySL    := stopPrice
-    entryTP    := takePrice
-    entryPrice := close
+    entrySL     := stopPrice
+    entryTP     := takePrice
+    entryPrice  := close
+    slDist0     := slD
+    partialDone := false
+    todayTrades := todayTrades + 1
 
 // Short Entry
 if goShort and allowShort and strategy.position_size == 0
-    slDist     = atrValue * slMultiplier
-    stopPrice  = close + slDist
-    takePrice  = close - (slDist * rrRatio)
-    entryQty   = math.max(math.floor(riskAmt / slDist), 1)
+    slD        = atrValue * slMultiplier
+    stopPrice  = close + slD
+    takePrice  = close - (slD * rrRatio)
+    entryQty   = math.max(math.floor(riskAmt / slD), 1)
     strategy.entry("Short", strategy.short, qty=entryQty)
-    entrySL    := stopPrice
-    entryTP    := takePrice
-    entryPrice := close
+    entrySL     := stopPrice
+    entryTP     := takePrice
+    entryPrice  := close
+    slDist0     := slD
+    partialDone := false
+    todayTrades := todayTrades + 1
 
-// ──────────────────────────────────────────────────────────────────────────────
-// EXIT MANAGEMENT — SL / TP / TRAILING
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// EXIT MANAGEMENT — PARTIAL TP + STEPPED TRAIL + FINAL TP
+// ══════════════════════════════════════════════════════════════════════════════
 
-if strategy.position_size > 0
-    slDist = math.abs(entryPrice - entrySL)
+if strategy.position_size > 0 and not na(entryPrice) and not na(slDist0) and slDist0 > 0
+    profitR = (high - entryPrice) / slDist0
 
-    // Trailing stop: after price moves trailTrigger * R in profit, move SL to lock in trailOffset * R
-    if useTrailing and not na(entryPrice) and not na(slDist) and slDist > 0
-        profitR = (high - entryPrice) / slDist
-        if profitR >= trailTrigger
-            newSL = entryPrice + (slDist * trailOffset)
-            entrySL := math.max(entrySL, newSL)
+    // Partial TP at partialR
+    if usePartialTP and not partialDone and profitR >= partialR
+        closeQty    = math.max(math.floor(strategy.position_size * partialPct / 100), 1)
+        strategy.close("Long", comment="Partial " + str.tostring(partialR, "#.#") + "R", qty=closeQty)
+        partialDone := true
+
+    // Stepped trailing stop
+    if useTrailing
+        if profitR >= trail3R
+            entrySL := math.max(entrySL, entryPrice + slDist0 * 2.0)
+        else if profitR >= trail2R
+            entrySL := math.max(entrySL, entryPrice + slDist0 * 1.0)
+        else if profitR >= trail1R
+            entrySL := math.max(entrySL, entryPrice + slDist0 * 0.5)
+        else if profitR >= beR
+            entrySL := math.max(entrySL, entryPrice)
 
     strategy.exit("Long Exit", "Long", stop=entrySL, limit=entryTP)
 
-if strategy.position_size < 0
-    slDist = math.abs(entrySL - entryPrice)
+if strategy.position_size < 0 and not na(entryPrice) and not na(slDist0) and slDist0 > 0
+    profitR = (entryPrice - low) / slDist0
 
-    if useTrailing and not na(entryPrice) and not na(slDist) and slDist > 0
-        profitR = (entryPrice - low) / slDist
-        if profitR >= trailTrigger
-            newSL = entryPrice - (slDist * trailOffset)
-            entrySL := math.min(entrySL, newSL)
+    // Partial TP
+    if usePartialTP and not partialDone and profitR >= partialR
+        closeQty    = math.max(math.floor(math.abs(strategy.position_size) * partialPct / 100), 1)
+        strategy.close("Short", comment="Partial " + str.tostring(partialR, "#.#") + "R", qty=closeQty)
+        partialDone := true
+
+    // Stepped trailing stop
+    if useTrailing
+        if profitR >= trail3R
+            entrySL := math.min(entrySL, entryPrice - slDist0 * 2.0)
+        else if profitR >= trail2R
+            entrySL := math.min(entrySL, entryPrice - slDist0 * 1.0)
+        else if profitR >= trail1R
+            entrySL := math.min(entrySL, entryPrice - slDist0 * 0.5)
+        else if profitR >= beR
+            entrySL := math.min(entrySL, entryPrice)
 
     strategy.exit("Short Exit", "Short", stop=entrySL, limit=entryTP)
 
 // Reset on flat
 if strategy.position_size == 0
-    entrySL    := na
-    entryTP    := na
-    entryPrice := na
+    entrySL     := na
+    entryTP     := na
+    entryPrice  := na
+    slDist0     := na
+    partialDone := false
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 // PLOTTING
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
 
-// Trend EMA
-plot(useTrend ? ema200 : na, "EMA 200", color=color.new(color.white, 50), linewidth=2)
+// EMA lines
+plot(showEMA and useTrend ? ema200 : na, "EMA 200", color=color.new(color.white, 50), linewidth=2)
+plot(showEMA and useHTF ? htfEma : na, "HTF EMA", color=color.new(color.yellow, 50), linewidth=2, style=plot.style_stepline)
 
-// Entry markers
-plotshape(goLong and allowLong and strategy.position_size[1] == 0, "Buy",
+// Entry markers (different shapes for signal strength)
+plotshape(goLong and allowLong and strategy.position_size[1] == 0 and buyStrong, "Strong Buy",
      shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.normal)
-plotshape(goShort and allowShort and strategy.position_size[1] == 0, "Sell",
+plotshape(goLong and allowLong and strategy.position_size[1] == 0 and not buyStrong, "Buy",
+     shape.triangleup, location.belowbar, color.new(color.lime, 50), size=size.small)
+plotshape(goShort and allowShort and strategy.position_size[1] == 0 and sellStrong, "Strong Sell",
      shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal)
+plotshape(goShort and allowShort and strategy.position_size[1] == 0 and not sellStrong, "Sell",
+     shape.triangledown, location.abovebar, color.new(color.red, 50), size=size.small)
 
-// SL/TP levels
-plot(strategy.position_size > 0 ? entrySL : na, "Long SL", color=color.new(color.red, 30),
-     style=plot.style_linebr, linewidth=1)
-plot(strategy.position_size > 0 ? entryTP : na, "Long TP", color=color.new(color.lime, 30),
-     style=plot.style_linebr, linewidth=1)
-plot(strategy.position_size < 0 ? entrySL : na, "Short SL", color=color.new(color.red, 30),
-     style=plot.style_linebr, linewidth=1)
-plot(strategy.position_size < 0 ? entryTP : na, "Short TP", color=color.new(color.lime, 30),
-     style=plot.style_linebr, linewidth=1)
+// Divergence markers
+plotshape(divBuySignal and filtersLong and strategy.position_size == 0, "Div Buy",
+     shape.diamond, location.belowbar, color.new(color.aqua, 0), size=size.tiny)
+plotshape(divSellSignal and filtersShort and strategy.position_size == 0, "Div Sell",
+     shape.diamond, location.abovebar, color.new(color.fuchsia, 0), size=size.tiny)
 
-// Background tint when in trade
-bgcolor(strategy.position_size > 0 ? color.new(color.lime, 93) : strategy.position_size < 0 ? color.new(color.red, 93) : na)
+// SL / TP / R-level lines
+plot(strategy.position_size != 0 ? entrySL : na, "Stop Loss",
+     color=color.new(color.red, 20), style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? entryTP : na, "Take Profit",
+     color=color.new(color.lime, 20), style=plot.style_linebr, linewidth=2)
+plot(showRLines and strategy.position_size > 0 and not na(entryPrice) and not na(slDist0) ? entryPrice + slDist0 * partialR : na,
+     "Long Partial TP", color=color.new(color.yellow, 40), style=plot.style_linebr, linewidth=1)
+plot(showRLines and strategy.position_size < 0 and not na(entryPrice) and not na(slDist0) ? entryPrice - slDist0 * partialR : na,
+     "Short Partial TP", color=color.new(color.yellow, 40), style=plot.style_linebr, linewidth=1)
+plot(showRLines and strategy.position_size > 0 ? entryPrice : na, "Entry",
+     color=color.new(color.white, 60), style=plot.style_linebr, linewidth=1)
+plot(showRLines and strategy.position_size < 0 ? entryPrice : na, "Entry",
+     color=color.new(color.white, 60), style=plot.style_linebr, linewidth=1)
+
+// Background
+bgcolor(strategy.position_size > 0 ? color.new(color.lime, 95) : strategy.position_size < 0 ? color.new(color.red, 95) : na)
+bgcolor(not sessionOK and useSession ? color.new(color.gray, 97) : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+if showDash and barstate.islast
+    var table dash = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 50))
+
+    table.cell(dash, 0, 0, "MCB v2 Dashboard", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40), text_halign=text.align_center)
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    // Filters status
+    table.cell(dash, 0, 1, "EMA Trend", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 1, trendUp ? "BULL" : "BEAR", text_color=trendUp ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "HTF Trend", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 2, htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "ADX", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 3, str.tostring(adxValue, "#.#") + (adxOK ? " OK" : " CHOP"), text_color=adxOK ? color.lime : color.orange, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "Money Flow", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 4, mfValue > 0 ? "BULL" : "BEAR", text_color=mfValue > 0 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Volume", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 5, volOK ? "SPIKE" : "LOW", text_color=volOK ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Session", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 6, sessionOK ? (inLondon and inNY ? "LDN+NY" : inLondon ? "LONDON" : "NEW YORK") : "OFF", text_color=sessionOK ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Wave Trend", text_color=color.white, text_size=size.tiny)
+    wtStatus = wt1 > obLevel1 ? "OVERBOUGHT" : wt1 < osLevel1 ? "OVERSOLD" : wt1 > obLevel2 ? "HIGH" : wt1 < osLevel2 ? "LOW" : "NEUTRAL"
+    wtClr    = wt1 > obLevel1 ? color.red : wt1 < osLevel1 ? color.lime : color.gray
+    table.cell(dash, 1, 7, wtStatus, text_color=wtClr, text_size=size.tiny)
+
+    // Position info
+    table.cell(dash, 0, 8, "Position", text_color=color.white, text_size=size.tiny)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posClr  = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dash, 1, 8, posText, text_color=posClr, text_size=size.tiny)
+
+    // Current R if in position
+    curR = 0.0
+    if strategy.position_size > 0 and not na(entryPrice) and not na(slDist0) and slDist0 > 0
+        curR := (close - entryPrice) / slDist0
+    if strategy.position_size < 0 and not na(entryPrice) and not na(slDist0) and slDist0 > 0
+        curR := (entryPrice - close) / slDist0
+    table.cell(dash, 0, 9, "Current R", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 9, str.tostring(curR, "#.##") + "R", text_color=curR >= 0 ? color.lime : color.red, text_size=size.tiny)
+
+    // Day P&L
+    table.cell(dash, 0, 10, "Day P&L", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 10, str.tostring(dayPL, "#.##"), text_color=dayPL >= 0 ? color.lime : color.red, text_size=size.tiny)
+
+    // Trades today
+    table.cell(dash, 0, 11, "Trades Today", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 11, str.tostring(todayTrades) + "/" + str.tostring(maxDayTrades), text_color=maxTradesOK ? color.white : color.orange, text_size=size.tiny)
