@@ -1,0 +1,196 @@
+// This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// MarketCipher B - Recreated from chart reference
+// Components: Wave Trend Oscillator, Money Flow, Stochastic RSI, Buy/Sell Signals
+
+//@version=5
+indicator("MarketCipher B", shorttitle="MCB", overlay=false)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Wave Trend
+wtChannelLen  = input.int(9,   "Wave Trend Channel Length")
+wtAverageLen  = input.int(12,  "Wave Trend Average Length")
+wtMALen       = input.int(3,   "Wave Trend MA Length")
+
+// Overbought / Oversold Levels
+obLevel1 = input.int(60,  "Overbought Level 1")
+obLevel2 = input.int(53,  "Overbought Level 2")
+osLevel1 = input.int(-60, "Oversold Level 1")
+osLevel2 = input.int(-53, "Oversold Level 2")
+
+// Money Flow
+mfLength   = input.int(50, "Money Flow Length")
+mfMultiply = input.float(150.0, "Money Flow Multiplier")
+
+// Stochastic RSI
+srsiLength  = input.int(14, "Stochastic RSI Length")
+stochLength = input.int(14, "Stochastic K Length")
+smoothK     = input.int(3,  "Stochastic Smooth K")
+smoothD     = input.int(3,  "Stochastic Smooth D")
+
+// Toggles
+showMF     = input.bool(true, "Show Money Flow")
+showSRSI   = input.bool(true, "Show Stochastic RSI")
+showWT     = input.bool(true, "Show Wave Trend")
+showSignals = input.bool(true, "Show Buy/Sell Signals")
+showDiverg  = input.bool(true, "Show Divergences")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Wave Trend Oscillator
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Core Wave Trend calculation
+wtSrc = hlc3
+esa   = ta.ema(wtSrc, wtChannelLen)
+de    = ta.ema(math.abs(wtSrc - esa), wtChannelLen)
+ci    = (wtSrc - esa) / (0.015 * de)
+
+wt1 = ta.ema(ci, wtAverageLen)
+wt2 = ta.sma(wt1, wtMALen)
+
+// Wave Trend cross detection
+wtCross     = ta.cross(wt1, wt2)
+wtCrossUp   = ta.crossover(wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Money Flow Index
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Volume-weighted RSI approach for Money Flow
+f_moneyFlow(_src, _len, _mult) =>
+    upperMF  = ta.highest(ta.mfi(_src, _len), _len)
+    lowerMF  = ta.lowest(ta.mfi(_src, _len), _len)
+    midMF    = (upperMF + lowerMF) / 2.0
+    scaledMF = ((ta.mfi(_src, _len) - midMF) / (upperMF - lowerMF)) * _mult
+    scaledMF
+
+mfValue = f_moneyFlow(hlc3, mfLength, mfMultiply)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stochastic RSI
+// ──────────────────────────────────────────────────────────────────────────────
+
+rsiValue  = ta.rsi(close, srsiLength)
+stochRSI  = ta.stoch(rsiValue, rsiValue, rsiValue, stochLength)
+srsiK     = ta.sma(stochRSI, smoothK)
+srsiD     = ta.sma(srsiK, smoothD)
+
+// Scale Stochastic RSI to oscillator range
+srsiScaled = srsiK - 80
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Divergence Detection
+// ──────────────────────────────────────────────────────────────────────────────
+
+f_findDivergence(_src, _lkbk) =>
+    _pLow = ta.pivotlow(_src, _lkbk, _lkbk)
+    _pHigh = ta.pivothigh(_src, _lkbk, _lkbk)
+    _pLow_prev = ta.valuewhen(not na(_pLow), _src[_lkbk], 1)
+    _pLow_curr = ta.valuewhen(not na(_pLow), _src[_lkbk], 0)
+    _price_low_prev = ta.valuewhen(not na(_pLow), low[_lkbk], 1)
+    _price_low_curr = ta.valuewhen(not na(_pLow), low[_lkbk], 0)
+    _pHigh_prev = ta.valuewhen(not na(_pHigh), _src[_lkbk], 1)
+    _pHigh_curr = ta.valuewhen(not na(_pHigh), _src[_lkbk], 0)
+    _price_high_prev = ta.valuewhen(not na(_pHigh), high[_lkbk], 1)
+    _price_high_curr = ta.valuewhen(not na(_pHigh), high[_lkbk], 0)
+    // Bullish divergence: price makes lower low, oscillator makes higher low
+    _bullDiv = (not na(_pLow)) and (_price_low_curr < _price_low_prev) and (_pLow_curr > _pLow_prev)
+    // Bearish divergence: price makes higher high, oscillator makes lower high
+    _bearDiv = (not na(_pHigh)) and (_price_high_curr > _price_high_prev) and (_pHigh_curr < _pHigh_prev)
+    [_bullDiv, _bearDiv]
+
+lkbk = 5
+[bullDiv, bearDiv] = f_findDivergence(wt2, lkbk)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Buy / Sell Signal Logic
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Strong buy: WT cross up in oversold zone
+buySignal  = wtCrossUp and wt2 < osLevel1
+// Strong sell: WT cross down in overbought zone
+sellSignal = wtCrossDown and wt2 > obLevel1
+
+// Regular cross signals (weaker)
+buySignalWeak  = wtCrossUp and wt2 < osLevel2 and not buySignal
+sellSignalWeak = wtCrossDown and wt2 > obLevel2 and not sellSignal
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Plotting
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Zero line
+hline(0, "Zero", color.gray, hline.style_dotted)
+
+// OB / OS Levels
+hline(obLevel1, "OB Level 1", color.new(color.red, 60), hline.style_dotted)
+hline(obLevel2, "OB Level 2", color.new(color.red, 80), hline.style_dotted)
+hline(osLevel1, "OS Level 1", color.new(color.green, 60), hline.style_dotted)
+hline(osLevel2, "OS Level 2", color.new(color.green, 80), hline.style_dotted)
+
+// Money Flow histogram
+plot(showMF ? mfValue : na, "Money Flow", style=plot.style_area,
+     color=mfValue > 0 ? color.new(color.lime, 60) : color.new(color.red, 60), linewidth=0)
+
+// Stochastic RSI
+plot(showSRSI ? srsiScaled : na, "Stochastic RSI", color=color.new(color.purple, 30),
+     style=plot.style_line, linewidth=1)
+
+// Wave Trend Lines
+wtColor = wt1 >= wt2 ? color.new(#00e1ff, 0) : color.new(#ff0045, 0)
+p1 = plot(showWT ? wt1 : na, "Wave Trend 1", color=wtColor, linewidth=2)
+p2 = plot(showWT ? wt2 : na, "Wave Trend 2", color=wtColor, linewidth=1)
+
+// Fill between WT1 and WT2
+fillColor = wt1 >= wt2 ? color.new(#00e1ff, 75) : color.new(#ff0045, 75)
+fill(p1, p2, color=fillColor)
+
+// Wave Trend histogram (difference)
+wtDiff = wt1 - wt2
+plot(showWT ? wtDiff : na, "WT Histogram", style=plot.style_columns,
+     color=wtDiff >= 0 ?
+         (wtDiff > wtDiff[1] ? color.new(color.lime, 40) : color.new(color.green, 60)) :
+         (wtDiff < wtDiff[1] ? color.new(color.red, 40) : color.new(color.maroon, 60)),
+     linewidth=3)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Signal Markers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Strong buy/sell signals
+plotshape(showSignals and buySignal ? wt2 - 5 : na, "Strong Buy",
+     shape.circle, location.absolute, color.new(color.lime, 0), size=size.small)
+plotshape(showSignals and sellSignal ? wt2 + 5 : na, "Strong Sell",
+     shape.xcross, location.absolute, color.new(color.red, 0), size=size.small)
+
+// Weak buy/sell signals
+plotshape(showSignals and buySignalWeak ? wt2 - 3 : na, "Weak Buy",
+     shape.diamond, location.absolute, color.new(color.lime, 40), size=size.tiny)
+plotshape(showSignals and sellSignalWeak ? wt2 + 3 : na, "Weak Sell",
+     shape.diamond, location.absolute, color.new(color.red, 40), size=size.tiny)
+
+// Divergence markers
+plotshape(showDiverg and bullDiv ? wt2[lkbk] - 8 : na, "Bullish Divergence",
+     shape.labelup, location.absolute, color.new(color.lime, 0), size=size.tiny,
+     offset=-lkbk)
+plotshape(showDiverg and bearDiv ? wt2[lkbk] + 8 : na, "Bearish Divergence",
+     shape.labeldown, location.absolute, color.new(color.red, 0), size=size.tiny,
+     offset=-lkbk)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ──────────────────────────────────────────────────────────────────────────────
+
+alertcondition(buySignal,  "MCB Strong Buy",  "MarketCipher B: Strong Buy Signal")
+alertcondition(sellSignal, "MCB Strong Sell", "MarketCipher B: Strong Sell Signal")
+alertcondition(buySignalWeak,  "MCB Weak Buy",  "MarketCipher B: Weak Buy Signal")
+alertcondition(sellSignalWeak, "MCB Weak Sell", "MarketCipher B: Weak Sell Signal")
+alertcondition(bullDiv, "MCB Bullish Divergence", "MarketCipher B: Bullish Divergence Detected")
+alertcondition(bearDiv, "MCB Bearish Divergence", "MarketCipher B: Bearish Divergence Detected")
+alertcondition(wt1 > obLevel1, "MCB Overbought", "MarketCipher B: Wave Trend Overbought")
+alertcondition(wt1 < osLevel1, "MCB Oversold",   "MarketCipher B: Wave Trend Oversold")
