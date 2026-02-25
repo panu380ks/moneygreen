@@ -4,7 +4,7 @@
 // MarketCipher B - Recreated from chart reference
 // Components: Wave Trend Oscillator, Money Flow, Stochastic RSI, Buy/Sell Signals
 
-//@version=5
+//@version=6
 indicator("MarketCipher B", shorttitle="MCB", overlay=false)
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ hline(osLevel2, "OS Level 2", color.new(color.green, 80), hline.style_dotted)
 
 // Money Flow histogram
 plot(showMF ? mfValue : na, "Money Flow", style=plot.style_area,
-     color=mfValue > 0 ? color.new(color.lime, 60) : color.new(color.red, 60), linewidth=0)
+     color=mfValue > 0 ? color.new(color.lime, 60) : color.new(color.red, 60), linewidth=1)
 
 // Stochastic RSI
 plot(showSRSI ? srsiScaled : na, "Stochastic RSI", color=color.new(color.purple, 30),
