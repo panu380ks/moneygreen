@@ -1,0 +1,473 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// BTC Market Structure Strategy v4 — Precision Edition
+// Upgrades from v3:
+//   + MACD momentum gate — only enter when histogram confirms direction
+//   + Fair Value Gap (FVG) detection — institutional imbalance zones
+//   + Bollinger squeeze filter — catch expansion after compression
+//   + Weekly HTF confirmation — dual-timeframe trend alignment
+//   + Ratcheting trailing stop — tightens as profit grows (3 levels)
+//   + Stale trade exit — kills positions going nowhere after N bars
+//   + RSI slope confirmation — momentum direction, not just range
+//   + Win-rate adaptive sizing — scales based on recent performance
+//   + 9-layer drawdown control (up from 7)
+// No lookahead — honest backtest results
+//@version=6
+strategy("BTC Market Structure v4", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.075, slippage=2, pyramiding=0)
+
+// Emergency brake
+strategy.risk.max_drawdown(30, strategy.percent_of_equity)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+strat_dir = input.string("long", "Direction", options=["long", "short", "all"])
+strategy.risk.allow_entry_in(strat_dir == "long" ? strategy.direction.long : strat_dir == "short" ? strategy.direction.short : strategy.direction.all)
+
+// Structure
+swingLen   = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure")
+useHTF     = input.bool(true, "Use HTF Filter (Daily)", group="Structure")
+htfTF      = input.timeframe("D", "HTF Timeframe", group="Structure")
+useHTF2    = input.bool(true, "Use HTF2 Filter (Weekly)", group="Structure")
+htfTF2     = input.timeframe("W", "HTF2 Timeframe", group="Structure")
+minBarsBtw = input.int(5, "Min Bars Between Entries", minval=1, maxval=30, group="Structure")
+
+// Filters
+emaFastLen  = input.int(21, "Fast EMA", group="Filters")
+emaSlowLen  = input.int(50, "Slow EMA", group="Filters")
+rsiLen      = input.int(14, "RSI Length", group="Filters")
+volLen      = input.int(20, "Volume MA Length", group="Filters")
+useADX      = input.bool(true, "ADX Trend Filter", group="Filters")
+adxLen      = input.int(14, "ADX Length", group="Filters")
+adxThresh   = input.float(20.0, "ADX Threshold", step=1.0, minval=10, maxval=40, group="Filters")
+useEMAalign = input.bool(true, "Require EMA Alignment", group="Filters")
+useMACD     = input.bool(true, "MACD Momentum Gate", group="Filters")
+macdFast    = input.int(12, "MACD Fast", group="Filters")
+macdSlow    = input.int(26, "MACD Slow", group="Filters")
+macdSig     = input.int(9, "MACD Signal", group="Filters")
+useSqueeze  = input.bool(true, "Bollinger Squeeze Filter", group="Filters")
+bbLen       = input.int(20, "BB Length", group="Filters")
+bbMult      = input.float(2.0, "BB Multiplier", step=0.1, group="Filters")
+kcLen       = input.int(20, "KC Length", group="Filters")
+kcMult      = input.float(1.5, "KC Multiplier", step=0.1, group="Filters")
+squeezeReleaseBars = input.int(5, "Squeeze Release Lookback", minval=1, maxval=15, group="Filters")
+useFVG      = input.bool(true, "Fair Value Gap Filter", group="Filters")
+
+// Risk — ATR-based adaptive stops
+atrMultSL  = input.float(2.0, "SL ATR Multiple", step=0.25, minval=0.5, maxval=5.0, group="Risk")
+atrMultTP1 = input.float(1.5, "TP1 ATR Multiple", step=0.25, minval=0.5, maxval=5.0, group="Risk")
+atrMultTP2 = input.float(3.0, "TP2 ATR Multiple", step=0.25, minval=1.0, maxval=8.0, group="Risk")
+atrMultTP3 = input.float(5.0, "TP3 ATR Multiple", step=0.5, minval=2.0, maxval=12.0, group="Risk")
+atrMultTP4 = input.float(8.0, "TP4 ATR Multiple", step=0.5, minval=3.0, maxval=16.0, group="Risk")
+q1  = input.int(25, "TP1 Qty %", group="Risk")
+q2  = input.int(25, "TP2 Qty %", group="Risk")
+q3  = input.int(25, "TP3 Qty %", group="Risk")
+useTrail       = input.bool(true, "Ratcheting Trail", group="Risk")
+trailATRmul1   = input.float(2.5, "Trail ATR Mult (Level 1)", step=0.25, minval=1.0, maxval=5.0, group="Risk")
+trailATRmul2   = input.float(2.0, "Trail ATR Mult (Level 2)", step=0.25, minval=0.5, maxval=4.0, group="Risk")
+trailATRmul3   = input.float(1.5, "Trail ATR Mult (Level 3 — Tight)", step=0.25, minval=0.5, maxval=3.0, group="Risk")
+useStaleExit   = input.bool(true, "Stale Trade Exit", group="Risk")
+staleBars      = input.int(30, "Max Bars in Trade", minval=10, maxval=100, group="Risk")
+staleMinProfit = input.float(0.5, "Min Profit % to Stay", step=0.1, minval=0.0, maxval=5.0, group="Risk")
+
+// Drawdown controls
+basePos       = input.float(60.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
+use200EMA     = input.bool(true, "200 EMA Trend Gate", group="Drawdown")
+useVolFilter  = input.bool(true, "Volatility Regime Filter", group="Drawdown")
+volFilterLen  = input.int(40, "Vol Filter MA Length", minval=10, group="Drawdown")
+maxVolRatio   = input.float(1.5, "Max Vol Ratio", step=0.1, minval=1.0, maxval=3.0, group="Drawdown")
+useEqFilter   = input.bool(true, "Equity Curve Filter", group="Drawdown")
+eqFilterLen   = input.int(50, "Equity SMA Length", minval=10, group="Drawdown")
+useCooldown   = input.bool(true, "Loss Streak Cooldown", group="Drawdown")
+coolBars      = input.int(10, "Cooldown Bars (per loss)", minval=1, maxval=30, group="Drawdown")
+maxConsecLoss = input.int(2, "Consecutive Losses Before Extended Pause", minval=1, maxval=5, group="Drawdown")
+useWinRateSize = input.bool(true, "Win-Rate Adaptive Sizing", group="Drawdown")
+wrLookback     = input.int(20, "Win-Rate Lookback (trades)", minval=5, maxval=50, group="Drawdown")
+
+// ═══════════════════════════════════════════════════════════════
+// SWING DETECTION
+// ═══════════════════════════════════════════════════════════════
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+
+// Detect breaks BEFORE updating levels
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+
+// Liquidity sweeps: wick beyond level, close back inside
+sweepHigh = not na(lastSH) and high > lastSH and close < lastSH
+sweepLow  = not na(lastSL) and low < lastSL and close > lastSL
+
+// Update swing levels after break detection
+if not na(swH)
+    lastSH := swH
+if not na(swL)
+    lastSL := swL
+
+// ═══════════════════════════════════════════════════════════════
+// FAIR VALUE GAP (FVG) DETECTION
+// ═══════════════════════════════════════════════════════════════
+// Bullish FVG: gap between candle[2] high and candle[0] low (3-candle pattern)
+// Bearish FVG: gap between candle[0] high and candle[2] low
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+// Track recent FVGs — price entering the gap zone is the entry signal
+var float fvgBullTop = na
+var float fvgBullBot = na
+var float fvgBearTop = na
+var float fvgBearBot = na
+
+if bullFVG
+    fvgBullTop := low
+    fvgBullBot := high[2]
+if bearFVG
+    fvgBearTop := low[2]
+    fvgBearBot := high
+
+// Price retracing into bullish FVG = long opportunity
+// Price retracing into bearish FVG = short opportunity
+inBullFVG = not na(fvgBullBot) and low <= fvgBullTop and close >= fvgBullBot
+inBearFVG = not na(fvgBearBot) and high >= fvgBearBot and close <= fvgBearTop
+
+// Invalidate FVG after price fully fills it
+if not na(fvgBullBot) and low < fvgBullBot
+    fvgBullTop := na
+    fvgBullBot := na
+if not na(fvgBearTop) and high > fvgBearTop
+    fvgBearTop := na
+    fvgBearBot := na
+
+fvgLongOK  = not useFVG or inBullFVG or na(fvgBullBot)
+fvgShortOK = not useFVG or inBearFVG or na(fvgBearBot)
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE TREND
+// ═══════════════════════════════════════════════════════════════
+var int msTrend = 0
+
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+// CHoCH = first break AGAINST prior trend (reversal)
+chochBull = breakAbove and msTrend[1] <= 0
+chochBear = breakBelow and msTrend[1] >= 0
+
+// BOS = break WITH trend (continuation)
+bosLong  = breakAbove and msTrend[1] == 1
+bosShort = breakBelow and msTrend[1] == -1
+
+// ═══════════════════════════════════════════════════════════════
+// ADX CALCULATION (trend strength)
+// ═══════════════════════════════════════════════════════════════
+upMove   = high - high[1]
+downMove = low[1] - low
+plusDM   = upMove > downMove and upMove > 0 ? upMove : 0.0
+minusDM  = downMove > upMove and downMove > 0 ? downMove : 0.0
+
+atrADX   = ta.rma(ta.tr, adxLen)
+plusDI    = 100 * ta.rma(plusDM, adxLen) / atrADX
+minusDI   = 100 * ta.rma(minusDM, adxLen) / atrADX
+dx        = math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100
+adxVal    = ta.rma(dx, adxLen)
+adxOK     = not useADX or adxVal > adxThresh
+
+// ═══════════════════════════════════════════════════════════════
+// MACD MOMENTUM GATE
+// ═══════════════════════════════════════════════════════════════
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdBull = not useMACD or (histLine > 0 and histLine > histLine[1])
+macdBear = not useMACD or (histLine < 0 and histLine < histLine[1])
+
+// ═══════════════════════════════════════════════════════════════
+// BOLLINGER SQUEEZE DETECTION
+// ═══════════════════════════════════════════════════════════════
+// Squeeze = BB inside KC (low volatility compression)
+// Release = BB expands outside KC (expansion = directional move)
+bbBasis  = ta.sma(close, bbLen)
+bbDev    = ta.stdev(close, bbLen) * bbMult
+bbUpper  = bbBasis + bbDev
+bbLower  = bbBasis - bbDev
+
+kcBasis  = ta.ema(close, kcLen)
+kcRange  = ta.atr(kcLen) * kcMult
+kcUpper  = kcBasis + kcRange
+kcLower  = kcBasis - kcRange
+
+sqzOn    = bbLower > kcLower and bbUpper < kcUpper
+sqzOff   = not sqzOn
+
+// Squeeze just released = BB expanded past KC within recent bars
+sqzReleased = false
+for i = 0 to squeezeReleaseBars - 1
+    if sqzOn[i + 1] and sqzOff[i]
+        sqzReleased := true
+
+// Momentum direction during squeeze release
+sqzMom   = close - ta.sma(close, bbLen)
+sqzBull  = sqzReleased and sqzMom > 0
+sqzBear  = sqzReleased and sqzMom < 0
+
+squeezeOK = not useSqueeze or sqzBull or sqzBear or not sqzOn
+
+// ═══════════════════════════════════════════════════════════════
+// CONFLUENCE FILTERS
+// ═══════════════════════════════════════════════════════════════
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// EMA alignment: fast above slow for longs, below for shorts
+emaAlignLong  = not useEMAalign or emaFast > emaSlow
+emaAlignShort = not useEMAalign or emaFast < emaSlow
+
+rsiVal     = ta.rsi(close, rsiLen)
+rsiSlope   = rsiVal - rsiVal[3]
+
+// Tighter RSI bands + slope confirmation
+rsiOKlong  = rsiVal > 40 and rsiVal < 70 and rsiSlope > 0
+rsiOKshort = rsiVal > 30 and rsiVal < 60 and rsiSlope < 0
+
+volMA = ta.sma(volume, volLen)
+volOK = na(volume) or volume > volMA * 0.8
+
+// Sweep confirmation: require volume > 1.3x average (tighter than v3's 1.2x)
+sweepVolOK = na(volume) or volume > volMA * 1.3
+
+// HTF trend (Daily) — no lookahead
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBull = not useHTF or na(htfEma) or close > htfEma
+htfBear = not useHTF or na(htfEma) or close < htfEma
+
+// HTF2 trend (Weekly) — second layer
+htfEma2  = request.security(syminfo.tickerid, htfTF2, ta.ema(close, 21))
+htf2Bull = not useHTF2 or na(htfEma2) or close > htfEma2
+htf2Bear = not useHTF2 or na(htfEma2) or close < htfEma2
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWDOWN CONTROLS (9 layers)
+// ═══════════════════════════════════════════════════════════════
+atrVal = ta.atr(14)
+
+// Layer 1 — 200 EMA trend gate
+ema200       = ta.ema(close, 200)
+trendLongOK  = not use200EMA or close > ema200
+trendShortOK = not use200EMA or close < ema200
+
+// Layer 2 — EMA alignment (in entry conditions)
+// Layer 3 — ADX trend strength (in entry conditions)
+// Layer 4 — MACD momentum gate (in entry conditions)
+
+// Layer 5 — Volatility regime: skip entries during crash/panic
+atrMA       = ta.sma(atrVal, volFilterLen)
+volRatio    = atrVal / nz(atrMA, atrVal)
+volRegimeOK = not useVolFilter or volRatio < maxVolRatio
+
+// Layer 6 — Equity curve: stop trading during cascading losses
+eqSMA    = ta.sma(strategy.equity, eqFilterLen)
+equityOK = not useEqFilter or strategy.equity >= eqSMA
+
+// Layer 7 — Loss streak cooldown: progressive pause after consecutive losses
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+var int consecLosses    = 0
+
+if strategy.closedtrades > prevClosedCount
+    lastTrade = strategy.closedtrades - 1
+    if strategy.closedtrades.profit(lastTrade) < 0
+        consecLosses := consecLosses + 1
+        lastLossBar  := bar_index
+    else
+        consecLosses := 0
+    prevClosedCount := strategy.closedtrades
+
+// Progressive cooldown: multiply coolBars by consecutive loss count
+effectiveCool = useCooldown ? coolBars * math.max(consecLosses, 1) : 0
+// Extended pause after hitting max consecutive losses
+extendedPause = consecLosses >= maxConsecLoss ? coolBars * maxConsecLoss * 2 : effectiveCool
+cooldownOK    = not useCooldown or (bar_index - lastLossBar) > extendedPause
+
+// Layer 8 — Dynamic position sizing: scale down in elevated volatility
+volScale = useVolFilter ? (volRatio > 1.3 ? 0.35 : volRatio > 1.15 ? 0.6 : volRatio > 1.0 ? 0.8 : 1.0) : 1.0
+// Also scale down after losses
+lossScale = consecLosses >= 3 ? 0.3 : consecLosses >= 2 ? 0.5 : consecLosses == 1 ? 0.7 : 1.0
+
+// Layer 9 — Win-rate adaptive sizing: scale based on rolling performance
+calcWinRate() =>
+    totalTrades = strategy.closedtrades
+    if totalTrades < 5
+        0.5
+    else
+        lookback = math.min(totalTrades, wrLookback)
+        wins = 0
+        for i = 0 to lookback - 1
+            idx = totalTrades - 1 - i
+            if strategy.closedtrades.profit(idx) > 0
+                wins := wins + 1
+        float(wins) / float(lookback)
+
+rollingWR = calcWinRate()
+wrScale   = useWinRateSize ? (rollingWR > 0.55 ? 1.2 : rollingWR > 0.45 ? 1.0 : rollingWR > 0.35 ? 0.6 : 0.3) : 1.0
+
+unitQty = strategy.equity * (basePos / 100.0) * volScale * lossScale * wrScale / close
+
+// Combined drawdown gate
+ddGate = volRegimeOK and equityOK and cooldownOK
+
+// Minimum bars since last entry
+var int lastEntryBar = -999
+minBarsOK = (bar_index - lastEntryBar) >= minBarsBtw
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+// Structure breaks + full confluence stack (stricter than v3)
+longBreak  = (chochBull or (bosLong and close > emaFast)) and htfBull and htf2Bull and rsiOKlong and volOK and emaAlignLong and adxOK and macdBull
+shortBreak = (chochBear or (bosShort and close < emaFast)) and htfBear and htf2Bear and rsiOKshort and volOK and emaAlignShort and adxOK and macdBear
+
+// Liquidity sweep reversals — require volume spike + FVG zone
+longSweep  = sweepLow and msTrend >= 0 and htfBull and htf2Bull and rsiVal < 40 and rsiSlope > 0 and sweepVolOK and emaAlignLong and fvgLongOK
+shortSweep = sweepHigh and msTrend <= 0 and htfBear and htf2Bear and rsiVal > 60 and rsiSlope < 0 and sweepVolOK and emaAlignShort and fvgShortOK
+
+// Squeeze breakout entries — new in v4
+longSqz  = sqzBull and msTrend >= 0 and htfBull and htf2Bull and emaAlignLong and adxOK and rsiVal > 45 and rsiVal < 70
+shortSqz = sqzBear and msTrend <= 0 and htfBear and htf2Bear and emaAlignShort and adxOK and rsiVal > 30 and rsiVal < 55
+
+// Execute with all drawdown controls + min bars gate
+if (longBreak or longSweep or longSqz) and ddGate and trendLongOK and minBarsOK and squeezeOK
+    strategy.entry("Long", strategy.long, qty=unitQty)
+    lastEntryBar := bar_index
+
+if (shortBreak or shortSweep or shortSqz) and ddGate and trendShortOK and minBarsOK and squeezeOK
+    strategy.entry("Short", strategy.short, qty=unitQty)
+    lastEntryBar := bar_index
+
+// ═══════════════════════════════════════════════════════════════
+// EXITS — ATR Adaptive TP/SL + Ratcheting Trail + Structure + Stale
+// ═══════════════════════════════════════════════════════════════
+// ATR at entry for consistent stop levels throughout the trade
+var float entryATR = na
+var int   entryBar = na
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryATR := atrVal
+    entryBar := bar_index
+
+// Reset on flat
+if strategy.position_size == 0
+    entryATR := na
+    entryBar := na
+
+atrTicks(mult) =>
+    not na(entryATR) ? math.round(entryATR * mult / syminfo.mintick) : float(na)
+
+// Tiered TP + SL using ATR multiples
+strategy.exit("x1", qty_percent=q1, profit=atrTicks(atrMultTP1), loss=atrTicks(atrMultSL))
+strategy.exit("x2", qty_percent=q2, profit=atrTicks(atrMultTP2), loss=atrTicks(atrMultSL))
+strategy.exit("x3", qty_percent=q3, profit=atrTicks(atrMultTP3), loss=atrTicks(atrMultSL))
+strategy.exit("x4", profit=atrTicks(atrMultTP4), loss=atrTicks(atrMultSL))
+
+// Ratcheting trailing stop: tightens as profit grows (3 levels)
+if useTrail and not na(entryATR) and strategy.position_size > 0
+    avgPrice = strategy.position_avg_price
+    profitDist = close - avgPrice
+    // Level 3 — beyond TP3: tightest trail
+    if profitDist > entryATR * atrMultTP3
+        trailStop = close - atrVal * trailATRmul3
+        strategy.exit("xTrail", from_entry="Long", stop=trailStop)
+    // Level 2 — beyond TP2: medium trail
+    else if profitDist > entryATR * atrMultTP2
+        trailStop = close - atrVal * trailATRmul2
+        strategy.exit("xTrail", from_entry="Long", stop=trailStop)
+    // Level 1 — beyond TP1: wide trail
+    else if profitDist > entryATR * atrMultTP1
+        trailStop = close - atrVal * trailATRmul1
+        strategy.exit("xTrail", from_entry="Long", stop=trailStop)
+
+if useTrail and not na(entryATR) and strategy.position_size < 0
+    avgPrice = strategy.position_avg_price
+    profitDist = avgPrice - close
+    // Level 3 — beyond TP3: tightest trail
+    if profitDist > entryATR * atrMultTP3
+        trailStop = close + atrVal * trailATRmul3
+        strategy.exit("xTrail", from_entry="Short", stop=trailStop)
+    // Level 2 — beyond TP2: medium trail
+    else if profitDist > entryATR * atrMultTP2
+        trailStop = close + atrVal * trailATRmul2
+        strategy.exit("xTrail", from_entry="Short", stop=trailStop)
+    // Level 1 — beyond TP1: wide trail
+    else if profitDist > entryATR * atrMultTP1
+        trailStop = close + atrVal * trailATRmul1
+        strategy.exit("xTrail", from_entry="Short", stop=trailStop)
+
+// Structure-based exit: close on opposing CHoCH
+if strategy.position_size > 0 and chochBear
+    strategy.close("Long", comment="CHoCH Exit")
+if strategy.position_size < 0 and chochBull
+    strategy.close("Short", comment="CHoCH Exit")
+
+// Stale trade exit: kill positions held too long with insufficient profit
+if useStaleExit and not na(entryBar) and strategy.position_size != 0
+    barsInTrade = bar_index - entryBar
+    if barsInTrade >= staleBars
+        pnlPct = strategy.position_size > 0 ? (close - strategy.position_avg_price) / strategy.position_avg_price * 100 : (strategy.position_avg_price - close) / strategy.position_avg_price * 100
+        if pnlPct < staleMinProfit
+            strategy.close_all(comment="Stale Exit")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+plot(lastSH, "Swing High", color.new(#ff5252, 30), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 30), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+plot(useHTF2 and not na(htfEma2) ? htfEma2 : na, "HTF2 EMA", color.new(#00bcd4, 0), linewidth=2)
+
+// FVG zones
+fvgBullColor = not na(fvgBullBot) ? color.new(#00e676, 85) : na
+fvgBearColor = not na(fvgBearBot) ? color.new(#ff5252, 85) : na
+plot(not na(fvgBullBot) ? fvgBullTop : na, "FVG Bull Top", fvgBullColor, style=plot.style_circles)
+plot(not na(fvgBullBot) ? fvgBullBot : na, "FVG Bull Bot", fvgBullColor, style=plot.style_circles)
+plot(not na(fvgBearBot) ? fvgBearTop : na, "FVG Bear Top", fvgBearColor, style=plot.style_circles)
+plot(not na(fvgBearBot) ? fvgBearBot : na, "FVG Bear Bot", fvgBearColor, style=plot.style_circles)
+
+// Structure labels
+plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="CHoCH")
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="CHoCH")
+plotshape(bosLong and not chochBull, "BOS Long", shape.circle, location.belowbar, color.new(#2196f3, 0), size=size.tiny)
+plotshape(bosShort and not chochBear, "BOS Short", shape.circle, location.abovebar, color.new(#ff9800, 0), size=size.tiny)
+plotshape(longSweep, "Sweep Long", shape.diamond, location.belowbar, color.new(#00bcd4, 0), size=size.tiny)
+plotshape(shortSweep, "Sweep Short", shape.diamond, location.abovebar, color.new(#ff6f00, 0), size=size.tiny)
+
+// Squeeze indicators
+plotshape(sqzBull, "Squeeze Bull", shape.arrowup, location.belowbar, color.new(#76ff03, 0), size=size.tiny, text="SQZ")
+plotshape(sqzBear, "Squeeze Bear", shape.arrowdown, location.abovebar, color.new(#ff1744, 0), size=size.tiny, text="SQZ")
+
+// Trend background + drawdown gate warning
+bgcolor(msTrend == 1 ? color.new(#00e676, 95) : msTrend == -1 ? color.new(#ff5252, 95) : na, title="Structure Trend")
+bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Paused")
+bgcolor(sqzOn ? color.new(#ffeb3b, 93) : na, title="Squeeze Active")
+
+// ADX info
+plotshape(useADX and adxVal < adxThresh and (breakAbove or breakBelow), "ADX Block", shape.xcross, location.abovebar, color.new(#ffeb3b, 0), size=size.tiny)
+
+// Info table
+var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(#1e1e1e, 10), border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Win Rate", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(rollingWR * 100, "#.1") + "%", text_color=rollingWR > 0.5 ? color.lime : color.red, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Vol Ratio", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(volRatio, "#.##"), text_color=volRatio < maxVolRatio ? color.lime : color.red, text_size=size.small)
+    table.cell(infoTable, 0, 2, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(adxVal, "#.1"), text_color=adxVal > adxThresh ? color.lime : color.orange, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Consec Loss", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(consecLosses), text_color=consecLosses == 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(infoTable, 0, 4, "Pos Scale", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(volScale * lossScale * wrScale * 100, "#.0") + "%", text_color=color.white, text_size=size.small)
