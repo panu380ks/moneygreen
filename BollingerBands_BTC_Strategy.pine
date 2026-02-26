@@ -6,33 +6,12 @@ strategy("Bollinger Bands Strategy directed", overlay=true,
 
 source = close
 length = input.int(20, minval=1)
-mult = input.float(2.0, "Band Multiplier", minval=0.001, maxval=50, step=0.1)
+mult = input.float(2.0, minval=0.001, maxval=50)
 direction = input.int(0, title="Strategy Direction", minval=-1, maxval=1)
 
 // ── Session Filter (supports overnight: e.g. 20 to 0) ──
 sessionStart = input.int(20, "Session Start Hour", minval=0, maxval=23, group="Session")
 sessionEnd   = input.int(0, "Session End Hour", minval=0, maxval=23, group="Session")
-
-// ── RSI Confirmation (works WITH mean-reversion, not against it) ──
-useRSI    = input.bool(true, "Use RSI Filter", group="Filters")
-rsiLen    = input.int(14, "RSI Length", minval=2, maxval=50, group="Filters")
-rsiOB     = input.float(65.0, "RSI Overbought", minval=50, maxval=90, step=5, group="Filters",
-     tooltip="Only short when RSI confirms overbought")
-rsiOS     = input.float(35.0, "RSI Oversold", minval=10, maxval=50, step=5, group="Filters",
-     tooltip="Only long when RSI confirms oversold")
-
-// ── Volume Filter ──
-useVol    = input.bool(true, "Use Volume Filter", group="Filters")
-volLen    = input.int(20, "Volume MA Length", minval=5, maxval=100, group="Filters")
-volMult   = input.float(1.0, "Volume Threshold (x avg)", minval=0.5, maxval=3.0, step=0.1, group="Filters",
-     tooltip="Only trade when volume >= this multiple of average")
-
-// ── Drawdown Filter ──
-useDD        = input.bool(true, "Use Drawdown Filter", group="Drawdown")
-maxDDPct     = input.float(8.0, "Max Drawdown %", minval=1.0, maxval=50.0, step=0.5, group="Drawdown",
-     tooltip="Pause new entries when equity drops this % from peak")
-cooldownBars = input.int(10, "Cooldown Bars After DD", minval=1, maxval=100, group="Drawdown",
-     tooltip="Wait this many bars after drawdown clears before re-entering")
 
 strategy.risk.allow_entry_in(direction == 0 ? strategy.direction.all : (direction < 0 ? strategy.direction.short : strategy.direction.long))
 
@@ -42,46 +21,21 @@ dev = mult * ta.stdev(source, length)
 upper = basis + dev
 lower = basis - dev
 
-// ── RSI Filter: confirms mean-reversion setups ──
-rsiVal   = ta.rsi(source, rsiLen)
-rsiLong  = not useRSI or rsiVal < rsiOS
-rsiShort = not useRSI or rsiVal > rsiOB
+// ── Volume Color Filter ──
+// Green candle = close > open (bullish), Red candle = close < open (bearish)
+greenVol = close > open
+redVol   = close < open
 
-// ── Volume Filter: only trade on real volume ──
-volMA     = ta.sma(volume, volLen)
-volOK     = not useVol or volume >= volMA * volMult
-
-// ── Drawdown Filter: equity circuit breaker ──
-var float peakEquity = strategy.initial_capital
-var int   barsSinceDDClear = cooldownBars
-
-peakEquity := math.max(peakEquity, strategy.equity)
-currentDD  = (peakEquity - strategy.equity) / peakEquity * 100
-
-inDrawdown = useDD and currentDD >= maxDDPct
-
-if inDrawdown
-    barsSinceDDClear := 0
-else
-    barsSinceDDClear := barsSinceDDClear + 1
-
-ddAllowed = not useDD or (not inDrawdown and barsSinceDDClear >= cooldownBars)
-
-if ddAllowed and barsSinceDDClear == cooldownBars
-    peakEquity := strategy.equity
-
-// ── Session Filter (handles overnight crossover) ──
+// ── Session Filter (handles overnight crossover: 20 to 0) ──
 inSession = sessionStart <= sessionEnd ? (hour >= sessionStart and hour < sessionEnd) : (hour >= sessionStart or hour < sessionEnd)
 
-// ── Combined entry conditions ──
-canTrade = inSession and ddAllowed and volOK
-
-if (ta.crossover(source, lower)) and canTrade and rsiLong
+// ── Entry: BB crossover + matching volume color ──
+if (ta.crossover(source, lower)) and inSession and greenVol
     strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
 else
     strategy.cancel(id="BBandLE")
 
-if (ta.crossunder(source, upper)) and canTrade and rsiShort
+if (ta.crossunder(source, upper)) and inSession and redVol
     strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
 else
     strategy.cancel(id="BBandSE")
@@ -100,28 +54,9 @@ if strategy.position_size < 0
     if ta.crossover(source, basis)
         strategy.close("BBandSE", comment="Exit Basis")
 
-// ── Force close when drawdown breaker trips ──
-if inDrawdown and strategy.position_size != 0
-    strategy.close_all(comment="DD Circuit Breaker")
-
 // ── Plots ──
 plot(basis, "Basis", color=color.new(#ffeb3b, 0))
 p1 = plot(upper, "Upper", color=color.new(#ff5252, 0))
 p2 = plot(lower, "Lower", color=color.new(#00e676, 0))
 fill(p1, p2, color=color.new(#2196f3, 90), title="BB Fill")
-
-// ── Dashboard ──
-var table panel = table.new(position.top_right, 2, 5, bgcolor=color.new(#1e1e1e, 20), border_width=1)
-if barstate.islastconfirmedhistory or barstate.isrealtime
-    table.cell(panel, 0, 0, "Peak Equity", text_color=color.gray, text_size=size.small)
-    table.cell(panel, 1, 0, str.tostring(peakEquity, "#.##"), text_color=color.white, text_size=size.small)
-    ddColor = currentDD >= maxDDPct ? color.red : (currentDD >= maxDDPct * 0.5 ? color.orange : color.green)
-    table.cell(panel, 0, 1, "Drawdown %", text_color=color.gray, text_size=size.small)
-    table.cell(panel, 1, 1, str.tostring(currentDD, "#.##") + "%", text_color=ddColor, text_size=size.small)
-    table.cell(panel, 0, 2, "Status", text_color=color.gray, text_size=size.small)
-    table.cell(panel, 1, 2, ddAllowed ? "TRADING" : (inDrawdown ? "HALTED" : "COOLDOWN"), text_color=ddAllowed ? color.green : color.red, text_size=size.small)
-    table.cell(panel, 0, 3, "RSI", text_color=color.gray, text_size=size.small)
-    rsiColor = rsiVal > rsiOB ? color.red : (rsiVal < rsiOS ? color.green : color.gray)
-    table.cell(panel, 1, 3, str.tostring(rsiVal, "#.#"), text_color=rsiColor, text_size=size.small)
-    table.cell(panel, 0, 4, "Volume", text_color=color.gray, text_size=size.small)
-    table.cell(panel, 1, 4, volOK ? "ABOVE AVG" : "BELOW AVG", text_color=volOK ? color.green : color.gray, text_size=size.small)
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
