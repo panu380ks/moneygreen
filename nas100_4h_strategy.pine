@@ -1,0 +1,444 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=5
+strategy("NAS100 4H | MACD + RSI + BB + RMA",
+     overlay        = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.02,
+     slippage       = 3,
+     pyramiding     = 0,
+     calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── RMA (Running Moving Average — Trend Backbone) ──
+i_rmaFast    = input.int(10,   "RMA Fast Length",         group = "RMA Trend")
+i_rmaSlow    = input.int(30,   "RMA Slow Length",         group = "RMA Trend")
+i_rmaFilter  = input.int(100,  "RMA Macro Filter Length", group = "RMA Trend")
+
+// ── MACD ──
+i_macdFast   = input.int(12,   "MACD Fast",    group = "MACD")
+i_macdSlow   = input.int(26,   "MACD Slow",    group = "MACD")
+i_macdSig    = input.int(9,    "MACD Signal",  group = "MACD")
+
+// ── RSI ──
+i_rsiLen     = input.int(14,   "RSI Length",               group = "RSI")
+i_rsiOB      = input.int(70,   "Overbought (no longs)",   group = "RSI")
+i_rsiOS      = input.int(30,   "Oversold (no shorts)",    group = "RSI")
+i_rsiMid     = input.int(50,   "RSI Midline",             group = "RSI")
+
+// ── Bollinger Bands ──
+i_bbLen      = input.int(20,   "BB Length",              group = "Bollinger Bands")
+i_bbMult     = input.float(2.0, "BB StdDev Multiplier",  step = 0.1, group = "Bollinger Bands")
+
+// ── Risk Management ──
+i_atrLen     = input.int(14,   "ATR Length",              group = "Risk")
+i_slMult     = input.float(1.5, "SL: ATR Multiplier",    step = 0.1, group = "Risk")
+i_tp1Mult    = input.float(2.0, "TP1: ATR Multiplier",   step = 0.1, group = "Risk")
+i_tp1Pct     = input.float(50,  "TP1: Close %",          step = 5,   group = "Risk")
+i_tp2Mult    = input.float(4.0, "TP2: ATR Multiplier",   step = 0.1, group = "Risk")
+i_tp2Pct     = input.float(30,  "TP2: Close %",          step = 5,   group = "Risk")
+i_trailMult  = input.float(1.5, "Trail: ATR Multiplier", step = 0.1, group = "Risk")
+
+// ── Session Filter (London open → US close covers NAS prime hours) ──
+i_useSess    = input.bool(true, "Enable Session Filter",        group = "Session")
+i_session    = input.session("1330-2100", "NAS100 Session",     group = "Session")
+
+// ── Cooldown ──
+i_useCooldown  = input.bool(true, "Enable Loss Cooldown",       group = "Cooldown")
+i_cooldownBars = input.int(3,     "Bars to Wait After SL Hit",  group = "Cooldown")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── RMA (Running Moving Average) — smoother than EMA, less lag than SMA ──
+rmaFast   = ta.rma(close, i_rmaFast)
+rmaSlow   = ta.rma(close, i_rmaSlow)
+rmaFilter = ta.rma(close, i_rmaFilter)
+
+// ── MACD ──
+[macdLine, signalLine, hist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+macdCrossBull = ta.crossover(macdLine, signalLine)
+macdCrossBear = ta.crossunder(macdLine, signalLine)
+macdAboveZero = macdLine > 0
+macdBelowZero = macdLine < 0
+histGrowing   = hist > hist[1]
+histFalling   = hist < hist[1]
+
+// ── RSI ──
+rsi = ta.rsi(close, i_rsiLen)
+
+// ── Bollinger Bands ──
+bbBasis = ta.sma(close, i_bbLen)
+bbDev   = ta.stdev(close, i_bbLen) * i_bbMult
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = (bbUpper - bbLower) / bbBasis * 100  // normalized width
+
+// BB position: where price sits within the bands (0 = lower, 1 = upper)
+bbPct = (close - bbLower) / (bbUpper - bbLower)
+
+// ── ATR for risk ──
+atr = ta.atr(i_atrLen)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND DETECTION (RMA-based)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Primary trend: fast RMA above/below slow RMA
+rmaBullTrend = rmaFast > rmaSlow
+rmaBearTrend = rmaFast < rmaSlow
+
+// RMA crossovers
+rmaCrossBull = ta.crossover(rmaFast, rmaSlow)
+rmaCrossBear = ta.crossunder(rmaFast, rmaSlow)
+
+// Macro filter: price above/below long-period RMA
+macroUp   = close > rmaFilter
+macroDown = close < rmaFilter
+
+// Trend strength: distance between fast and slow RMA normalized by ATR
+trendStrength = math.abs(rmaFast - rmaSlow) / atr
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BB SQUEEZE & EXPANSION
+// ═══════════════════════════════════════════════════════════════════════════
+
+bbWidthMA  = ta.sma(bbWidth, 50)
+isSqueeze  = bbWidth < bbWidthMA * 0.75   // bands tight = compression
+isExpand   = bbWidth > bbWidthMA * 1.25   // bands wide = expansion/breakout
+
+// Squeeze release — volatility expansion beginning
+sqzRelease = not isSqueeze and isSqueeze[1]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION & COOLDOWN
+// ═══════════════════════════════════════════════════════════════════════════
+
+inSession = not i_useSess or not na(time(timeframe.period, i_session))
+
+var int barsSinceSL = 999
+wasInTrade = strategy.position_size[1] != 0
+nowFlat    = strategy.position_size == 0
+gotClosed  = wasInTrade and nowFlat and strategy.closedtrades > 0
+
+if gotClosed
+    lastPnL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnL < 0
+        barsSinceSL := 0
+
+if barsSinceSL < 999
+    barsSinceSL += 1
+
+cooldownOK = not i_useCooldown or barsSinceSL > i_cooldownBars
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS — 4 TRIGGER TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// All entries require these baseline filters
+rsiBullOK = rsi < i_rsiOB          // not overbought
+rsiBearOK = rsi > i_rsiOS          // not oversold
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRIGGER 1: RMA Crossover + MACD Confirmation
+// Classic trend-start signal: fast RMA crosses slow RMA
+// while MACD histogram supports the direction
+// ─────────────────────────────────────────────────────────────────────────
+trig1Long  = rmaCrossBull and (macdAboveZero or macdCrossBull) and macroUp
+trig1Short = rmaCrossBear and (macdBelowZero or macdCrossBear) and macroDown
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRIGGER 2: MACD Cross + RMA Trend + RSI Momentum
+// MACD crossover during established RMA trend
+// RSI must be in the momentum zone (above 50 for longs, below 50 for shorts)
+// ─────────────────────────────────────────────────────────────────────────
+trig2Long  = macdCrossBull and rmaBullTrend and rsi > i_rsiMid and macroUp
+trig2Short = macdCrossBear and rmaBearTrend and rsi < i_rsiMid and macroDown
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRIGGER 3: BB Lower Band Bounce / Upper Band Rejection
+// Price touches or pierces the BB band and reverses in trend direction
+// Combined with RSI extremes for high-probability mean reversion in trend
+// ─────────────────────────────────────────────────────────────────────────
+bbBounce  = low <= bbLower and close > bbLower and close > open   // touched lower, closed bullish
+bbReject  = high >= bbUpper and close < bbUpper and close < open  // touched upper, closed bearish
+
+trig3Long  = bbBounce and rmaBullTrend and rsi < 40 and rsi > rsi[1]   // oversold bounce in uptrend
+trig3Short = bbReject and rmaBearTrend and rsi > 60 and rsi < rsi[1]   // overbought rejection in downtrend
+
+// ─────────────────────────────────────────────────────────────────────────
+// TRIGGER 4: BB Squeeze Breakout + All Indicators Aligned
+// Volatility compression (squeeze) just released
+// RMA trend + MACD direction + RSI momentum all agree = explosive move
+// ─────────────────────────────────────────────────────────────────────────
+trig4Long  = sqzRelease and close > bbBasis and rmaBullTrend and histGrowing and rsi > i_rsiMid
+trig4Short = sqzRelease and close < bbBasis and rmaBearTrend and histFalling and rsi < i_rsiMid
+
+// ─────────────────────────────────────────────────────────────────────────
+// Combined entry with all filters
+// ─────────────────────────────────────────────────────────────────────────
+longEntry  = (trig1Long or trig2Long or trig3Long or trig4Long) and rsiBullOK and inSession and cooldownOK
+shortEntry = (trig1Short or trig2Short or trig3Short or trig4Short) and rsiBearOK and inSession and cooldownOK
+
+var string lastTrigger = ""
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float trailStop  = na
+var bool  tp1Hit     = false
+var bool  tp2Hit     = false
+
+flat    = strategy.position_size == 0
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// ── Long Entry ──
+if longEntry and flat
+    entryPrice := close
+    slPrice    := close - atr * i_slMult
+    tp1Price   := close + atr * i_tp1Mult
+    tp2Price   := close + atr * i_tp2Mult
+    trailStop  := close - atr * i_trailMult
+    tp1Hit     := false
+    tp2Hit     := false
+    lastTrigger := trig1Long ? "RMA Cross" : trig2Long ? "MACD + RMA" : trig3Long ? "BB Bounce" : "Squeeze"
+    strategy.entry("Long", strategy.long)
+
+// ── Short Entry ──
+if shortEntry and flat
+    entryPrice := close
+    slPrice    := close + atr * i_slMult
+    tp1Price   := close - atr * i_tp1Mult
+    tp2Price   := close - atr * i_tp2Mult
+    trailStop  := close + atr * i_trailMult
+    tp1Hit     := false
+    tp2Hit     := false
+    lastTrigger := trig1Short ? "RMA Cross" : trig2Short ? "MACD + RMA" : trig3Short ? "BB Reject" : "Squeeze"
+    strategy.entry("Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC — 3-TIER: TP1 → TP2 → Trail
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── TP1: Partial close + move SL to breakeven ──
+if inLong and not tp1Hit
+    strategy.exit("TP1", "Long", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if high >= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+if inShort and not tp1Hit
+    strategy.exit("TP1", "Short", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if low <= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+// ── TP2: Partial close + lock profit at TP1 level ──
+if inLong and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "Long", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if high >= tp2Price
+        tp2Hit  := true
+        slPrice := tp1Price
+
+if inShort and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "Short", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if low <= tp2Price
+        tp2Hit  := true
+        slPrice := tp1Price
+
+// ── Trail remaining position (after TP2) ──
+if inLong and tp2Hit
+    newTrail = close - atr * i_trailMult
+    if newTrail > trailStop
+        trailStop := newTrail
+    effectiveStop = math.max(slPrice, trailStop)
+    strategy.exit("Trail", "Long", stop = effectiveStop)
+
+if inShort and tp2Hit
+    newTrail = close + atr * i_trailMult
+    if newTrail < trailStop
+        trailStop := newTrail
+    effectiveStop = math.min(slPrice, trailStop)
+    strategy.exit("Trail", "Short", stop = effectiveStop)
+
+// ── Ratchet trail after TP1 (even before TP2) ──
+if inLong and tp1Hit and not tp2Hit
+    newTrail = close - atr * i_trailMult
+    if newTrail > trailStop
+        trailStop := newTrail
+
+if inShort and tp1Hit and not tp2Hit
+    newTrail = close + atr * i_trailMult
+    if newTrail < trailStop
+        trailStop := newTrail
+
+// ── MACD Flip Exit — momentum died ──
+if inLong and macdCrossBear and tp1Hit
+    strategy.close("Long", comment = "MACD Flip")
+
+if inShort and macdCrossBull and tp1Hit
+    strategy.close("Short", comment = "MACD Flip")
+
+// ── RMA Trend Break Exit ──
+if inLong and rmaCrossBear
+    strategy.close("Long", comment = "RMA Break")
+
+if inShort and rmaCrossBull
+    strategy.close("Short", comment = "RMA Break")
+
+// ── Session End Exit ──
+if i_useSess and not inSession
+    if inLong
+        strategy.close("Long", comment = "Session End")
+    if inShort
+        strategy.close("Short", comment = "Session End")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS — PRICE CHART
+// ═══════════════════════════════════════════════════════════════════════════
+
+// RMA lines
+p_rmaFast   = plot(rmaFast,   "RMA Fast",   color.new(#2962FF, 0), 2)
+p_rmaSlow   = plot(rmaSlow,   "RMA Slow",   color.new(#FF6D00, 0), 2)
+plot(rmaFilter, "RMA Filter", color.new(#FFFFFF, 60), 2, plot.style_stepline)
+
+// RMA ribbon fill
+rmaFillClr = rmaBullTrend ? color.new(#00E676, 85) : color.new(#FF1744, 85)
+fill(p_rmaFast, p_rmaSlow, rmaFillClr)
+
+// Bollinger Bands
+p_bbUpper = plot(bbUpper, "BB Upper", color.new(#787B86, 40), 1)
+p_bbLower = plot(bbLower, "BB Lower", color.new(#787B86, 40), 1)
+plot(bbBasis, "BB Mid",   color.new(#787B86, 60), 1, plot.style_circles)
+bbFill = isSqueeze ? color.new(#FF6D00, 90) : color.new(#787B86, 95)
+fill(p_bbUpper, p_bbLower, bbFill)
+
+// Entry markers
+allBullFilter = rsiBullOK and inSession and cooldownOK
+allBearFilter = rsiBearOK and inSession and cooldownOK
+
+plotshape(trig1Long and flat and allBullFilter, "T1 Long", shape.triangleup, location.belowbar, color.new(#00E676, 0), size = size.small, text = "RMA")
+plotshape(trig1Short and flat and allBearFilter, "T1 Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.small, text = "RMA")
+
+plotshape(trig2Long and not trig1Long and flat and allBullFilter, "T2 Long", shape.triangleup, location.belowbar, color.new(#00BCD4, 0), size = size.small, text = "M+R")
+plotshape(trig2Short and not trig1Short and flat and allBearFilter, "T2 Short", shape.triangledown, location.abovebar, color.new(#FF9800, 0), size = size.small, text = "M+R")
+
+plotshape(trig3Long and not trig1Long and not trig2Long and flat and allBullFilter, "T3 Long", shape.triangleup, location.belowbar, color.new(#7C4DFF, 0), size = size.small, text = "BB")
+plotshape(trig3Short and not trig1Short and not trig2Short and flat and allBearFilter, "T3 Short", shape.triangledown, location.abovebar, color.new(#E040FB, 0), size = size.small, text = "BB")
+
+plotshape(trig4Long and not trig1Long and not trig2Long and not trig3Long and flat and allBullFilter, "T4 Long", shape.triangleup, location.belowbar, color.new(#FFD600, 0), size = size.small, text = "SQ")
+plotshape(trig4Short and not trig1Short and not trig2Short and not trig3Short and flat and allBearFilter, "T4 Short", shape.triangledown, location.abovebar, color.new(#FF6E40, 0), size = size.small, text = "SQ")
+
+// Squeeze dots along the bottom
+plotshape(isSqueeze, "Squeeze", shape.diamond, location.bottom, color.new(#FF1744, 30), size = size.tiny)
+plotshape(sqzRelease, "Squeeze Fire", shape.diamond, location.bottom, color.new(#00E676, 0), size = size.tiny)
+
+// Trend background
+bgColor = rmaBullTrend and macroUp ? color.new(#00E676, 96) : rmaBearTrend and macroDown ? color.new(#FF1744, 96) : na
+bgcolor(bgColor)
+
+// Trade levels
+plot(inLong or inShort ? slPrice : na,   "Stop",  color.new(#FF1744, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp1Price : na,  "TP1",   color.new(#00E676, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp2Price : na,  "TP2",   color.new(#00BFA5, 0), 1, plot.style_circles)
+plot(tp1Hit and (inLong or inShort) ? trailStop : na, "Trail", color.new(#FFAB00, 40), 1, plot.style_stepline)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERFORMANCE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int totalWins   = 0
+var int totalLosses = 0
+var float peakEq    = 100000.0
+var float maxDD     = 0.0
+
+if gotClosed and strategy.closedtrades > 0
+    pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if pnl > 0
+        totalWins += 1
+    else
+        totalLosses += 1
+
+if strategy.equity > peakEq
+    peakEq := strategy.equity
+currentDD = (peakEq - strategy.equity) / peakEq * 100
+if currentDD > maxDD
+    maxDD := currentDD
+
+winRate = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) * 100 : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table infoTbl = table.new(position.top_right, 2, 16,
+     bgcolor      = color.new(#1E1E1E, 10),
+     border_color = color.new(#333333, 0),
+     border_width = 1)
+
+f_row(tbl, r, label, val, valClr) =>
+    table.cell(tbl, 0, r, label, text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, r, val,   text_color = valClr,      text_size = size.small)
+
+if barstate.islast
+    // Trend
+    trendStr = rmaBullTrend ? "BULL" : rmaBearTrend ? "BEAR" : "FLAT"
+    trendClr = rmaBullTrend ? color.green : rmaBearTrend ? color.red : color.gray
+
+    // Macro
+    macroStr = macroUp ? "ABOVE RMA 100" : "BELOW RMA 100"
+    macroClr = macroUp ? color.green : color.red
+
+    // MACD
+    macdStr = macdAboveZero ? (histGrowing ? "BULL +" : "BULL -") : (histFalling ? "BEAR -" : "BEAR +")
+    macdClr = macdAboveZero ? color.green : color.red
+
+    // RSI
+    rsiStr = str.tostring(rsi, "#.0")
+    rsiClr = rsi > i_rsiOB ? color.red : rsi < i_rsiOS ? color.green : color.white
+
+    // BB
+    bbPosStr = str.tostring(bbPct * 100, "#.0") + "%"
+    bbPosClr = bbPct > 0.8 ? color.red : bbPct < 0.2 ? color.green : color.white
+
+    sqzStr = isSqueeze ? "SQUEEZE" : isExpand ? "EXPAND" : "NORMAL"
+    sqzClr = isSqueeze ? color.orange : isExpand ? color.aqua : color.gray
+
+    // Position
+    posStr = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    posClr = inLong ? color.green : inShort ? color.red : color.gray
+
+    // RMA trend strength
+    tsStr = str.tostring(trendStrength, "#.1") + "x ATR"
+    tsClr = trendStrength > 2 ? color.green : trendStrength > 1 ? color.yellow : color.gray
+
+    f_row(infoTbl, 0,  "NAS100 4H",    "ACTIVE",   color.aqua)
+    f_row(infoTbl, 1,  "RMA Trend",    trendStr,   trendClr)
+    f_row(infoTbl, 2,  "Macro Filter", macroStr,   macroClr)
+    f_row(infoTbl, 3,  "Trend Str",    tsStr,      tsClr)
+    f_row(infoTbl, 4,  "MACD",         macdStr,    macdClr)
+    f_row(infoTbl, 5,  "RSI",          rsiStr,     rsiClr)
+    f_row(infoTbl, 6,  "BB Position",  bbPosStr,   bbPosClr)
+    f_row(infoTbl, 7,  "BB State",     sqzStr,     sqzClr)
+    f_row(infoTbl, 8,  "BB Width",     str.tostring(bbWidth, "#.2") + "%", color.white)
+    f_row(infoTbl, 9,  "ATR",          str.tostring(atr, "#.00"), color.white)
+    f_row(infoTbl, 10, "Position",     posStr,     posClr)
+    f_row(infoTbl, 11, "Entry Type",   inLong or inShort ? lastTrigger : "—", color.yellow)
+    f_row(infoTbl, 12, "TP1 Hit",      inLong or inShort ? (tp1Hit ? "YES" : "NO") : "—", tp1Hit ? color.green : color.orange)
+    f_row(infoTbl, 13, "TP2 Hit",      inLong or inShort ? (tp2Hit ? "YES" : "NO") : "—", tp2Hit ? color.green : color.orange)
+    f_row(infoTbl, 14, "Win Rate",     str.tostring(winRate, "#.1") + "%", winRate >= 50 ? color.green : color.red)
+    f_row(infoTbl, 15, "Max DD",       str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)

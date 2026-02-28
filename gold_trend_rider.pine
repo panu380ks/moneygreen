@@ -1,0 +1,681 @@
+// This Pine Script™ strategy is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=5
+strategy("Multi-Asset Trend Rider v6",
+     overlay        = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.02,
+     slippage       = 3,
+     pyramiding     = 0,
+     calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTO-DETECT INSTRUMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+isGold   = str.contains(syminfo.ticker, "XAU") or str.contains(syminfo.ticker, "GOLD")
+isSilver = str.contains(syminfo.ticker, "XAG") or str.contains(syminfo.ticker, "SILVER")
+isNAS    = str.contains(syminfo.ticker, "NAS") or str.contains(syminfo.ticker, "NDX") or str.contains(syminfo.ticker, "QQQ") or str.contains(syminfo.ticker, "US100") or str.contains(syminfo.ticker, "USTEC")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Instrument ──
+i_instrument = input.string("Auto", "Instrument", options = ["Auto", "Gold", "Silver", "NAS100"], group = "Instrument")
+useGold   = i_instrument == "Gold"   or (i_instrument == "Auto" and isGold)
+useSilver = i_instrument == "Silver" or (i_instrument == "Auto" and isSilver)
+useNAS    = i_instrument == "NAS100" or (i_instrument == "Auto" and isNAS)
+
+// ── Trend EMAs ──
+i_emaFast   = input.int(9,    "Fast EMA",  group = "Trend")
+i_emaMid    = input.int(21,   "Mid EMA",   group = "Trend")
+i_emaSlow   = input.int(50,   "Slow EMA",  group = "Trend")
+i_ema200    = input.int(200,  "EMA 200 (Macro Filter)", group = "Trend")
+
+// ── Higher Timeframe Trend ──
+i_useMTF    = input.bool(true, "Enable HTF Trend Filter",   group = "HTF Trend")
+i_htfTF     = input.timeframe("240", "HTF Timeframe",       group = "HTF Trend")
+i_htfEMA    = input.int(50,   "HTF EMA Length",              group = "HTF Trend")
+
+// ── ADX Trend Strength ──
+i_useADX    = input.bool(true,  "Enable ADX Filter",    group = "ADX")
+i_adxLen    = input.int(14,     "ADX Length",            group = "ADX")
+i_adxThresh = input.float(20.0, "ADX Threshold",        step = 1.0, group = "ADX")
+
+// ── Supertrend ──
+i_stFactor  = input.float(2.0, "Factor",     step = 0.1, group = "Supertrend")
+i_stPeriod  = input.int(7,     "ATR Period",              group = "Supertrend")
+
+// ── MACD ──
+i_useMACD   = input.bool(true, "Enable MACD Entries",  group = "MACD")
+i_macdFast  = input.int(12,    "MACD Fast",            group = "MACD")
+i_macdSlow  = input.int(26,    "MACD Slow",            group = "MACD")
+i_macdSig   = input.int(9,     "MACD Signal",          group = "MACD")
+
+// ── EMA Pullback ──
+i_usePB     = input.bool(true,  "Enable Pullback Entries",  group = "Pullback")
+i_pbZone    = input.float(0.5,  "Pullback Zone (ATR)",      step = 0.1, group = "Pullback")
+
+// ── Bollinger Band Squeeze (breakout trigger) ──
+i_useBBSq   = input.bool(true,  "Enable BB Squeeze Entries", group = "BB Squeeze")
+i_bbLen      = input.int(20,     "BB Length",                  group = "BB Squeeze")
+i_bbMult     = input.float(2.0,  "BB StdDev",    step = 0.1,  group = "BB Squeeze")
+i_kcLen      = input.int(20,     "KC Length",                  group = "BB Squeeze")
+i_kcMult     = input.float(1.5,  "KC Multiplier", step = 0.1, group = "BB Squeeze")
+
+// ── VWAP Filter ──
+i_useVWAP   = input.bool(true, "Enable VWAP Filter",  group = "VWAP")
+
+// ── Volume ──
+i_useVol    = input.bool(true,  "Enable Volume Filter",  group = "Volume")
+i_volLen    = input.int(20,     "Volume MA Length",       group = "Volume")
+i_volMult   = input.float(1.0,  "Min Volume (x avg)",    step = 0.1, group = "Volume")
+
+// ── RSI ──
+i_useRSI    = input.bool(true, "Enable RSI Filter",       group = "RSI")
+i_rsiLen    = input.int(14,    "RSI Length",               group = "RSI")
+i_rsiOB     = input.int(75,    "Overbought (no longs)",   group = "RSI")
+i_rsiOS     = input.int(25,    "Oversold (no shorts)",    group = "RSI")
+
+// ── Stochastic RSI (precision timing) ──
+i_useStoch  = input.bool(true,  "Enable Stoch RSI Filter", group = "Stoch RSI")
+i_stochLen  = input.int(14,     "Stoch RSI Length",         group = "Stoch RSI")
+i_stochK    = input.int(3,      "Stoch K Smooth",           group = "Stoch RSI")
+i_stochD    = input.int(3,      "Stoch D Smooth",           group = "Stoch RSI")
+
+// ── Risk Management ──
+i_atrLen    = input.int(14,    "ATR Length",              group = "Risk")
+i_slMult    = input.float(1.5, "SL: ATR Multiplier",     step = 0.1, group = "Risk")
+i_tp1Mult   = input.float(2.0, "TP1: ATR Multiplier",    step = 0.1, group = "Risk")
+i_tp1Pct    = input.float(40,  "TP1: Close %",           step = 5,   group = "Risk")
+i_tp2Mult   = input.float(4.0, "TP2: ATR Multiplier",    step = 0.1, group = "Risk")
+i_tp2Pct    = input.float(30,  "TP2: Close %",           step = 5,   group = "Risk")
+i_tp3Mult   = input.float(6.0, "TP3: ATR Multiplier",    step = 0.1, group = "Risk")
+i_tp3Pct    = input.float(15,  "TP3: Close %",           step = 5,   group = "Risk")
+i_trailMult = input.float(1.5, "Trail: ATR Multiplier",  step = 0.1, group = "Risk")
+
+// ── Max Bars in Trade ──
+i_useMaxBars  = input.bool(true, "Enable Max Bars Exit",   group = "Time Exit")
+i_maxBars     = input.int(50,    "Max Bars in Trade",       group = "Time Exit")
+
+// ── Session Filter ──
+i_useSess      = input.bool(true,  "Enable Session Filter",    group = "Session")
+i_sessGold     = input.session("0200-1700", "Gold Session",    group = "Session")
+i_sessSilver   = input.session("0200-1700", "Silver Session",  group = "Session")
+i_sessNAS      = input.session("1330-2000", "NAS100 Session",  group = "Session")
+
+// ── Cooldown ──
+i_useCooldown  = input.bool(true, "Enable Loss Cooldown",        group = "Cooldown")
+i_cooldownBars = input.int(5,     "Bars to Wait After SL Hit",   group = "Cooldown")
+i_maxConsLoss  = input.int(3,     "Max Consecutive Losses",      group = "Cooldown")
+
+// ── Equity Curve Filter ──
+i_useEqFilter  = input.bool(true, "Enable Equity Curve Filter", group = "Equity Filter")
+i_eqMALen      = input.int(20,    "Equity MA Length",            group = "Equity Filter")
+
+// ── Volatility Regime ──
+i_useVolRegime = input.bool(true,  "Enable Volatility Regime",   group = "Vol Regime")
+i_volRegimeLen = input.int(50,     "ATR Lookback for Regime",    group = "Vol Regime")
+i_volRegimeHi  = input.float(1.5,  "High Vol Threshold (x avg)", step = 0.1, group = "Vol Regime")
+i_volRegimeLo  = input.float(0.6,  "Low Vol Threshold (x avg)",  step = 0.1, group = "Vol Regime")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PER-INSTRUMENT ADAPTIVE PARAMETERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+slMult    = useSilver ? i_slMult * 1.3 : useNAS ? i_slMult * 1.1 : i_slMult
+tp1Mult   = useSilver ? i_tp1Mult * 1.2 : useNAS ? i_tp1Mult * 1.1 : i_tp1Mult
+tp2Mult   = useSilver ? i_tp2Mult * 1.2 : useNAS ? i_tp2Mult * 1.1 : i_tp2Mult
+tp3Mult   = useSilver ? i_tp3Mult * 1.2 : useNAS ? i_tp3Mult * 1.1 : i_tp3Mult
+trailMult = useSilver ? i_trailMult * 1.2 : useNAS ? i_trailMult * 1.0 : i_trailMult
+adxThresh = useNAS ? i_adxThresh - 3 : useSilver ? i_adxThresh + 2 : i_adxThresh
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+emaFast  = ta.ema(close, i_emaFast)
+emaMid   = ta.ema(close, i_emaMid)
+emaSlow  = ta.ema(close, i_emaSlow)
+ema200   = ta.ema(close, i_ema200)
+
+[st, stDir] = ta.supertrend(i_stFactor, i_stPeriod)
+
+rsi = ta.rsi(close, i_rsiLen)
+atr = ta.atr(i_atrLen)
+
+[macdLine, signalLine, hist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+
+// Volume
+volMA = ta.sma(volume, i_volLen)
+volOK = not i_useVol or volume >= volMA * i_volMult
+
+// ADX
+[diPlus, diMinus, adxVal] = ta.dmi(i_adxLen, i_adxLen)
+adxOK = not i_useADX or adxVal >= adxThresh
+
+// Higher Timeframe Trend
+htfEMA   = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfEMA), lookahead = barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, i_htfTF, close, lookahead = barmerge.lookahead_off)
+htfBull  = not i_useMTF or htfClose > htfEMA
+htfBear  = not i_useMTF or htfClose < htfEMA
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VWAP
+// ═══════════════════════════════════════════════════════════════════════════
+
+vwapVal  = ta.vwap(hlc3)
+vwapBull = not i_useVWAP or close > vwapVal
+vwapBear = not i_useVWAP or close < vwapVal
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOLLINGER BAND SQUEEZE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+bbBasis  = ta.sma(close, i_bbLen)
+bbDev    = ta.stdev(close, i_bbLen) * i_bbMult
+bbUpper  = bbBasis + bbDev
+bbLower  = bbBasis - bbDev
+
+kcBasis  = ta.ema(close, i_kcLen)
+kcRange  = ta.atr(i_kcLen) * i_kcMult
+kcUpper  = kcBasis + kcRange
+kcLower  = kcBasis - kcRange
+
+// Squeeze = BB inside KC (low volatility compression)
+sqzOn    = bbLower > kcLower and bbUpper < kcUpper
+sqzOff   = not sqzOn
+
+// Squeeze just released = breakout
+sqzFire  = sqzOff and sqzOn[1]
+
+// Momentum direction during squeeze release
+sqzMom      = ta.linreg(close - bbBasis, i_bbLen, 0)
+sqzBullFire = i_useBBSq and sqzFire and sqzMom > 0
+sqzBearFire = i_useBBSq and sqzFire and sqzMom < 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STOCHASTIC RSI
+// ═══════════════════════════════════════════════════════════════════════════
+
+stochRSI  = ta.rsi(close, i_stochLen)
+stochK    = ta.sma(ta.stoch(stochRSI, stochRSI, stochRSI, i_stochLen), i_stochK)
+stochD    = ta.sma(stochK, i_stochD)
+
+stochBullOK = not i_useStoch or stochK < 80
+stochBearOK = not i_useStoch or stochK > 20
+
+// Stoch RSI cross in favorable zone
+stochBullCross = i_useStoch and ta.crossover(stochK, stochD) and stochK < 40
+stochBearCross = i_useStoch and ta.crossunder(stochK, stochD) and stochK > 60
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOLATILITY REGIME DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+atrLong    = ta.sma(atr, i_volRegimeLen)
+volRatio   = atr / atrLong
+isHighVol  = volRatio > i_volRegimeHi
+isLowVol   = volRatio < i_volRegimeLo
+isNormalVol = not isHighVol and not isLowVol
+regimeStr  = isHighVol ? "HIGH" : isLowVol ? "LOW" : "NORMAL"
+
+// Adapt SL/TP to regime
+regimeSLAdj = isHighVol ? 1.3 : isLowVol ? 0.8 : 1.0
+regimeTPAdj = isHighVol ? 1.4 : isLowVol ? 0.7 : 1.0
+
+adjSlMult    = slMult * regimeSLAdj
+adjTp1Mult   = tp1Mult * regimeTPAdj
+adjTp2Mult   = tp2Mult * regimeTPAdj
+adjTp3Mult   = tp3Mult * regimeTPAdj
+adjTrailMult = trailMult * (isHighVol ? 1.2 : isLowVol ? 0.9 : 1.0)
+
+// Skip entries in extreme low vol (no edge, just chop)
+volRegimeOK = not i_useVolRegime or not isLowVol
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CANDLE PATTERN DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+bodySize   = math.abs(close - open)
+upperWick  = high - math.max(close, open)
+lowerWick  = math.min(close, open) - low
+candleRange = high - low
+
+// Bullish engulfing
+bullEngulf = close > open and close > high[1] and open <= low[1] and bodySize > bodySize[1]
+
+// Bearish engulfing
+bearEngulf = close < open and close < low[1] and open >= high[1] and bodySize > bodySize[1]
+
+// Bullish pin bar (hammer): long lower wick, small body at top
+bullPin = lowerWick > bodySize * 2 and upperWick < bodySize * 0.5 and candleRange > atr * 0.5
+
+// Bearish pin bar (shooting star): long upper wick, small body at bottom
+bearPin = upperWick > bodySize * 2 and lowerWick < bodySize * 0.5 and candleRange > atr * 0.5
+
+candleBull = bullEngulf or bullPin
+candleBear = bearEngulf or bearPin
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RSI DIVERGENCE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Bullish divergence: price makes lower low but RSI makes higher low
+priceLow1  = ta.lowest(low, 5)
+priceLow2  = ta.lowest(low, 5)[5]
+rsiLow1    = ta.lowest(rsi, 5)
+rsiLow2    = ta.lowest(rsi, 5)[5]
+bullDiv    = priceLow1 < priceLow2 and rsiLow1 > rsiLow2 and rsi < 40
+
+// Bearish divergence: price makes higher high but RSI makes lower high
+priceHi1   = ta.highest(high, 5)
+priceHi2   = ta.highest(high, 5)[5]
+rsiHi1     = ta.highest(rsi, 5)
+rsiHi2     = ta.highest(rsi, 5)[5]
+bearDiv    = priceHi1 > priceHi2 and rsiHi1 < rsiHi2 and rsi > 60
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TREND DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+bullTrend = emaFast > emaMid and close > emaSlow
+bearTrend = emaFast < emaMid and close < emaSlow
+
+// EMA 200 macro filter
+macroBull = close > ema200
+macroBear = close < ema200
+
+stBull = stDir < 0
+stBear = stDir > 0
+
+stFlipBull = stBull and not stBull[1]
+stFlipBear = stBear and not stBear[1]
+
+macdCrossBull = ta.crossover(macdLine, signalLine)
+macdCrossBear = ta.crossunder(macdLine, signalLine)
+
+macdMomBull = hist > 0 and hist > hist[1]
+macdMomBear = hist < 0 and hist < hist[1]
+
+// EMA pullback
+pbBull = i_usePB and low <= emaMid + atr * i_pbZone and close > emaMid and stBull
+pbBear = i_usePB and high >= emaMid - atr * i_pbZone and close < emaMid and stBear
+
+// RSI filter
+rsiBullOK = not i_useRSI or rsi < i_rsiOB
+rsiBearOK = not i_useRSI or rsi > i_rsiOS
+
+rsiBullBonus = i_useRSI and rsi < 35 and rsi > rsi[1]
+rsiBearBonus = i_useRSI and rsi > 65 and rsi < rsi[1]
+
+// Session
+activeSess = useGold ? i_sessGold : useSilver ? i_sessSilver : useNAS ? i_sessNAS : "0000-2359"
+inSession  = not i_useSess or not na(time(timeframe.period, activeSess))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOLDOWN & CONSECUTIVE LOSS TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int barsSinceSL  = 999
+var int consLosses   = 0
+
+wasInTrade = strategy.position_size[1] != 0
+nowFlat    = strategy.position_size == 0
+gotStopped = wasInTrade and nowFlat and strategy.closedtrades > 0
+
+if gotStopped
+    lastPnL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnL < 0
+        barsSinceSL := 0
+        consLosses  += 1
+    else
+        consLosses  := 0
+
+if barsSinceSL < 999
+    barsSinceSL += 1
+
+cooldownOK   = not i_useCooldown or (barsSinceSL > i_cooldownBars and consLosses < i_maxConsLoss)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EQUITY CURVE FILTER
+// ═══════════════════════════════════════════════════════════════════════════
+
+eqCurve    = strategy.equity
+eqMA       = ta.sma(eqCurve, i_eqMALen)
+eqFilterOK = not i_useEqFilter or eqCurve >= eqMA
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS — 7 TRIGGER TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// T1: Supertrend flip in trend direction
+trig1Long  = bullTrend and stFlipBull
+trig1Short = bearTrend and stFlipBear
+
+// T2: MACD cross while Supertrend confirms
+trig2Long  = i_useMACD and bullTrend and macdCrossBull and stBull
+trig2Short = i_useMACD and bearTrend and macdCrossBear and stBear
+
+// T3: EMA pullback bounce
+trig3Long  = bullTrend and pbBull and not pbBull[1]
+trig3Short = bearTrend and pbBear and not pbBear[1]
+
+// T4: RSI momentum reversal
+trig4Long  = bullTrend and rsiBullBonus and stBull
+trig4Short = bearTrend and rsiBearBonus and stBear
+
+// T5: Bollinger Band squeeze breakout
+trig5Long  = sqzBullFire and bullTrend and stBull
+trig5Short = sqzBearFire and bearTrend and stBear
+
+// T6: Candle pattern + trend confirmation
+trig6Long  = candleBull and bullTrend and stBull and macdMomBull
+trig6Short = candleBear and bearTrend and stBear and macdMomBear
+
+// T7: RSI divergence + Stoch RSI cross
+trig7Long  = bullDiv and stochBullCross and bullTrend
+trig7Short = bearDiv and stochBearCross and bearTrend
+
+// Combined entry — all filters must pass
+longEntry  = (trig1Long or trig2Long or trig3Long or trig4Long or trig5Long or trig6Long or trig7Long) and rsiBullOK and stochBullOK and inSession and volOK and adxOK and htfBull and vwapBull and cooldownOK and eqFilterOK and volRegimeOK
+shortEntry = (trig1Short or trig2Short or trig3Short or trig4Short or trig5Short or trig6Short or trig7Short) and rsiBearOK and stochBearOK and inSession and volOK and adxOK and htfBear and vwapBear and cooldownOK and eqFilterOK and volRegimeOK
+
+var string lastTrigger = ""
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice  = na
+var float slPrice     = na
+var float tp1Price    = na
+var float tp2Price    = na
+var float tp3Price    = na
+var float trailStop   = na
+var bool  tp1Hit      = false
+var bool  tp2Hit      = false
+var bool  tp3Hit      = false
+var int   barsInTrade = 0
+
+flat    = strategy.position_size == 0
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// Track bars in trade
+if inLong or inShort
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+// ── Resolve trigger name ──
+trigNameLong()  => trig1Long ? "ST Flip" : trig2Long ? "MACD" : trig3Long ? "Pullback" : trig4Long ? "RSI Mom" : trig5Long ? "Squeeze" : trig6Long ? "Candle" : "Diverge"
+trigNameShort() => trig1Short ? "ST Flip" : trig2Short ? "MACD" : trig3Short ? "Pullback" : trig4Short ? "RSI Mom" : trig5Short ? "Squeeze" : trig6Short ? "Candle" : "Diverge"
+
+// ── New Long Entry ──
+if longEntry and flat
+    entryPrice := close
+    slPrice    := close - atr * adjSlMult
+    tp1Price   := close + atr * adjTp1Mult
+    tp2Price   := close + atr * adjTp2Mult
+    tp3Price   := close + atr * adjTp3Mult
+    trailStop  := close - atr * adjTrailMult
+    tp1Hit     := false
+    tp2Hit     := false
+    tp3Hit     := false
+    barsInTrade := 0
+    lastTrigger := trigNameLong()
+    strategy.entry("Long", strategy.long)
+
+// ── New Short Entry ──
+if shortEntry and flat
+    entryPrice := close
+    slPrice    := close + atr * adjSlMult
+    tp1Price   := close - atr * adjTp1Mult
+    tp2Price   := close - atr * adjTp2Mult
+    tp3Price   := close - atr * adjTp3Mult
+    trailStop  := close + atr * adjTrailMult
+    tp1Hit     := false
+    tp2Hit     := false
+    tp3Hit     := false
+    barsInTrade := 0
+    lastTrigger := trigNameShort()
+    strategy.entry("Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC — 4-TIER: TP1 → TP2 → TP3 → Trail Runner
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── TP1: Partial close + breakeven ──
+if inLong and not tp1Hit
+    strategy.exit("TP1", "Long", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if high >= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+if inShort and not tp1Hit
+    strategy.exit("TP1", "Short", limit = tp1Price, stop = slPrice, qty_percent = i_tp1Pct)
+    if low <= tp1Price
+        tp1Hit  := true
+        slPrice := entryPrice
+
+// ── TP2: Partial close + lock TP1 ──
+if inLong and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "Long", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if high >= tp2Price
+        tp2Hit  := true
+        slPrice := tp1Price
+
+if inShort and tp1Hit and not tp2Hit
+    strategy.exit("TP2", "Short", limit = tp2Price, stop = slPrice, qty_percent = i_tp2Pct)
+    if low <= tp2Price
+        tp2Hit  := true
+        slPrice := tp1Price
+
+// ── TP3: Partial close + lock TP2 ──
+if inLong and tp2Hit and not tp3Hit
+    strategy.exit("TP3", "Long", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
+    if high >= tp3Price
+        tp3Hit  := true
+        slPrice := tp2Price
+
+if inShort and tp2Hit and not tp3Hit
+    strategy.exit("TP3", "Short", limit = tp3Price, stop = slPrice, qty_percent = i_tp3Pct)
+    if low <= tp3Price
+        tp3Hit  := true
+        slPrice := tp2Price
+
+// ── Trail: Ride the runner (remaining 15%) ──
+if inLong and tp3Hit
+    newTrail = close - atr * adjTrailMult
+    if newTrail > trailStop
+        trailStop := newTrail
+    effectiveStop = math.max(slPrice, trailStop)
+    strategy.exit("Trail", "Long", stop = effectiveStop)
+
+if inShort and tp3Hit
+    newTrail = close + atr * adjTrailMult
+    if newTrail < trailStop
+        trailStop := newTrail
+    effectiveStop = math.min(slPrice, trailStop)
+    strategy.exit("Trail", "Short", stop = effectiveStop)
+
+// ── Ratchet trail after TP1 even before TP2/TP3 ──
+if inLong and tp1Hit and not tp3Hit
+    newTrail = close - atr * adjTrailMult
+    if newTrail > trailStop
+        trailStop := newTrail
+
+if inShort and tp1Hit and not tp3Hit
+    newTrail = close + atr * adjTrailMult
+    if newTrail < trailStop
+        trailStop := newTrail
+
+// ── Supertrend Flip Exit ──
+if inLong and stFlipBear
+    strategy.close("Long", comment = "ST Flip")
+
+if inShort and stFlipBull
+    strategy.close("Short", comment = "ST Flip")
+
+// ── Trend Break Exit ──
+if inLong and emaFast < emaSlow
+    strategy.close("Long", comment = "Trend Break")
+
+if inShort and emaFast > emaSlow
+    strategy.close("Short", comment = "Trend Break")
+
+// ── Max Bars Exit (time stop) ──
+if i_useMaxBars and barsInTrade >= i_maxBars
+    if inLong
+        strategy.close("Long", comment = "Time Exit")
+    if inShort
+        strategy.close("Short", comment = "Time Exit")
+
+// ── Session End Exit ──
+if i_useSess and not inSession
+    if inLong
+        strategy.close("Long", comment = "Session End")
+    if inShort
+        strategy.close("Short", comment = "Session End")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+plot(emaFast,  "EMA Fast",  color.new(#2962FF, 0), 1)
+plot(emaMid,   "EMA Mid",   color.new(#FF6D00, 0), 1)
+plot(emaSlow,  "EMA Slow",  color.new(#E91E63, 0), 2)
+plot(ema200,   "EMA 200",   color.new(#FFFFFF, 60), 2)
+
+stColor = stBull ? color.new(#00E676, 20) : color.new(#FF1744, 20)
+plot(st, "Supertrend", stColor, 2, plot.style_linebr)
+
+plot(i_useMTF ? htfEMA : na, "HTF EMA", color.new(#FFFFFF, 50), 2, plot.style_stepline)
+plot(i_useVWAP ? vwapVal : na, "VWAP", color.new(#FF00FF, 40), 1, plot.style_circles)
+
+// BB bands (faint)
+plot(i_useBBSq ? bbUpper : na, "BB Upper", color.new(#787B86, 70), 1)
+plot(i_useBBSq ? bbLower : na, "BB Lower", color.new(#787B86, 70), 1)
+
+// Squeeze dots on zero line
+plotshape(sqzOn,  "Squeeze On",  shape.diamond, location.bottom, color.new(#FF1744, 20), size = size.tiny)
+plotshape(sqzFire, "Squeeze Fire", shape.diamond, location.bottom, color.new(#00E676, 0), size = size.tiny)
+
+// Entry markers — all filters baked in
+allFilterLong  = rsiBullOK and stochBullOK and inSession and volOK and adxOK and htfBull and vwapBull and cooldownOK and eqFilterOK and volRegimeOK
+allFilterShort = rsiBearOK and stochBearOK and inSession and volOK and adxOK and htfBear and vwapBear and cooldownOK and eqFilterOK and volRegimeOK
+
+plotshape(trig1Long and flat and allFilterLong, "T1 Long", shape.triangleup, location.belowbar, color.new(#00E676, 0), size = size.small, text = "ST")
+plotshape(trig1Short and flat and allFilterShort, "T1 Short", shape.triangledown, location.abovebar, color.new(#FF1744, 0), size = size.small, text = "ST")
+
+plotshape(trig2Long and not trig1Long and flat and allFilterLong, "T2 Long", shape.triangleup, location.belowbar, color.new(#00BCD4, 0), size = size.small, text = "M")
+plotshape(trig2Short and not trig1Short and flat and allFilterShort, "T2 Short", shape.triangledown, location.abovebar, color.new(#FF9800, 0), size = size.small, text = "M")
+
+plotshape(trig5Long and not trig1Long and not trig2Long and flat and allFilterLong, "T5 Long", shape.triangleup, location.belowbar, color.new(#E040FB, 0), size = size.small, text = "SQ")
+plotshape(trig5Short and not trig1Short and not trig2Short and flat and allFilterShort, "T5 Short", shape.triangledown, location.abovebar, color.new(#E040FB, 0), size = size.small, text = "SQ")
+
+plotshape(trig6Long and not trig1Long and not trig2Long and not trig5Long and flat and allFilterLong, "T6 Long", shape.triangleup, location.belowbar, color.new(#FFD600, 0), size = size.small, text = "C")
+plotshape(trig6Short and not trig1Short and not trig2Short and not trig5Short and flat and allFilterShort, "T6 Short", shape.triangledown, location.abovebar, color.new(#FFD600, 0), size = size.small, text = "C")
+
+plotshape(trig7Long and not trig1Long and not trig2Long and not trig5Long and not trig6Long and flat and allFilterLong, "T7 Long", shape.triangleup, location.belowbar, color.new(#00BFA5, 0), size = size.small, text = "D")
+plotshape(trig7Short and not trig1Short and not trig2Short and not trig5Short and not trig6Short and flat and allFilterShort, "T7 Short", shape.triangledown, location.abovebar, color.new(#00BFA5, 0), size = size.small, text = "D")
+
+// Trend + regime background
+bgColor = bullTrend and htfBull ? color.new(#00E676, 95) : bearTrend and htfBear ? color.new(#FF1744, 95) : na
+bgcolor(bgColor)
+
+// High vol warning
+bgcolor(isHighVol ? color.new(#FF6D00, 97) : na)
+
+// Trade levels
+plot(inLong or inShort ? slPrice : na,   "Stop",  color.new(#FF1744, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp1Price : na,  "TP1",   color.new(#00E676, 0), 1, plot.style_cross)
+plot(inLong or inShort ? tp2Price : na,  "TP2",   color.new(#00BFA5, 0), 1, plot.style_circles)
+plot(inLong or inShort ? tp3Price : na,  "TP3",   color.new(#2962FF, 0), 1, plot.style_circles)
+plot(tp1Hit and (inLong or inShort) ? trailStop : na, "Trail", color.new(#FFAB00, 40), 1, plot.style_stepline)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERFORMANCE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+var int totalWins   = 0
+var int totalLosses = 0
+var float totalPnL  = 0.0
+var float peakEq    = 100000.0
+var float maxDD     = 0.0
+
+if gotStopped and strategy.closedtrades > 0
+    lastPnL2 = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    totalPnL += lastPnL2
+    if lastPnL2 > 0
+        totalWins += 1
+    else
+        totalLosses += 1
+
+if strategy.equity > peakEq
+    peakEq := strategy.equity
+currentDD = (peakEq - strategy.equity) / peakEq * 100
+if currentDD > maxDD
+    maxDD := currentDD
+
+winRate = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) * 100 : 0.0
+profitFactor = totalLosses > 0 ? totalWins / totalLosses : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table infoTbl = table.new(position.top_right, 2, 18,
+     bgcolor      = color.new(#1E1E1E, 10),
+     border_color = color.new(#333333, 0),
+     border_width = 1)
+
+f_row(tbl, r, label, val, valClr) =>
+    table.cell(tbl, 0, r, label, text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, r, val,   text_color = valClr,      text_size = size.small)
+
+if barstate.islast
+    instStr = useGold ? "GOLD" : useSilver ? "SILVER" : useNAS ? "NAS100" : "OTHER"
+    instClr = useGold ? color.yellow : useSilver ? color.silver : useNAS ? color.aqua : color.white
+
+    trendStr = bullTrend ? "BULL" : bearTrend ? "BEAR" : "FLAT"
+    trendClr = bullTrend ? color.green : bearTrend ? color.red : color.gray
+    htfStr   = htfBull ? "BULL" : htfBear ? "BEAR" : "FLAT"
+    htfClr   = htfBull ? color.green : htfBear ? color.red : color.gray
+    stStr    = stBull ? "BULL" : "BEAR"
+    stClr    = stBull ? color.green : color.red
+    macdStr  = hist > 0 ? "BULL" : "BEAR"
+    macdClr  = hist > 0 ? color.green : color.red
+    adxStr   = str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " --")
+    adxClr   = adxOK ? color.green : color.orange
+    posStr   = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    posClr   = inLong ? color.green : inShort ? color.red : color.gray
+    regClr   = isHighVol ? color.orange : isLowVol ? color.gray : color.green
+
+    sqzStr = sqzOn ? "SQUEEZE" : "OPEN"
+    sqzClr = sqzOn ? color.orange : color.green
+
+    f_row(infoTbl, 0,  "Instrument",  instStr, instClr)
+    f_row(infoTbl, 1,  "Trend",       trendStr, trendClr)
+    f_row(infoTbl, 2,  "HTF Trend",   htfStr, htfClr)
+    f_row(infoTbl, 3,  "Supertrend",  stStr, stClr)
+    f_row(infoTbl, 4,  "MACD",        macdStr, macdClr)
+    f_row(infoTbl, 5,  "ADX",         adxStr, adxClr)
+    f_row(infoTbl, 6,  "RSI",         str.tostring(rsi, "#.0"), color.white)
+    f_row(infoTbl, 7,  "Vol Regime",  regimeStr, regClr)
+    f_row(infoTbl, 8,  "BB Squeeze",  sqzStr, sqzClr)
+    f_row(infoTbl, 9,  "Position",    posStr, posClr)
+    f_row(infoTbl, 10, "Entry Type",  inLong or inShort ? lastTrigger : "—", color.yellow)
+    f_row(infoTbl, 11, "TP1 Hit",     inLong or inShort ? (tp1Hit ? "YES" : "NO") : "—", tp1Hit ? color.green : color.orange)
+    f_row(infoTbl, 12, "TP2 Hit",     inLong or inShort ? (tp2Hit ? "YES" : "NO") : "—", tp2Hit ? color.green : color.orange)
+    f_row(infoTbl, 13, "TP3 Hit",     inLong or inShort ? (tp3Hit ? "YES" : "NO") : "—", tp3Hit ? color.green : color.orange)
+    f_row(infoTbl, 14, "Bars in Trade", inLong or inShort ? str.tostring(barsInTrade) : "—", color.white)
+    f_row(infoTbl, 15, "Win Rate",    str.tostring(winRate, "#.1") + "%", winRate >= 50 ? color.green : color.red)
+    f_row(infoTbl, 16, "W / L",       str.tostring(totalWins) + " / " + str.tostring(totalLosses), color.white)
+    f_row(infoTbl, 17, "Max DD",      str.tostring(maxDD, "#.1") + "%", maxDD < 10 ? color.green : maxDD < 20 ? color.orange : color.red)
