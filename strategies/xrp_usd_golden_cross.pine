@@ -1,9 +1,8 @@
-// XRP Market Cap Golden Cross Strategy — Tuned for XRP volatility
-// RULE: Only BUY in uptrend, Only SELL (short) in downtrend
+// XRP Trend EMA Color Flip Strategy
+// BUY when Trend EMA turns BLUE (rising), SELL when it turns RED (falling)
 // Designed for CRYPTOCAP:XRP on 1H timeframe
-// Uses faster EMAs (10/30) instead of slow SMAs (50/200) — XRP moves fast
 //@version=6
-strategy("XRP Golden Cross — Adapted", shorttitle="XRP_Golden_Cross",
+strategy("XRP Trend Flip", shorttitle="XRP_TrendFlip",
      overlay=true, initial_capital=10000,
      default_qty_type=strategy.percent_of_equity, default_qty_value=100,
      commission_type=strategy.commission.percent, commission_value=0.1,
@@ -12,209 +11,108 @@ strategy("XRP Golden Cross — Adapted", shorttitle="XRP_Golden_Cross",
 // ═══════════════════════════════════════════════════════════════
 // INPUTS
 // ═══════════════════════════════════════════════════════════════
-
-// Moving Averages — faster defaults for XRP's high volatility
-fastLen     = input.int(10,  "Fast EMA Length", minval=3,  group="Moving Averages",
-     tooltip="XRP default: 10. Responds quickly to XRP's sharp moves")
-slowLen     = input.int(30,  "Slow EMA Length", minval=10, group="Moving Averages",
-     tooltip="XRP default: 30. Defines the trend direction")
-trendLen    = input.int(100, "Trend EMA Length", minval=50, group="Moving Averages",
-     tooltip="XRP default: 100. Big-picture filter — replaces the 200 SMA")
-
-// Trend Confirmation
-adxLen      = input.int(14,  "ADX Length", group="Trend Filter")
-adxMin      = input.float(18.0, "ADX Minimum", step=1, group="Trend Filter",
-     tooltip="Lower than stock defaults — XRP trends can start weak then accelerate")
-requireAdx  = input.bool(true, "Require ADX filter", group="Trend Filter")
-
-// RSI filter — avoid buying tops / selling bottoms
-rsiLen      = input.int(14,  "RSI Length", group="RSI Filter")
-rsiBuyMax   = input.float(65.0, "RSI Max for Buy", step=5, group="RSI Filter",
-     tooltip="Don't buy when already overbought")
-rsiSellMin  = input.float(35.0, "RSI Min for Sell", step=5, group="RSI Filter",
-     tooltip="Don't short when already oversold")
-useRsi      = input.bool(true, "Use RSI Filter", group="RSI Filter")
+trendLen = input.int(100, "Trend EMA Length", minval=20, group="Settings",
+     tooltip="The big line — blue = buy, red = sell")
+fastLen  = input.int(10,  "Fast EMA Length",  minval=3,  group="Settings")
+slowLen  = input.int(30,  "Slow EMA Length",  minval=10, group="Settings")
 
 // Risk Management
-atrLen      = input.int(14,  "ATR Length", group="Risk Management")
-slMult      = input.float(2.0, "Stop Loss ATR×", step=0.25, group="Risk Management",
-     tooltip="Tighter stop for XRP — it reverses hard")
-tpMult      = input.float(4.0, "Take Profit ATR×", step=0.25, group="Risk Management")
-useTrail    = input.bool(true, "Use Trailing Stop", group="Risk Management")
-trailMult   = input.float(1.5, "Trail ATR×", step=0.25, group="Risk Management",
-     tooltip="Tight trail locks in XRP's explosive moves")
-
-// Cooldown — prevent overtrading in XRP's chop zones
-cooldownBars = input.int(10, "Bars Between Trades", minval=1, group="Risk Management",
-     tooltip="XRP whipsaws — wait N bars after exit before re-entering")
-
-// Display
-showFastMA  = input.bool(true,  "Show Fast EMA", group="Display")
-showSlowMA  = input.bool(true,  "Show Slow EMA", group="Display")
-showTrendMA = input.bool(true,  "Show Trend EMA", group="Display")
-showBarCol  = input.bool(true,  "Color Bars by Trend", group="Display")
+atrLen   = input.int(14,   "ATR Length", group="Risk Management")
+slMult   = input.float(2.0, "Stop Loss ATR x", step=0.25, group="Risk Management")
+tpMult   = input.float(4.0, "Take Profit ATR x", step=0.25, group="Risk Management")
+useTrail = input.bool(true, "Use Trailing Stop", group="Risk Management")
+trailMult = input.float(1.5, "Trail ATR x", step=0.25, group="Risk Management")
 
 // ═══════════════════════════════════════════════════════════════
 // CALCULATIONS
 // ═══════════════════════════════════════════════════════════════
-
-// All EMAs — SMA is too slow for XRP
 maFast  = ta.ema(close, fastLen)
 maSlow  = ta.ema(close, slowLen)
 maTrend = ta.ema(close, trendLen)
+atr     = ta.atr(atrLen)
 
-// ATR for stops
-atr = ta.atr(atrLen)
+// Trend EMA direction — this IS the signal
+trendRising  = ta.change(maTrend) > 0   // line is BLUE
+trendFalling = ta.change(maTrend) <= 0  // line is RED
 
-// ADX for trend strength
-[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
-
-// RSI
-rsi = ta.rsi(close, rsiLen)
-
-// ═══════════════════════════════════════════════════════════════
-// TREND DETECTION — adapted for XRP
-// ═══════════════════════════════════════════════════════════════
-
-// Golden Cross = fast EMA crosses above slow EMA
-// Death Cross  = fast EMA crosses below slow EMA
-goldenCross = ta.crossover(maFast, maSlow)
-deathCross  = ta.crossunder(maFast, maSlow)
-
-// Trend state — requires alignment with the big trend EMA
-isUptrend   = maFast > maSlow and maSlow > maTrend
-isDowntrend = maFast < maSlow and maSlow < maTrend
-isMixed     = not isUptrend and not isDowntrend
-
-// ADX confirms trend is strong enough to trade
-trendStrong = requireAdx ? adx > adxMin : true
-
-// RSI filter
-rsiBuyOK  = useRsi ? rsi < rsiBuyMax  : true
-rsiSellOK = useRsi ? rsi > rsiSellMin : true
-
-// Cooldown tracking
-var int lastExitBar = 0
-if strategy.position_size[1] != 0 and strategy.position_size == 0
-    lastExitBar := bar_index
-cooldownOK = (bar_index - lastExitBar) >= cooldownBars
+// Color flip detection — the exact bar the line changes color
+turnedBlue = trendRising and not trendRising[1]   // was red, now blue → BUY
+turnedRed  = trendFalling and not trendFalling[1]  // was blue, now red → SELL
 
 // ═══════════════════════════════════════════════════════════════
-// STRATEGY LOGIC — STRICT TREND FOLLOWING
+// STRATEGY — dead simple
 // ═══════════════════════════════════════════════════════════════
 
-// LONG: golden cross + all EMAs stacked bullish + ADX + RSI not overbought + cooldown
-longEntry = goldenCross and isUptrend and trendStrong and rsiBuyOK and cooldownOK and strategy.position_size <= 0
-
-// SHORT: death cross + all EMAs stacked bearish + ADX + RSI not oversold + cooldown
-shortEntry = deathCross and isDowntrend and trendStrong and rsiSellOK and cooldownOK and strategy.position_size >= 0
-
-// ── ENTRIES ──
-if longEntry
+// BUY when line turns blue
+if turnedBlue
     if strategy.position_size < 0
         strategy.close("Short", comment="Flip Long")
     strategy.entry("Long", strategy.long)
-    sl = close - atr * slMult
-    tp = close + atr * tpMult
-    strategy.exit("L Exit", "Long", stop=sl, limit=tp,
+    strategy.exit("L Exit", "Long",
+         stop=close - atr * slMult,
+         limit=close + atr * tpMult,
          trail_points=useTrail ? atr * trailMult / syminfo.mintick : na,
          trail_offset=useTrail ? atr * trailMult * 0.4 / syminfo.mintick : na)
 
-if shortEntry
+// SELL when line turns red
+if turnedRed
     if strategy.position_size > 0
         strategy.close("Long", comment="Flip Short")
     strategy.entry("Short", strategy.short)
-    sl = close + atr * slMult
-    tp = close - atr * tpMult
-    strategy.exit("S Exit", "Short", stop=sl, limit=tp,
+    strategy.exit("S Exit", "Short",
+         stop=close + atr * slMult,
+         limit=close - atr * tpMult,
          trail_points=useTrail ? atr * trailMult / syminfo.mintick : na,
          trail_offset=useTrail ? atr * trailMult * 0.4 / syminfo.mintick : na)
-
-// ── SAFETY EXITS — get out when trend structure breaks ──
-// Close long if death cross OR price drops below trend EMA
-if strategy.position_size > 0 and (deathCross or close < maTrend)
-    strategy.close("Long", comment="Trend Break")
-
-// Close short if golden cross OR price rises above trend EMA
-if strategy.position_size < 0 and (goldenCross or close > maTrend)
-    strategy.close("Short", comment="Trend Break")
-
-// ── CHOP ZONE EXIT — close everything if EMAs are tangled ──
-if strategy.position_size != 0 and isMixed and adx < adxMin * 0.75
-    strategy.close_all(comment="Chop Zone")
 
 // ═══════════════════════════════════════════════════════════════
 // PLOTS
 // ═══════════════════════════════════════════════════════════════
-
-// EMAs with trend color
 fastColor  = ta.change(maFast) > 0  ? color.new(#00e676, 0) : color.new(#ff5252, 0)
 slowColor  = ta.change(maSlow) > 0  ? color.new(#ffeb3b, 0) : color.new(#ff9800, 0)
-trendColor = ta.change(maTrend) > 0 ? color.new(#2196f3, 0) : color.new(#e91e63, 0)
+trendColor = trendRising ? color.new(#2196f3, 0) : color.new(#e91e63, 0)
 
-plot(showFastMA  ? maFast  : na, "Fast EMA (10)",  fastColor,  2)
-plot(showSlowMA  ? maSlow  : na, "Slow EMA (30)",  slowColor,  2)
-plot(showTrendMA ? maTrend : na, "Trend EMA (100)", trendColor, 3)
+plot(maFast,  "Fast EMA (10)",   fastColor,  2)
+plot(maSlow,  "Slow EMA (30)",   slowColor,  2)
+plot(maTrend, "Trend EMA (100)", trendColor, 3)
 
-// Bar coloring — green=bullish, red=bearish, blue=chop
-barTrendColor = isUptrend and close > maFast ? color.new(#00e676, 0) :
-     isDowntrend and close < maFast ? color.new(#ff5252, 0) :
-     color.new(#2196f3, 0)
-barcolor(showBarCol ? barTrendColor : na)
+// Bar coloring — green when holding long, red when short
+barcolor(strategy.position_size > 0 ? color.new(#00e676, 0) :
+     strategy.position_size < 0 ? color.new(#ff5252, 0) :
+     color.new(#2196f3, 0))
 
-// Trend background
-bgcolor(isUptrend ? color.new(#00e676, 95) : isDowntrend ? color.new(#ff5252, 95) : na, title="Trend BG")
+// Background — blue zone = long, red zone = short
+bgcolor(trendRising ? color.new(#2196f3, 95) : color.new(#e91e63, 95), title="Trend BG")
 
-// Cross signals — only show when they trigger actual entries
-plotshape(longEntry,  "BUY",  shape.triangleup,   location.belowbar,
-     color.new(#00e676, 0), size=size.normal, text="BUY")
-plotshape(shortEntry, "SELL", shape.triangledown,  location.abovebar,
-     color.new(#ff5252, 0), size=size.normal, text="SELL")
+// Entry signals
+plotshape(turnedBlue, "BUY",  shape.triangleup,   location.belowbar,
+     color.new(#2196f3, 0), size=size.normal, text="BUY")
+plotshape(turnedRed,  "SELL", shape.triangledown,  location.abovebar,
+     color.new(#e91e63, 0), size=size.normal, text="SELL")
 
 // ═══════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
-
-var table infoTable = table.new(position.top_right, 2, 7,
+var table infoTable = table.new(position.top_right, 2, 3,
      bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
-    table.cell(infoTable, 0, 0, "TREND", text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 0, 0, "TREND EMA", text_color=color.yellow, text_size=size.small)
     table.cell(infoTable, 1, 0,
-         isUptrend ? "UP — LONGS ONLY" : isDowntrend ? "DOWN — SHORTS ONLY" : "CHOP — NO TRADES",
-         text_color=isUptrend ? #00e676 : isDowntrend ? #ff5252 : color.gray,
-         text_size=size.small)
+         trendRising ? "BLUE — LONG" : "RED — SHORT",
+         text_color=trendRising ? #2196f3 : #e91e63, text_size=size.small)
 
-    table.cell(infoTable, 0, 1, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 1, "POSITION", text_color=color.gray, text_size=size.small)
     table.cell(infoTable, 1, 1,
-         str.tostring(adx, "#.0") + (trendStrong ? " OK" : " WEAK"),
-         text_color=trendStrong ? #00e676 : #ff5252, text_size=size.small)
-
-    table.cell(infoTable, 0, 2, "RSI", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 2, str.tostring(rsi, "#.0"),
-         text_color=rsi > 70 ? #ff5252 : rsi < 30 ? #00e676 : color.white, text_size=size.small)
-
-    table.cell(infoTable, 0, 3, "EMA Stack", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 3,
-         isUptrend ? "F>S>T Bullish" : isDowntrend ? "F<S<T Bearish" : "Mixed — Flat",
-         text_color=isUptrend ? #00e676 : isDowntrend ? #ff5252 : color.gray, text_size=size.small)
-
-    table.cell(infoTable, 0, 4, "POSITION", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 4,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? #00e676 : strategy.position_size < 0 ? #ff5252 : color.gray,
          text_size=size.small)
 
-    table.cell(infoTable, 0, 5, "Cooldown", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 5,
-         cooldownOK ? "READY" : str.tostring(cooldownBars - (bar_index - lastExitBar)) + " bars",
-         text_color=cooldownOK ? #00e676 : #ffeb3b, text_size=size.small)
-
-    table.cell(infoTable, 0, 6, "Pair", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 6, "XRP / Market Cap", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 2, "SIGNAL", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, "Trend EMA Color Flip", text_color=color.white, text_size=size.small)
 
 // ═══════════════════════════════════════════════════════════════
 // ALERTS
 // ═══════════════════════════════════════════════════════════════
-alertcondition(longEntry,  title="XRP Buy Signal",  message="XRP Golden Cross — Go Long")
-alertcondition(shortEntry, title="XRP Sell Signal", message="XRP Death Cross — Go Short")
+alertcondition(turnedBlue, title="XRP Buy — Blue", message="Trend EMA turned BLUE — Go Long")
+alertcondition(turnedRed,  title="XRP Sell — Red",  message="Trend EMA turned RED — Go Short")
