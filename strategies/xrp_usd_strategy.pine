@@ -1,6 +1,6 @@
 // This Pine Script™ strategy is designed for XRP/USD short-only trading
-// Combines EMA trend filter, RSI mean-reversion, and VWAP for short entries
-// Timeframe: 1H (optimized), works on 15m-4H
+// Combines EMA trend filter, RSI mean-reversion, and optional VWAP for short entries
+// Works on market cap charts and price charts — Timeframe: 1H (optimized), works on 15m-4H
 //@version=6
 strategy("XRP/USD Short Only", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
 
@@ -8,24 +8,26 @@ strategy("XRP/USD Short Only", overlay=true, default_qty_type=strategy.percent_o
 // INPUTS
 // ──────────────────────────────────────────────
 // Trend Filter
-fastEmaLen    = input.int(21,   "Fast EMA Length",     minval=5)
-slowEmaLen    = input.int(55,   "Slow EMA Length",     minval=10)
+fastEmaLen    = input.int(9,    "Fast EMA Length",     minval=5)
+slowEmaLen    = input.int(21,   "Slow EMA Length",     minval=10)
 
 // RSI
 rsiLen        = input.int(14,   "RSI Length",          minval=2)
-rsiOverbought = input.float(65, "RSI Overbought",      minval=50, maxval=90)
+rsiOverbought = input.float(55, "RSI Overbought",      minval=40, maxval=90)
 
 // ATR for stops & targets
 atrLen        = input.int(14,   "ATR Length",          minval=5)
-atrStopMult   = input.float(1.5,"ATR Stop Multiplier", minval=0.5, step=0.1)
-atrTpMult     = input.float(2.5,"ATR TP Multiplier",   minval=1.0, step=0.1)
+atrStopMult   = input.float(2.0,"ATR Stop Multiplier", minval=0.5, step=0.1)
+atrTpMult     = input.float(3.0,"ATR TP Multiplier",   minval=1.0, step=0.1)
 
-// Volume filter
+// Optional filters
+useVwap       = input.bool(false,"Use VWAP Filter",    tooltip="Turn off for market cap charts that lack volume data")
+useVolFilter  = input.bool(false,"Use Volume Filter",   tooltip="Turn off for market cap charts that lack volume data")
 volLen        = input.int(20,   "Volume MA Length",    minval=5)
 volMult       = input.float(1.0,"Volume Threshold",    minval=0.5, step=0.1)
 
 // Session filter (UTC hours)
-useSession    = input.bool(true, "Use Session Filter")
+useSession    = input.bool(false,"Use Session Filter")
 sessionStart  = input.int(8,    "Session Start (UTC)", minval=0, maxval=23)
 sessionEnd    = input.int(22,   "Session End (UTC)",   minval=0, maxval=23)
 
@@ -36,14 +38,17 @@ fastEma = ta.ema(close, fastEmaLen)
 slowEma = ta.ema(close, slowEmaLen)
 rsi     = ta.rsi(close, rsiLen)
 atr     = ta.atr(atrLen)
-volMa   = ta.sma(volume, volLen)
-vwap    = ta.vwap(hlc3)
 
 // Trend direction
 bearTrend = fastEma < slowEma
 
-// Volume confirmation
-volOk = volume > volMa * volMult
+// Optional VWAP — safely handle charts with no volume
+vwap    = ta.vwap(hlc3)
+vwapOk  = useVwap ? (not na(vwap) and close >= vwap * 0.995) : true
+
+// Optional volume confirmation
+volMa   = ta.sma(volume, volLen)
+volOk   = useVolFilter ? (volume > volMa * volMult) : true
 
 // Session filter
 hourNow   = hour(time, "UTC")
@@ -53,8 +58,8 @@ inSession = useSession ? (hourNow >= sessionStart and hourNow < sessionEnd) : tr
 // ENTRY CONDITIONS
 // ──────────────────────────────────────────────
 
-// SHORT: downtrend + RSI overbought + price near/above VWAP + volume
-shortCond = bearTrend and rsi > rsiOverbought and close >= vwap * 0.995 and volOk and inSession
+// SHORT: downtrend + RSI overbought + optional VWAP/volume/session
+shortCond = bearTrend and rsi > rsiOverbought and vwapOk and volOk and inSession
 
 // ──────────────────────────────────────────────
 // ENTRIES & EXITS
@@ -74,7 +79,7 @@ if strategy.position_size < 0 and not bearTrend
 // ──────────────────────────────────────────────
 plot(fastEma, "Fast EMA", color=color.new(color.teal, 0), linewidth=2)
 plot(slowEma, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
-plot(vwap,    "VWAP",     color=color.new(color.purple, 40), style=plot.style_stepline)
+plot(useVwap and not na(vwap) ? vwap : na, "VWAP", color=color.new(color.purple, 40), style=plot.style_stepline)
 
 // Background color for trend
 bgcolor(bearTrend ? color.new(color.red, 93) : na)
