@@ -1,0 +1,178 @@
+// Golden Cross / Death Cross Strategy for XRP/USD
+// Based on ChartArt's Golden Cross concept, upgraded to v6
+// RULE: Only BUY in uptrend (golden cross), Only SELL in downtrend (death cross)
+// Optimized for crypto pairs on 1H timeframe
+//@version=6
+strategy("XRP/USD Golden Cross — Trend Only", shorttitle="XRP_Golden_Cross",
+     overlay=true, initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.1,
+     slippage=3, pyramiding=0)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Moving Averages
+fastLen     = input.int(50,  "Fast SMA Length", minval=10, group="Moving Averages")
+slowLen     = input.int(200, "Slow SMA Length", minval=50, group="Moving Averages")
+useEma      = input.bool(false, "Use EMA instead of SMA", group="Moving Averages",
+     tooltip="EMA reacts faster to price changes — better for volatile crypto")
+
+// Trend Confirmation
+adxLen      = input.int(14,  "ADX Length", group="Trend Filter")
+adxMin      = input.float(20.0, "ADX Minimum (trend strength)", step=1, group="Trend Filter",
+     tooltip="Higher = only trade in strong trends. 20-25 recommended")
+requireAdx  = input.bool(true, "Require ADX filter", group="Trend Filter")
+
+// Risk Management
+useStopLoss = input.bool(true, "Use ATR Stop Loss", group="Risk Management")
+atrLen      = input.int(14,  "ATR Length", group="Risk Management")
+slMult      = input.float(2.5, "Stop Loss ATR×", step=0.25, group="Risk Management")
+tpMult      = input.float(5.0, "Take Profit ATR×", step=0.25, group="Risk Management")
+useTrail    = input.bool(true, "Use Trailing Stop", group="Risk Management")
+trailMult   = input.float(2.0, "Trail ATR×", step=0.25, group="Risk Management")
+
+// Display
+showFastMA  = input.bool(true,  "Show Fast MA", group="Display")
+showSlowMA  = input.bool(true,  "Show Slow MA", group="Display")
+showBarCol  = input.bool(true,  "Color Bars by Trend", group="Display")
+
+// ═══════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Moving Averages — SMA or EMA based on user choice
+maFast = useEma ? ta.ema(close, fastLen) : ta.sma(close, fastLen)
+maSlow = useEma ? ta.ema(close, slowLen) : ta.sma(close, slowLen)
+
+// ATR for stops
+atr = ta.atr(atrLen)
+
+// ADX for trend strength
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+
+// ═══════════════════════════════════════════════════════════════
+// TREND DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+// Golden Cross = fast MA crosses above slow MA → uptrend begins
+// Death Cross  = fast MA crosses below slow MA → downtrend begins
+goldenCross = ta.crossover(maFast, maSlow)
+deathCross  = ta.crossunder(maFast, maSlow)
+
+// Sustained trend state
+isUptrend   = maFast > maSlow
+isDowntrend = maFast < maSlow
+
+// ADX confirms trend is strong enough to trade
+trendStrong = requireAdx ? adx > adxMin : true
+
+// ═══════════════════════════════════════════════════════════════
+// STRATEGY LOGIC
+// ═══════════════════════════════════════════════════════════════
+
+// LONG ENTRY: Golden Cross + trend is strong
+// Only buy when uptrend is confirmed
+longEntry = goldenCross and trendStrong
+
+// SHORT ENTRY: Death Cross + trend is strong
+// Only sell when downtrend is confirmed
+shortEntry = deathCross and trendStrong
+
+// ── ENTRIES ──
+if longEntry
+    // Close any existing short first
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Flip Long")
+    strategy.entry("Long", strategy.long)
+    if useStopLoss
+        sl = close - atr * slMult
+        tp = close + atr * tpMult
+        strategy.exit("L Exit", "Long", stop=sl, limit=tp,
+             trail_points=useTrail ? atr * trailMult / syminfo.mintick : na,
+             trail_offset=useTrail ? atr * trailMult * 0.4 / syminfo.mintick : na)
+
+if shortEntry
+    // Close any existing long first
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Flip Short")
+    strategy.entry("Short", strategy.short)
+    if useStopLoss
+        sl = close + atr * slMult
+        tp = close - atr * tpMult
+        strategy.exit("S Exit", "Short", stop=sl, limit=tp,
+             trail_points=useTrail ? atr * trailMult / syminfo.mintick : na,
+             trail_offset=useTrail ? atr * trailMult * 0.4 / syminfo.mintick : na)
+
+// ── SAFETY EXITS ──
+// Close long if trend flips to downtrend (don't hold longs in downtrend)
+if strategy.position_size > 0 and deathCross
+    strategy.close("Long", comment="Death Cross")
+
+// Close short if trend flips to uptrend (don't hold shorts in uptrend)
+if strategy.position_size < 0 and goldenCross
+    strategy.close("Short", comment="Golden Cross")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+// Moving Averages with trend color
+fastColor = ta.change(maFast) > 0 ? color.new(#00e676, 0) : color.new(#ff5252, 0)
+slowColor = ta.change(maSlow) > 0 ? color.new(#00e676, 0) : color.new(#ff5252, 0)
+
+plot(showFastMA ? maFast : na, "Fast MA", fastColor, 2)
+plot(showSlowMA ? maSlow : na, "Slow MA", slowColor, 3)
+
+// Bar coloring
+barTrendColor = isUptrend and close > maFast ? color.new(#00e676, 0) :
+     isDowntrend and close < maFast ? color.new(#ff5252, 0) :
+     color.new(#2196f3, 0)
+barcolor(showBarCol ? barTrendColor : na)
+
+// Trend background
+bgcolor(isUptrend ? color.new(#00e676, 95) : isDowntrend ? color.new(#ff5252, 95) : na, title="Trend BG")
+
+// Cross signals
+plotshape(goldenCross, "Golden Cross", shape.triangleup, location.belowbar,
+     color.new(#00e676, 0), size=size.normal, text="BUY")
+plotshape(deathCross, "Death Cross", shape.triangledown, location.abovebar,
+     color.new(#ff5252, 0), size=size.normal, text="SELL")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 5,
+     bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "TREND", text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 1, 0,
+         isUptrend ? "UPTREND — LONGS" : isDowntrend ? "DOWNTREND — SHORTS" : "NEUTRAL",
+         text_color=isUptrend ? #00e676 : isDowntrend ? #ff5252 : color.gray,
+         text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 1,
+         str.tostring(adx, "#.0") + (trendStrong ? " OK" : " WEAK"),
+         text_color=trendStrong ? #00e676 : #ff5252, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "FAST MA", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(maFast, "#.####"), text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "SLOW MA", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(maSlow, "#.####"), text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 4,
+         strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? #00e676 : strategy.position_size < 0 ? #ff5252 : color.gray,
+         text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(goldenCross, title="Golden Cross (Buy)", message="XRP/USD Golden Cross — Go Long")
+alertcondition(deathCross, title="Death Cross (Sell)", message="XRP/USD Death Cross — Go Short")
