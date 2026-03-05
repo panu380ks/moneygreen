@@ -71,6 +71,12 @@ coolBars      = input.int(8, "Cooldown Bars After Loss")
 useRejection  = input.bool(true, "Require Bearish Candle",
      tooltip="Need engulfing, pin bar, or strong bearish close to enter")
 
+// Supertrend Filter — only SHORT when Supertrend is RED
+useSupertrend = input.bool(true, "Supertrend Filter", group="Supertrend",
+     tooltip="Only SHORT when Supertrend is RED (downtrend)")
+stATRLen      = input.int(10,    "Supertrend ATR Length", minval=1, group="Supertrend")
+stFactor      = input.float(3.0, "Supertrend Factor", minval=0.01, step=0.01, group="Supertrend")
+
 // ──────────────────────────────────────────────
 // CALCULATIONS
 // ──────────────────────────────────────────────
@@ -82,6 +88,11 @@ atr     = ta.atr(atrLen)
 
 // Trend direction
 bearTrend = fastEma < slowEma
+
+// Supertrend
+[supertrend, stDirection] = ta.supertrend(stFactor, stATRLen)
+stRed   = stDirection > 0   // downtrend = red = allow shorts
+stOK    = not useSupertrend or stRed
 
 // 200 EMA gate
 trendGate = not use200Gate or close < ema200
@@ -137,7 +148,7 @@ cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
 // ENTRY CONDITIONS
 // ──────────────────────────────────────────────
 
-shortCond = bearTrend and trendGate and rsiRecentOB and pullbackOK and
+shortCond = bearTrend and trendGate and stOK and rsiRecentOB and pullbackOK and
      rejectionOK and adxOK and macdOK and vwapOk and volOk and
      inSession and cooldownOK
 
@@ -172,6 +183,11 @@ plot(slowEma, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
 plot(use200Gate ? ema200 : na, "200 EMA", color=color.new(color.white, 30), linewidth=2)
 plot(useVwap and not na(vwap) ? vwap : na, "VWAP", color=color.new(color.purple, 40), style=plot.style_stepline)
 
+// Supertrend plot
+stPlotVal = barstate.isfirst ? na : supertrend
+plot(useSupertrend and not stRed ? stPlotVal : na, "ST Up",   color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(useSupertrend and stRed     ? stPlotVal : na, "ST Down", color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=2)
+
 // Background
 bgcolor(bearTrend and trendGate ? color.new(color.red, 93) : na, title="Bear Zone")
 bgcolor(not cooldownOK ? color.new(color.orange, 88) : na, title="Cooldown")
@@ -183,29 +199,33 @@ plotshape(shortCond and strategy.position_size == 0, "Short Signal",
 // ──────────────────────────────────────────────
 // INFO TABLE
 // ──────────────────────────────────────────────
-var table t = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
     table.cell(t, 0, 0, "STRATEGY", text_color=color.yellow, text_size=size.small)
     table.cell(t, 1, 0, "XRP SHORT v2", text_color=color.yellow, text_size=size.small)
 
-    table.cell(t, 0, 1, "TREND", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 1, bearTrend ? "BEAR" : "BULL", text_color=bearTrend ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 1, "SUPERTREND", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 1, stRed ? "RED — SHORTS OK" : "GREEN — NO SHORTS",
+         text_color=stRed ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 2, "200 EMA", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 2, close < ema200 ? "BELOW (OK)" : "ABOVE", text_color=close < ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "TREND", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 2, bearTrend ? "BEAR" : "BULL", text_color=bearTrend ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 3, "RSI", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 3, str.tostring(rsi, "#.0") + (rsiRecentOB ? " OB" : ""), text_color=rsiRecentOB ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 3, "200 EMA", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 3, close < ema200 ? "BELOW (OK)" : "ABOVE", text_color=close < ema200 ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 4, "ADX", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 4, str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " WEAK"), text_color=adxOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(rsi, "#.0") + (rsiRecentOB ? " OB" : ""), text_color=rsiRecentOB ? color.green : color.gray, text_size=size.small)
 
-    table.cell(t, 0, 5, "MACD", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 5, histLine < 0 ? "BEAR" : "BULL", text_color=histLine < 0 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " WEAK"), text_color=adxOK ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 6, "POSITION", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 6,
+    table.cell(t, 0, 6, "MACD", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 6, histLine < 0 ? "BEAR" : "BULL", text_color=histLine < 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 7, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 7,
          strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size < 0 ? #ff5252 : color.gray, text_size=size.small)
 

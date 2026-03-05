@@ -33,6 +33,12 @@ rsiOS      = input.float(28, "RSI Oversold", group="Filters")
 useEMAAlign = input.bool(true, "Require EMA Alignment", group="Filters",
      tooltip="Fast EMA must be above Slow for longs, below for shorts")
 
+// Supertrend Filter — GREEN = allow longs, RED = allow shorts
+useSupertrend = input.bool(true, "Supertrend Filter", group="Supertrend",
+     tooltip="Only BUY when Supertrend is GREEN, only SELL when Supertrend is RED")
+stATRLen   = input.int(10,    "Supertrend ATR Length", minval=1, group="Supertrend")
+stFactor   = input.float(3.0, "Supertrend Factor", minval=0.01, step=0.01, group="Supertrend")
+
 // Risk Management
 atrLen     = input.int(14,   "ATR Length", group="Risk Management")
 slMult     = input.float(2.5, "Stop Loss ATR x", step=0.25, group="Risk Management")
@@ -57,6 +63,11 @@ atr     = ta.atr(atrLen)
 // ADX
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 adxOK = not useADX or adxVal >= adxMin
+
+// Supertrend
+[supertrend, stDirection] = ta.supertrend(stFactor, stATRLen)
+stGreen = stDirection < 0   // uptrend = green = allow longs
+stRed   = stDirection > 0   // downtrend = red = allow shorts
 
 // RSI
 rsiVal = ta.rsi(close, rsiLen)
@@ -109,8 +120,12 @@ canTrade = adxOK and ddOK and cooldownOK
 // STRATEGY — confirmed flips only
 // ═══════════════════════════════════════════════════════════════
 
-// BUY: confirmed blue flip + momentum alignment
-longEntry = confirmedBlue and emaAlignLong and rsiOKLong and canTrade
+// Supertrend gate
+stOKLong  = not useSupertrend or stGreen
+stOKShort = not useSupertrend or stRed
+
+// BUY: confirmed blue flip + momentum alignment + Supertrend GREEN
+longEntry = confirmedBlue and emaAlignLong and rsiOKLong and stOKLong and canTrade
 if longEntry
     if strategy.position_size < 0
         strategy.close("Short", comment="Flip Long")
@@ -121,8 +136,8 @@ if longEntry
          trail_points=useTrail ? atr * trailMult / syminfo.mintick : na,
          trail_offset=useTrail ? atr * trailMult * 0.4 / syminfo.mintick : na)
 
-// SELL: confirmed red flip + momentum alignment
-shortEntry = confirmedRed and emaAlignShort and rsiOKShort and canTrade
+// SELL: confirmed red flip + momentum alignment + Supertrend RED
+shortEntry = confirmedRed and emaAlignShort and rsiOKShort and stOKShort and canTrade
 if shortEntry
     if strategy.position_size > 0
         strategy.close("Long", comment="Flip Short")
@@ -150,6 +165,11 @@ plot(maFast,  "Fast EMA",  fastColor,  2)
 plot(maSlow,  "Slow EMA",  slowColor,  2)
 plot(maTrend, "Trend EMA", trendColor, 3)
 
+// Supertrend plot
+stPlotVal = barstate.isfirst ? na : supertrend
+plot(useSupertrend and stGreen ? stPlotVal : na, "ST Up",   color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(useSupertrend and stRed   ? stPlotVal : na, "ST Down", color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=2)
+
 // Bar coloring
 barcolor(strategy.position_size > 0 ? color.new(#00e676, 0) :
      strategy.position_size < 0 ? color.new(#ff5252, 0) :
@@ -168,7 +188,7 @@ plotshape(shortEntry, "SELL", shape.triangledown,  location.abovebar,
 // ═══════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
-var table infoTable = table.new(position.top_right, 2, 6,
+var table infoTable = table.new(position.top_right, 2, 7,
      bgcolor=color.new(color.black, 80), border_width=1)
 
 if barstate.islast
@@ -177,27 +197,32 @@ if barstate.islast
          holdingBlue ? "BLUE — LONG" : holdingRed ? "RED — SHORT" : "UNCONFIRMED",
          text_color=holdingBlue ? #2196f3 : holdingRed ? #e91e63 : color.gray, text_size=size.small)
 
-    table.cell(infoTable, 0, 1, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 0, 1, "SUPERTREND", text_color=color.gray, text_size=size.small)
     table.cell(infoTable, 1, 1,
+         stGreen ? "GREEN — LONGS OK" : "RED — SHORTS OK",
+         text_color=stGreen ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2,
          str.tostring(adxVal, "#.0") + (adxOK ? " TREND" : " RANGE"),
          text_color=adxOK ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoTable, 0, 2, "RSI", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 2, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 3, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
 
-    table.cell(infoTable, 0, 3, "POSITION", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 3,
+    table.cell(infoTable, 0, 4, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 4,
          strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? #00e676 : strategy.position_size < 0 ? #ff5252 : color.gray,
          text_size=size.small)
 
-    table.cell(infoTable, 0, 4, "DRAWDOWN", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 4,
+    table.cell(infoTable, 0, 5, "DRAWDOWN", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 5,
          str.tostring(drawdown, "#.#") + "%",
          text_color=ddOK ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoTable, 0, 5, "COOLDOWN", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 5,
+    table.cell(infoTable, 0, 6, "COOLDOWN", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 6,
          cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars",
          text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
 
