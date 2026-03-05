@@ -1,0 +1,273 @@
+//@version=6
+strategy("Band Bounce — Buy Green / Sell Red", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.1, slippage=3, pyramiding=0)
+
+// ═══════════════════════════════════════════════════════════════
+// CONCEPT:
+// Price oscillates between upper (red) and lower (green) bands.
+// BUY when price touches/enters the lower green band zone.
+// SELL when price touches/enters the upper red band zone.
+// Uses Bollinger Bands or Keltner Channel as the band engine.
+// ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Band Settings
+bandType    = input.string("Bollinger", "Band Type", options=["Bollinger", "Keltner", "Donchian"], group="Bands")
+bandLen     = input.int(20, "Band Length", minval=5, maxval=200, group="Bands")
+bbMult      = input.float(2.0, "BB StdDev / KC ATR Mult", step=0.1, minval=0.5, maxval=5.0, group="Bands")
+bandWidth   = input.float(0.3, "Band Zone Width (% of band range)", step=0.05, minval=0.05, maxval=0.5, group="Bands", tooltip="How thick the green/red zones are. 0.3 = top/bottom 30% of the channel")
+
+// Entry Settings
+entryType   = input.string("Touch Zone", "Entry Trigger", options=["Touch Zone", "Close Inside Zone", "Wick Into Zone"], group="Entry")
+reqReversal = input.bool(true, "Require Reversal Candle", group="Entry", tooltip="Wait for a bullish candle at green band / bearish candle at red band")
+useRSI      = input.bool(true, "RSI Confirmation", group="Entry")
+rsiLen      = input.int(14, "RSI Length", group="Entry")
+rsiOversold = input.float(35.0, "RSI Oversold (Buy)", step=1, group="Entry")
+rsiOverbought = input.float(65.0, "RSI Overbought (Sell)", step=1, group="Entry")
+
+// Trend Filter
+useTrend    = input.bool(false, "EMA Trend Filter", group="Trend", tooltip="Only buy above EMA / only sell below EMA")
+trendLen    = input.int(200, "Trend EMA Length", group="Trend")
+
+// Risk Management
+slMode      = input.string("Beyond Band", "Stop Loss Mode", options=["Beyond Band", "ATR Based", "Fixed %"], group="Risk")
+slATRMult   = input.float(1.5, "SL ATR Multiplier", step=0.1, group="Risk")
+slFixedPct  = input.float(1.5, "SL Fixed %", step=0.1, group="Risk")
+tpMode      = input.string("Opposite Band", "Take Profit", options=["Opposite Band", "Middle Band", "R:R Ratio"], group="Risk")
+tpRR        = input.float(2.0, "TP R:R Ratio", step=0.5, group="Risk")
+useTrail    = input.bool(true, "Trailing Stop", group="Risk")
+trailPct    = input.float(1.0, "Trail %", step=0.1, group="Risk")
+
+// Position Sizing
+basePos     = input.float(100.0, "Position Size %", minval=10, maxval=100, step=5, group="Size")
+
+// Direction
+direction   = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"], group="Direction")
+
+// ═══════════════════════════════════════════════════════════════
+// BAND CALCULATIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Bollinger Bands
+bbBasis  = ta.sma(close, bandLen)
+bbDev    = ta.stdev(close, bandLen) * bbMult
+bbUpper  = bbBasis + bbDev
+bbLower  = bbBasis - bbDev
+
+// Keltner Channel
+kcBasis  = ta.ema(close, bandLen)
+kcATR    = ta.atr(bandLen)
+kcUpper  = kcBasis + kcATR * bbMult
+kcLower  = kcBasis - kcATR * bbMult
+
+// Donchian Channel
+dcUpper  = ta.highest(high, bandLen)
+dcLower  = ta.lowest(low, bandLen)
+dcBasis  = (dcUpper + dcLower) / 2.0
+
+// Select active band
+upperBand = switch bandType
+    "Bollinger" => bbUpper
+    "Keltner"   => kcUpper
+    "Donchian"  => dcUpper
+    => bbUpper
+
+lowerBand = switch bandType
+    "Bollinger" => bbLower
+    "Keltner"   => kcLower
+    "Donchian"  => dcLower
+    => bbLower
+
+middleBand = switch bandType
+    "Bollinger" => bbBasis
+    "Keltner"   => kcBasis
+    "Donchian"  => dcBasis
+    => bbBasis
+
+// ═══════════════════════════════════════════════════════════════
+// BAND ZONES (the colored regions)
+// ═══════════════════════════════════════════════════════════════
+
+bandRange    = upperBand - lowerBand
+zoneSize     = bandRange * bandWidth
+
+// Green zone (buy zone) = bottom portion of channel
+greenZoneTop = lowerBand + zoneSize
+greenZoneBot = lowerBand
+
+// Red zone (sell zone) = top portion of channel
+redZoneBot   = upperBand - zoneSize
+redZoneTop   = upperBand
+
+// ═══════════════════════════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════════════════════════
+
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(14)
+ema200  = ta.ema(close, trendLen)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Price in green zone (lower band)
+inGreenZone = switch entryType
+    "Touch Zone"       => low <= greenZoneTop
+    "Close Inside Zone" => close <= greenZoneTop and close >= greenZoneBot
+    "Wick Into Zone"   => low <= greenZoneTop and close > greenZoneBot
+    => low <= greenZoneTop
+
+// Price in red zone (upper band)
+inRedZone = switch entryType
+    "Touch Zone"       => high >= redZoneBot
+    "Close Inside Zone" => close >= redZoneBot and close <= redZoneTop
+    "Wick Into Zone"   => high >= redZoneBot and close < redZoneTop
+    => high >= redZoneBot
+
+// Reversal candles
+bullishCandle = close > open and (close - open) > (high - low) * 0.3
+bearishCandle = close < open and (open - close) > (high - low) * 0.3
+
+reversalBuy  = not reqReversal or bullishCandle
+reversalSell = not reqReversal or bearishCandle
+
+// RSI filter
+rsiBuyOK  = not useRSI or rsiVal < rsiOversold or rsiVal[1] < rsiOversold
+rsiSellOK = not useRSI or rsiVal > rsiOverbought or rsiVal[1] > rsiOverbought
+
+// Trend filter
+trendBuyOK  = not useTrend or close > ema200
+trendSellOK = not useTrend or close < ema200
+
+// Direction filter
+canLong  = direction == "Both" or direction == "Long Only"
+canShort = direction == "Both" or direction == "Short Only"
+
+// Final signals
+buySignal  = inGreenZone and reversalBuy and rsiBuyOK and trendBuyOK and canLong
+sellSignal = inRedZone and reversalSell and rsiSellOK and trendSellOK and canShort
+
+// ═══════════════════════════════════════════════════════════════
+// STOP LOSS & TAKE PROFIT LEVELS
+// ═══════════════════════════════════════════════════════════════
+
+// Buy SL
+buySL = switch slMode
+    "Beyond Band" => lowerBand - atrVal * 0.5
+    "ATR Based"   => close - atrVal * slATRMult
+    "Fixed %"     => close * (1.0 - slFixedPct / 100.0)
+    => lowerBand - atrVal * 0.5
+
+// Buy TP
+buyTP = switch tpMode
+    "Opposite Band" => upperBand
+    "Middle Band"   => middleBand
+    "R:R Ratio"     => close + (close - buySL) * tpRR
+    => upperBand
+
+// Sell SL
+sellSL = switch slMode
+    "Beyond Band" => upperBand + atrVal * 0.5
+    "ATR Based"   => close + atrVal * slATRMult
+    "Fixed %"     => close * (1.0 + slFixedPct / 100.0)
+    => upperBand + atrVal * 0.5
+
+// Sell TP
+sellTP = switch tpMode
+    "Opposite Band" => lowerBand
+    "Middle Band"   => middleBand
+    "R:R Ratio"     => close - (sellSL - close) * tpRR
+    => lowerBand
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE TRADES
+// ═══════════════════════════════════════════════════════════════
+
+posSize = strategy.equity * (basePos / 100.0) / close
+
+// Long entry at green band
+if buySignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=posSize)
+    strategy.exit("Long TP/SL", "Long", stop=buySL, limit=buyTP, trail_points=useTrail ? (close - buySL) / syminfo.mintick : na, trail_offset=useTrail ? (close - buySL) * 0.5 / syminfo.mintick : na)
+
+// Short entry at red band
+if sellSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=posSize)
+    strategy.exit("Short TP/SL", "Short", stop=sellSL, limit=sellTP, trail_points=useTrail ? (sellSL - close) / syminfo.mintick : na, trail_offset=useTrail ? (sellSL - close) * 0.5 / syminfo.mintick : na)
+
+// Close long if price hits red zone (take profit area)
+if strategy.position_size > 0 and inRedZone
+    strategy.close("Long", comment="Red Band Exit")
+
+// Close short if price hits green zone (take profit area)
+if strategy.position_size < 0 and inGreenZone
+    strategy.close("Short", comment="Green Band Exit")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS — GREEN & RED BAND ZONES
+// ═══════════════════════════════════════════════════════════════
+
+// Upper band (red zone — sell)
+p_redTop = plot(redZoneTop, "Red Zone Top", color.new(#ff5252, 60), linewidth=1)
+p_redBot = plot(redZoneBot, "Red Zone Bot", color.new(#ff5252, 60), linewidth=1)
+fill(p_redTop, p_redBot, color.new(#ff5252, 75), title="Red Sell Zone")
+
+// Lower band (green zone — buy)
+p_greenTop = plot(greenZoneTop, "Green Zone Top", color.new(#00e676, 60), linewidth=1)
+p_greenBot = plot(greenZoneBot, "Green Zone Bot", color.new(#00e676, 60), linewidth=1)
+fill(p_greenTop, p_greenBot, color.new(#00e676, 75), title="Green Buy Zone")
+
+// Middle band
+plot(middleBand, "Middle Band", color.new(#ffffff, 50), linewidth=1, style=plot.style_circles)
+
+// Trend EMA
+plot(useTrend ? ema200 : na, "Trend EMA", color.new(#ffeb3b, 30), linewidth=2)
+
+// Entry signals
+plotshape(buySignal and strategy.position_size == 0, "Buy Signal", shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="BUY")
+plotshape(sellSignal and strategy.position_size == 0, "Sell Signal", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="SELL")
+
+// Background
+bgcolor(strategy.position_size > 0 ? color.new(#00e676, 93) : strategy.position_size < 0 ? color.new(#ff5252, 93) : na, title="Position BG")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "STRATEGY",     text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "BAND BOUNCE",  text_color=color.yellow, text_size=size.small)
+
+    table.cell(t, 0, 1, "Band Type",    text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 1, bandType,        text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 2, "Upper Band",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(upperBand, format.mintick), text_color=#ff5252, text_size=size.small)
+
+    table.cell(t, 0, 3, "Lower Band",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(lowerBand, format.mintick), text_color=#00e676, text_size=size.small)
+
+    table.cell(t, 0, 4, "Band Width",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(bandRange, format.mintick), text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 5, "RSI",          text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(rsiVal, "#.0"), text_color=rsiVal < rsiOversold ? #00e676 : rsiVal > rsiOverbought ? #ff5252 : color.white, text_size=size.small)
+
+    table.cell(t, 0, 6, "Position",     text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 6, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? #00e676 : strategy.position_size < 0 ? #ff5252 : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 7, "Price Zone",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 7, inGreenZone ? "GREEN (Buy)" : inRedZone ? "RED (Sell)" : "NEUTRAL", text_color=inGreenZone ? #00e676 : inRedZone ? #ff5252 : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 8, "Direction",    text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 8, direction,       text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 9, "Entry Mode",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 9, entryType,       text_color=color.white, text_size=size.small)
