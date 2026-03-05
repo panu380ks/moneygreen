@@ -1,0 +1,354 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// ETH Market Structure Strategy v3 — Improved Edition
+// Key changes from v2:
+//   1. ADX filter blocks entries in ranging/choppy markets
+//   2. Pullback entry: waits for retrace to EMA after BOS/CHoCH instead of raw breaks
+//   3. ATR-based dynamic TPs and SL (adapts to volatility)
+//   4. Trailing stop replaces aggressive CHoCH exit (lets winners run)
+//   5. Multi-timeframe trend alignment (HTF + mid TF)
+//   6. Momentum confirmation via MACD histogram
+//   7. Larger swing length to reduce false signals
+//   8. Session filter to avoid low-liquidity fakeouts
+
+//@version=6
+strategy("ETH Market Structure v3", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.075, slippage=3, pyramiding=0)
+
+strategy.risk.max_drawdown(40, strategy.percent_of_equity)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+strat_dir = input.string("long", "Direction", options=["long", "short", "all"])
+strategy.risk.allow_entry_in(strat_dir == "long" ? strategy.direction.long : strat_dir == "short" ? strategy.direction.short : strategy.direction.all)
+
+// Structure
+swingLen   = input.int(6, "Swing Length", minval=2, maxval=20, group="Structure", tooltip="Increased from 4 to reduce noise")
+useHTF     = input.bool(true, "Use HTF Filter", group="Structure")
+htfTF      = input.timeframe("D", "HTF Timeframe", group="Structure")
+useMidTF   = input.bool(true, "Use Mid TF Filter", group="Structure")
+midTF      = input.timeframe("240", "Mid Timeframe", group="Structure")
+
+// Filters
+emaFastLen = input.int(21, "Fast EMA", group="Filters")
+emaSlowLen = input.int(50, "Slow EMA", group="Filters")
+rsiLen     = input.int(14, "RSI Length", group="Filters")
+volLen     = input.int(20, "Volume MA Length", group="Filters")
+
+// ADX — the #1 improvement: blocks entries in ranging markets
+adxLen       = input.int(14, "ADX Length", group="ADX Filter")
+adxMinTrend  = input.float(20.0, "Min ADX for Entry", step=1.0, minval=10, maxval=40, group="ADX Filter", tooltip="Below this = ranging market, no entries")
+useDIconfirm = input.bool(true, "Require DI Confirmation", group="ADX Filter", tooltip="DI+ > DI- for longs, DI- > DI+ for shorts")
+
+// MACD momentum
+macdFast   = input.int(12, "MACD Fast", group="Momentum")
+macdSlow   = input.int(26, "MACD Slow", group="Momentum")
+macdSig    = input.int(9, "MACD Signal", group="Momentum")
+useMacd    = input.bool(true, "Require MACD Confirmation", group="Momentum")
+
+// Pullback entry
+usePullback  = input.bool(true, "Require Pullback to EMA", group="Entry", tooltip="Wait for price to retrace to fast EMA after structure break before entering")
+pullbackBars = input.int(8, "Pullback Lookback Bars", minval=2, maxval=20, group="Entry", tooltip="How many bars after a break to wait for pullback")
+
+// Risk — ATR-based instead of fixed %
+atrMultSL  = input.float(2.0, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1 = input.float(2.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrMultTP2 = input.float(5.0, "TP2 ATR Multiplier", step=0.5, group="Risk")
+atrMultTP3 = input.float(8.0, "TP3 ATR Multiplier", step=0.5, group="Risk")
+q1         = input.int(30, "TP1 Qty %", group="Risk")
+q2         = input.int(30, "TP2 Qty %", group="Risk")
+q3         = input.int(20, "TP3 Qty %", group="Risk")
+useTrail   = input.bool(true, "Use Trailing Stop on Remainder", group="Risk")
+trailMult  = input.float(2.5, "Trail ATR Multiplier", step=0.1, group="Risk")
+
+// Drawdown controls
+basePos      = input.float(75.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
+use200EMA    = input.bool(true, "200 EMA Trend Gate", group="Drawdown")
+useVolFilter = input.bool(true, "Volatility Regime Filter", group="Drawdown")
+volFilterLen = input.int(40, "Vol Filter MA Length", minval=10, group="Drawdown")
+maxVolRatio  = input.float(1.8, "Max Vol Ratio", step=0.1, minval=1.0, maxval=3.0, group="Drawdown")
+useEqFilter  = input.bool(true, "Equity Curve Filter", group="Drawdown")
+eqFilterLen  = input.int(50, "Equity SMA Length", minval=10, group="Drawdown")
+useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
+coolBars     = input.int(8, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+
+// Session filter
+useSession   = input.bool(true, "Session Filter", group="Session", tooltip="Only trade during high-liquidity sessions")
+sessionStr   = input.session("0800-2000", "Trading Session (UTC)", group="Session")
+
+// ═══════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ═══════════════════════════════════════════════════════════════
+
+inSession = not useSession or not na(time(timeframe.period, sessionStr, "UTC"))
+
+// ═══════════════════════════════════════════════════════════════
+// SWING DETECTION (increased swingLen reduces noise)
+// ═══════════════════════════════════════════════════════════════
+
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+
+// Detect breaks BEFORE updating levels
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+
+// Liquidity sweeps: wick beyond level, close back inside
+sweepHigh = not na(lastSH) and high > lastSH and close < lastSH
+sweepLow  = not na(lastSL) and low < lastSL and close > lastSL
+
+// Update swing levels after detection
+if not na(swH)
+    lastSH := swH
+if not na(swL)
+    lastSL := swL
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE TREND
+// ═══════════════════════════════════════════════════════════════
+
+var int msTrend = 0
+
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+// CHoCH = first break AGAINST prior trend (reversal)
+chochBull = breakAbove and msTrend[1] <= 0
+chochBear = breakBelow and msTrend[1] >= 0
+
+// BOS = break WITH trend (continuation)
+bosLong  = breakAbove and msTrend[1] == 1
+bosShort = breakBelow and msTrend[1] == -1
+
+// ═══════════════════════════════════════════════════════════════
+// PULLBACK DETECTION — wait for retrace to EMA after break
+// ═══════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// Track bars since last structure break
+var int barsSinceBullBreak = 999
+var int barsSinceBearBreak = 999
+
+if chochBull or bosLong
+    barsSinceBullBreak := 0
+else
+    barsSinceBullBreak += 1
+
+if chochBear or bosShort
+    barsSinceBearBreak := 0
+else
+    barsSinceBearBreak += 1
+
+// Pullback: price touches or dips below fast EMA after bullish break, then closes above
+pullbackLong = barsSinceBullBreak > 0 and barsSinceBullBreak <= pullbackBars and low <= emaFast and close > emaFast and close > open
+// Pullback: price touches or rises above fast EMA after bearish break, then closes below
+pullbackShort = barsSinceBearBreak > 0 and barsSinceBearBreak <= pullbackBars and high >= emaFast and close < emaFast and close < open
+
+// Entry mode: raw break or pullback
+longStructure  = usePullback ? pullbackLong : (chochBull or bosLong)
+shortStructure = usePullback ? pullbackShort : (chochBear or bosShort)
+
+// Sweeps still enter immediately (they ARE the pullback)
+longSweepSig  = sweepLow and msTrend >= 0
+shortSweepSig = sweepHigh and msTrend <= 0
+
+// ═══════════════════════════════════════════════════════════════
+// ADX FILTER — blocks entries in ranging markets
+// ═══════════════════════════════════════════════════════════════
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxTrending = adxVal >= adxMinTrend
+diBullOK    = not useDIconfirm or diPlus > diMinus
+diBearOK    = not useDIconfirm or diMinus > diPlus
+
+// ═══════════════════════════════════════════════════════════════
+// MACD MOMENTUM CONFIRMATION
+// ═══════════════════════════════════════════════════════════════
+
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
+
+// For longs: histogram positive or turning up
+macdBullOK = not useMacd or histLine > 0 or (histLine > histLine[1] and histLine[1] > histLine[2])
+// For shorts: histogram negative or turning down
+macdBearOK = not useMacd or histLine < 0 or (histLine < histLine[1] and histLine[1] < histLine[2])
+
+// ═══════════════════════════════════════════════════════════════
+// CONFLUENCE FILTERS
+// ═══════════════════════════════════════════════════════════════
+
+rsiVal     = ta.rsi(close, rsiLen)
+rsiOKlong  = rsiVal > 35 and rsiVal < 75
+rsiOKshort = rsiVal > 25 and rsiVal < 65
+
+volMA = ta.sma(volume, volLen)
+volOK = na(volume) or volume > volMA * 0.8
+
+// HTF trend
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBull = not useHTF or na(htfEma) or close > htfEma
+htfBear = not useHTF or na(htfEma) or close < htfEma
+
+// Mid TF trend (4H default)
+midEmaFast = request.security(syminfo.tickerid, midTF, ta.ema(close, 21))
+midEmaSlow = request.security(syminfo.tickerid, midTF, ta.ema(close, 50))
+midBull    = not useMidTF or na(midEmaFast) or midEmaFast > midEmaSlow
+midBear    = not useMidTF or na(midEmaFast) or midEmaFast < midEmaSlow
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWDOWN CONTROLS (5 layers — same as v2 but tighter cooldown)
+// ═══════════════════════════════════════════════════════════════
+
+atrVal = ta.atr(14)
+
+// Layer 1 — 200 EMA trend gate
+ema200       = ta.ema(close, 200)
+trendLongOK  = not use200EMA or close > ema200
+trendShortOK = not use200EMA or close < ema200
+
+// Layer 2 — Volatility regime filter
+atrMA       = ta.sma(atrVal, volFilterLen)
+volRatio    = atrVal / nz(atrMA, atrVal)
+volRegimeOK = not useVolFilter or volRatio < maxVolRatio
+
+// Layer 3 — Equity curve filter
+eqSMA    = ta.sma(strategy.equity, eqFilterLen)
+equityOK = not useEqFilter or strategy.equity >= eqSMA
+
+// Layer 4 — Loss cooldown (increased default from 5 to 8)
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+if strategy.closedtrades > prevClosedCount
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        lastLossBar := bar_index
+    prevClosedCount := strategy.closedtrades
+cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
+
+// Layer 5 — Dynamic position sizing
+volScale = useVolFilter ? (volRatio > 1.4 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
+unitQty  = strategy.equity * (basePos / 100.0) * volScale / close
+
+// Combined gate
+ddGate = volRegimeOK and equityOK and cooldownOK
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS — much stricter than v2
+// ═══════════════════════════════════════════════════════════════
+
+// Long: structure + pullback + ADX trending + DI confirmation + MACD + HTF + mid TF + RSI + volume + session
+longEntry = longStructure and adxTrending and diBullOK and macdBullOK and htfBull and midBull and rsiOKlong and volOK and inSession and close > emaFast
+
+// Short: mirror
+shortEntry = shortStructure and adxTrending and diBearOK and macdBearOK and htfBear and midBear and rsiOKshort and volOK and inSession and close < emaFast
+
+// Sweep entries — slightly relaxed but still need ADX + HTF
+longSweepEntry  = longSweepSig and adxTrending and htfBull and rsiVal < 40 and volOK and inSession
+shortSweepEntry = shortSweepSig and adxTrending and htfBear and rsiVal > 60 and volOK and inSession
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE ENTRIES
+// ═══════════════════════════════════════════════════════════════
+
+if (longEntry or longSweepEntry) and ddGate and trendLongOK
+    strategy.entry("Long", strategy.long, qty=unitQty)
+
+if (shortEntry or shortSweepEntry) and ddGate and trendShortOK
+    strategy.entry("Short", strategy.short, qty=unitQty)
+
+// ═══════════════════════════════════════════════════════════════
+// EXITS — ATR-based TPs + Trailing Stop (replaces CHoCH exit)
+// ═══════════════════════════════════════════════════════════════
+
+// ATR-based tick calculations
+slTicks  = atrVal * atrMultSL / syminfo.mintick
+tp1Ticks = atrVal * atrMultTP1 / syminfo.mintick
+tp2Ticks = atrVal * atrMultTP2 / syminfo.mintick
+tp3Ticks = atrVal * atrMultTP3 / syminfo.mintick
+trailTicks  = atrVal * trailMult / syminfo.mintick
+trailOffset = atrVal * trailMult * 0.5 / syminfo.mintick
+
+strategy.exit("x1", qty_percent=q1, profit=tp1Ticks, loss=slTicks)
+strategy.exit("x2", qty_percent=q2, profit=tp2Ticks, loss=slTicks)
+strategy.exit("x3", qty_percent=q3, profit=tp3Ticks, loss=slTicks)
+
+// Remainder: trailing stop or fixed TP
+if useTrail
+    strategy.exit("xTrail", profit=tp3Ticks * 1.5, loss=slTicks, trail_points=trailTicks, trail_offset=trailOffset)
+else
+    strategy.exit("x4", profit=tp3Ticks * 1.5, loss=slTicks)
+
+// Emergency structure exit — only on STRONG reversal (CHoCH + price crosses 200 EMA)
+// Much less aggressive than v2's raw CHoCH exit
+if strategy.position_size > 0 and chochBear and close < ema200
+    strategy.close("Long", comment="Structure Reversal")
+if strategy.position_size < 0 and chochBull and close > ema200
+    strategy.close("Short", comment="Structure Reversal")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+plot(lastSH, "Swing High", color.new(#ff5252, 30), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 30), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+// Structure labels
+plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="CHoCH")
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="CHoCH")
+plotshape(bosLong and not chochBull, "BOS Long", shape.circle, location.belowbar, color.new(#2196f3, 0), size=size.tiny)
+plotshape(bosShort and not chochBear, "BOS Short", shape.circle, location.abovebar, color.new(#ff9800, 0), size=size.tiny)
+plotshape(longSweepEntry, "Sweep Long", shape.diamond, location.belowbar, color.new(#00bcd4, 0), size=size.tiny)
+plotshape(shortSweepEntry, "Sweep Short", shape.diamond, location.abovebar, color.new(#ff6f00, 0), size=size.tiny)
+
+// Pullback entries
+plotshape(longEntry, "PB Long", shape.arrowup, location.belowbar, color.new(#00e676, 0), size=size.tiny, text="PB")
+plotshape(shortEntry, "PB Short", shape.arrowdown, location.abovebar, color.new(#ff5252, 0), size=size.tiny, text="PB")
+
+// Background
+bgcolor(msTrend == 1 ? color.new(#00e676, 95) : msTrend == -1 ? color.new(#ff5252, 95) : na, title="Structure Trend")
+bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Paused")
+bgcolor(not adxTrending ? color.new(#9e9e9e, 94) : na, title="Ranging (ADX Low)")
+bgcolor(not inSession ? color.new(#000000, 96) : na, title="Out of Session")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "VERSION",     text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "v3",          text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1, "Struct",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 1, msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "NEUTRAL", text_color=msTrend == 1 ? color.green : msTrend == -1 ? color.red : color.gray, text_size=size.small)
+    table.cell(t, 0, 2, "ADX",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(adxVal, "#.0") + (adxTrending ? " TREND" : " RANGE"), text_color=adxTrending ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 3, "DI",          text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 3, diPlus > diMinus ? "DI+ LEAD" : "DI- LEAD", text_color=diPlus > diMinus ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4, "MACD",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4, histLine > 0 ? "BULL" : "BEAR", text_color=histLine > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "HTF",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5, htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6, "Mid TF",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6, midBull ? "BULL" : "BEAR", text_color=midBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 7, "200 EMA",     text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, close > ema200 ? "ABOVE" : "BELOW", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 8, "Vol Ratio",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8, str.tostring(volRatio, "#.##"), text_color=volRegimeOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 9, "Equity",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9, equityOK ? "OK" : "BELOW SMA", text_color=equityOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 10, "Cooldown",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 10, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
+    table.cell(t, 0, 11, "Session",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.green : color.gray, text_size=size.small)
