@@ -1,71 +1,85 @@
-// Silver (XAG/USD) Short-Only Strategy — 200 EMA Rejection
-// Sells only when price is below or rejecting the 200 EMA
-// Timeframe: 1H (optimized), works on 15m-4H
+// Silver (XAG/USD) Short-Only Strategy v2 — Daily 200 EMA + Pullback Rejection
+// ONLY shorts when Daily 200 EMA is sloping DOWN and price pulls back into resistance
+// Designed to avoid shorting during bull markets entirely
+// Timeframe: 1H (optimized)
 //@version=6
-strategy("Silver (XAG) Short Only — 200 EMA", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1, pyramiding=0, calc_on_every_tick=false)
+strategy("Silver (XAG) Short v2", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1, pyramiding=0, calc_on_every_tick=false)
 
 // ──────────────────────────────────────────────
 // INPUTS
 // ──────────────────────────────────────────────
 
-// EMAs
+// Local EMAs (1H chart)
 fastLen   = input.int(12,   "Fast EMA",          minval=3)
 midLen    = input.int(26,   "Mid EMA",           minval=5)
 slowLen   = input.int(50,   "Slow EMA",          minval=10)
-trendLen  = input.int(200,  "Trend EMA (200)",   minval=50)
-
-// RSI
-rsiLen    = input.int(14,   "RSI Length",         minval=2)
-rsiOB     = input.float(60, "RSI Short Trigger",  minval=45, maxval=85)
 
 // SuperTrend
 stFactor  = input.float(3.0,"SuperTrend Factor",  minval=1.0, step=0.1)
 stPeriod  = input.int(12,   "SuperTrend Period",   minval=5)
 
-// ADX
-useAdx    = input.bool(true,"Use ADX Filter")
-adxLen    = input.int(14,   "ADX Length",          minval=5)
-adxMin    = input.float(20, "ADX Minimum",         minval=10, maxval=50)
+// RSI
+rsiLen    = input.int(14,   "RSI Length",         minval=2)
+rsiOB     = input.float(65, "RSI Short Trigger",  minval=50, maxval=85)
 
 // MACD
-useMacd   = input.bool(true,"Use MACD Filter")
 macdFast  = input.int(12,   "MACD Fast",           minval=5)
 macdSlow  = input.int(26,   "MACD Slow",           minval=10)
 macdSig   = input.int(9,    "MACD Signal",         minval=3)
 
+// ADX
+adxLen    = input.int(14,   "ADX Length",          minval=5)
+adxMin    = input.float(20, "ADX Minimum",         minval=10, maxval=50)
+
 // ATR & Risk
 atrLen    = input.int(14,   "ATR Length",          minval=5)
-slMult    = input.float(1.5,"Stop Loss ATR Mult",  minval=0.5, step=0.1)
-tp1Mult   = input.float(2.5,"TP1 ATR Mult",        minval=0.5, step=0.1)
-tp2Mult   = input.float(5.0,"TP2 ATR Mult",        minval=1.0, step=0.1)
+slMult    = input.float(2.0,"Stop Loss ATR Mult",  minval=0.5, step=0.1)
+tp1Mult   = input.float(3.0,"TP1 ATR Mult",        minval=1.0, step=0.1)
+tp2Mult   = input.float(6.0,"TP2 ATR Mult",        minval=2.0, step=0.1)
 tp1Pct    = input.float(50, "TP1 Close %",         minval=10, maxval=90)
 useTrail  = input.bool(true,"Use Trailing Stop")
-trailMult = input.float(1.5,"Trail ATR Mult",      minval=0.3, step=0.1)
+trailMult = input.float(2.0,"Trail ATR Mult",      minval=0.5, step=0.1)
 
 // Cooldown
-cooldownBars = input.int(15,"Cooldown Bars",       minval=0, maxval=100)
+cooldownBars = input.int(30,"Cooldown Bars",       minval=0, maxval=200)
 
-// Scoring threshold
-minScore  = input.int(4,    "Min Entry Score",     minval=2, maxval=9)
+// Min score
+minScore  = input.int(6,    "Min Entry Score",     minval=3, maxval=12)
 
-// Hard gate toggles
-requireBelow200  = input.bool(true, "Require Price Below 200 EMA", tooltip="Core filter: blocks shorts in bull trends")
-requireBearStack = input.bool(true, "Require Bearish EMA Stack",   tooltip="Fast < Mid < Slow")
-requireBearST    = input.bool(true, "Require Bearish SuperTrend")
+// Daily 200 EMA settings
+daily200Len    = input.int(200, "Daily 200 EMA Length",   minval=50)
+dailySlopeLen  = input.int(5,   "Daily Slope Lookback",   minval=2, maxval=20, tooltip="Number of daily bars to measure 200 EMA slope")
 
-// Daily trend
-useDailyTrend = input.bool(true, "Use Daily Trend Filter")
-dailyFastLen  = input.int(12,    "Daily Fast EMA",    minval=3)
-dailySlowLen  = input.int(50,    "Daily Slow EMA",    minval=10)
+// Daily trend EMAs
+dailyFastLen  = input.int(12,  "Daily Fast EMA",    minval=3)
+dailyMidLen   = input.int(50,  "Daily Mid EMA",     minval=10)
 
 // ──────────────────────────────────────────────
-// CALCULATIONS
+// HIGHER TIMEFRAME: DAILY 200 EMA (the KEY filter)
 // ──────────────────────────────────────────────
 
-fastEma  = ta.ema(close, fastLen)
-midEma   = ta.ema(close, midLen)
-slowEma  = ta.ema(close, slowLen)
-ema200   = ta.ema(close, trendLen)
+daily200     = request.security(syminfo.tickerid, "D", ta.ema(close, daily200Len))
+daily200prev = request.security(syminfo.tickerid, "D", ta.ema(close, daily200Len)[dailySlopeLen])
+dailyClose   = request.security(syminfo.tickerid, "D", close)
+dailyFastEma = request.security(syminfo.tickerid, "D", ta.ema(close, dailyFastLen))
+dailyMidEma  = request.security(syminfo.tickerid, "D", ta.ema(close, dailyMidLen))
+
+// Daily 200 EMA must be SLOPING DOWN — this is the #1 filter
+daily200slopeDown = daily200 < daily200prev
+
+// Price must be below daily 200 EMA
+belowDaily200 = dailyClose < daily200
+
+// Daily EMAs must be bearish
+dailyBearStack = dailyFastEma < dailyMidEma
+
+// ──────────────────────────────────────────────
+// LOCAL CALCULATIONS (1H chart)
+// ──────────────────────────────────────────────
+
+fastEma = ta.ema(close, fastLen)
+midEma  = ta.ema(close, midLen)
+slowEma = ta.ema(close, slowLen)
 
 // SuperTrend
 [stLine, stDir] = ta.supertrend(stFactor, stPeriod)
@@ -73,34 +87,49 @@ bearST = stDir > 0
 
 // ADX / DMI
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
-adxOk      = useAdx ? adxVal > adxMin : true
-adxBearish = useAdx ? diMinus > diPlus : true
+adxStrong  = adxVal > adxMin
+adxBearish = diMinus > diPlus
 
 // RSI
 rsi = ta.rsi(close, rsiLen)
 
 // MACD
 [macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
-macdBear     = useMacd ? macdLine < signalLine : true
-macdFading   = useMacd ? (histLine < histLine[1]) : false
+macdBear   = macdLine < signalLine
+macdFading = histLine < histLine[1] and histLine[1] < histLine[2]
 
 // ATR
 atr = ta.atr(atrLen)
 
-// 200 EMA rejection — price wicks above 200 EMA but closes below
-ema200reject = high > ema200 and close < ema200
+// ──────────────────────────────────────────────
+// PULLBACK INTO RESISTANCE DETECTION
+// ──────────────────────────────────────────────
 
-// Bearish candle patterns
+// Price rallied up to touch/reject off a moving average = ideal short entry
+// Rejection off the 50 EMA (pullback to resistance in downtrend)
+ema50reject = high > slowEma and close < slowEma and close < open
+
+// Rejection off the mid EMA
+ema26reject = high > midEma and close < midEma and close < open
+
+// Price touched daily 200 EMA from below and got rejected
+daily200reject = high > daily200 and close < daily200
+
+// ──────────────────────────────────────────────
+// BEARISH CANDLE PATTERNS
+// ──────────────────────────────────────────────
+
 bearEngulf = close < open and close < open[1] and open > close[1] and (open - close) > (close[1] - open[1]) * 0.5
 upperWick  = high - math.max(open, close)
 bodySize   = math.abs(close - open)
 bearPin    = upperWick > bodySize * 2 and close < open
+bearCandle = close < open and bodySize > atr * 0.3
 
-// EMA rejection — price wicks above mid/slow EMA but closes below
-emaReject = (high > midEma and close < midEma) or (high > slowEma and close < slowEma)
+// ──────────────────────────────────────────────
+// SWING STRUCTURE
+// ──────────────────────────────────────────────
 
-// Swing structure
-swingLen     = 6
+swingLen     = 8
 swingHigh    = ta.pivothigh(high, swingLen, swingLen)
 swingLow     = ta.pivotlow(low, swingLen, swingLen)
 recentSwHigh = ta.valuewhen(not na(swingHigh), high[swingLen], 0)
@@ -111,28 +140,23 @@ lowerHigh    = not na(recentSwHigh) and not na(prevSwHigh) and recentSwHigh < pr
 lowerLow     = not na(recentSwLow)  and not na(prevSwLow)  and recentSwLow < prevSwLow
 bearStructure = lowerHigh and lowerLow
 
-// Daily trend filter
-dailyFastEma = request.security(syminfo.tickerid, "D", ta.ema(close, dailyFastLen))
-dailySlowEma = request.security(syminfo.tickerid, "D", ta.ema(close, dailySlowLen))
-dailyBear    = useDailyTrend ? dailyFastEma < dailySlowEma : true
-
 // ──────────────────────────────────────────────
-// TREND STATES
+// EMA STATES
 // ──────────────────────────────────────────────
 
-strongBear  = fastEma < midEma and midEma < slowEma
-modBear     = fastEma < slowEma
-belowTrend  = close < ema200
+strongBear = fastEma < midEma and midEma < slowEma
+modBear    = fastEma < slowEma
 
 // ──────────────────────────────────────────────
-// HARD GATES — all must pass to allow any short
+// HARD GATES — ALL must pass (no exceptions)
 // ──────────────────────────────────────────────
 
-gate1 = requireBelow200  ? belowTrend  : true
-gate2 = requireBearStack ? strongBear  : modBear
-gate3 = requireBearST    ? bearST      : true
-gate4 = dailyBear
-gate5 = adxBearish
+gate1 = daily200slopeDown              // Daily 200 EMA must be falling
+gate2 = belowDaily200 or daily200reject // Price below daily 200 OR rejecting it
+gate3 = dailyBearStack                 // Daily fast EMA < daily mid EMA
+gate4 = bearST                         // SuperTrend bearish on 1H
+gate5 = modBear                        // At minimum fast EMA < slow EMA on 1H
+
 allGatesPass = gate1 and gate2 and gate3 and gate4 and gate5
 
 // ──────────────────────────────────────────────
@@ -144,28 +168,35 @@ barsSinceEntry = bar_index - lastEntryBar
 cooldownOk     = barsSinceEntry > cooldownBars
 
 // ──────────────────────────────────────────────
-// SCORING — higher score = higher conviction short
+// ENTRY TRIGGER — need a pullback rejection, not just trend
+// ──────────────────────────────────────────────
+
+hasTrigger = ema50reject or ema26reject or daily200reject or bearEngulf or bearPin
+
+// ──────────────────────────────────────────────
+// SCORING — conviction level
 // ──────────────────────────────────────────────
 
 score = 0
-score += strongBear     ? 2 : modBear ? 1 : 0
-score += bearST         ? 1 : 0
-score += belowTrend     ? 1 : 0
-score += adxOk          ? 1 : 0
-score += rsi > rsiOB    ? 1 : 0
-score += macdBear       ? 1 : 0
-score += macdFading     ? 1 : 0
-score += bearStructure  ? 2 : lowerHigh ? 1 : 0
-score += emaReject      ? 1 : 0
-score += ema200reject   ? 2 : 0
-score += bearEngulf     ? 1 : 0
-score += bearPin        ? 1 : 0
+score += strongBear      ? 2 : modBear ? 1 : 0   // EMA alignment
+score += bearST          ? 1 : 0                   // SuperTrend confirm
+score += adxStrong and adxBearish ? 2 : adxBearish ? 1 : 0  // ADX strength + direction
+score += rsi > rsiOB     ? 1 : 0                   // RSI overbought on pullback
+score += macdBear        ? 1 : 0                   // MACD bearish
+score += macdFading      ? 1 : 0                   // MACD histogram fading
+score += bearStructure   ? 2 : lowerHigh ? 1 : 0   // Market structure
+score += ema50reject     ? 2 : 0                   // Pullback to 50 EMA rejection
+score += ema26reject     ? 1 : 0                   // Pullback to 26 EMA rejection
+score += daily200reject  ? 3 : 0                   // Daily 200 EMA rejection (highest value)
+score += bearEngulf      ? 2 : 0                   // Engulfing pattern
+score += bearPin         ? 1 : 0                   // Pin bar
+score += bearCandle      ? 1 : 0                   // Bearish close
 
 // ──────────────────────────────────────────────
 // SHORT ENTRY
 // ──────────────────────────────────────────────
 
-shortCond = allGatesPass and score >= minScore and cooldownOk and strategy.position_size == 0
+shortCond = allGatesPass and hasTrigger and score >= minScore and cooldownOk and strategy.position_size == 0
 
 if shortCond
     lastEntryBar := bar_index
@@ -192,43 +223,50 @@ if strategy.position_size < 0 and fastEma > midEma and fastEma > slowEma and stD
 // PLOTS
 // ──────────────────────────────────────────────
 
-plot(fastEma, "Fast EMA",  color=color.new(color.teal, 0),   linewidth=1)
-plot(midEma,  "Mid EMA",   color=color.new(color.yellow, 0), linewidth=2)
-plot(slowEma, "Slow EMA",  color=color.new(color.orange, 0), linewidth=2)
-plot(ema200,  "200 EMA",   color=color.new(color.white, 20), linewidth=3)
-plot(stLine,  "SuperTrend", color=bearST ? color.new(color.red, 20) : color.new(color.green, 20), linewidth=2, style=plot.style_stepline)
+plot(fastEma,  "Fast EMA",   color=color.new(color.teal, 0),   linewidth=1)
+plot(midEma,   "Mid EMA",    color=color.new(color.yellow, 0), linewidth=2)
+plot(slowEma,  "Slow EMA",   color=color.new(color.orange, 0), linewidth=2)
+plot(daily200, "Daily 200",  color=color.new(color.white, 10), linewidth=3)
+plot(stLine,   "SuperTrend", color=bearST ? color.new(color.red, 20) : color.new(color.green, 20), linewidth=2, style=plot.style_stepline)
 
 // Background when all gates are open
-bgcolor(allGatesPass ? color.new(color.red, 90) : na, title="Gates Open")
+bgcolor(allGatesPass ? color.new(color.red, 92) : na, title="Gates Open")
 
 // Entry signals by quality
-plotshape(shortCond and score >= 8, "A+ Short", shape.triangledown, location.abovebar, color.new(color.red, 0),  size=size.normal)
-plotshape(shortCond and score >= 6 and score < 8, "A Short", shape.triangledown, location.abovebar, color.new(color.red, 15), size=size.small)
-plotshape(shortCond and score < 6,  "B Short",  shape.triangledown, location.abovebar, color.new(color.red, 40), size=size.small)
+plotshape(shortCond and score >= 10, "A+ Short", shape.triangledown, location.abovebar, color.new(color.red, 0),  size=size.normal)
+plotshape(shortCond and score >= 7 and score < 10, "A Short", shape.triangledown, location.abovebar, color.new(color.orange, 0), size=size.small)
+plotshape(shortCond and score < 7,   "B Short",  shape.triangledown, location.abovebar, color.new(color.yellow, 0), size=size.small)
 
 // Score label on entry
 if shortCond
     label.new(bar_index, high + atr * 0.5, str.tostring(score), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
 
+// Mark pullback rejections (visual aid)
+plotshape(allGatesPass and ema50reject and not shortCond, "50 EMA Reject", shape.xcross, location.abovebar, color.new(color.orange, 40), size=size.tiny)
+
 // ──────────────────────────────────────────────
 // INFO TABLE
 // ──────────────────────────────────────────────
 
-var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
-    table.cell(t, 0, 0, "GATES",      text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 0, "GATES",        text_color=color.yellow, text_size=size.small)
     table.cell(t, 1, 0, allGatesPass ? "ALL OPEN" : "BLOCKED", text_color=allGatesPass ? color.red : color.gray, text_size=size.small)
-    table.cell(t, 0, 1, "Score",      text_color=color.gray,  text_size=size.small)
+    table.cell(t, 0, 1, "Score",        text_color=color.gray,  text_size=size.small)
     table.cell(t, 1, 1, str.tostring(score) + " / " + str.tostring(minScore), text_color=score >= minScore ? color.red : color.white, text_size=size.small)
-    table.cell(t, 0, 2, "< 200 EMA",  text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 2, belowTrend ? "YES" : "NO", text_color=belowTrend ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 3, "EMA Stack",  text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 3, strongBear ? "BEARISH" : "NO", text_color=strongBear ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 4, "SuperTrend", text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 4, bearST ? "BEAR" : "BULL", text_color=bearST ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 5, "Daily Trend",text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 5, dailyBear ? "BEAR" : "BULL", text_color=dailyBear ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 6, "ADX",        text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 6, str.tostring(adxVal, "#.0") + (adxBearish ? " DI-" : " DI+"), text_color=adxBearish and adxOk ? color.red : color.white, text_size=size.small)
-    table.cell(t, 0, 7, "Cooldown",   text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 7, cooldownOk ? "READY" : str.tostring(cooldownBars - barsSinceEntry) + " bars", text_color=cooldownOk ? color.green : color.yellow, text_size=size.small)
+    table.cell(t, 0, 2, "D 200 Slope",  text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 2, daily200slopeDown ? "DOWN" : "UP", text_color=daily200slopeDown ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 3, "< D 200",      text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 3, belowDaily200 ? "YES" : "NO", text_color=belowDaily200 ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 4, "D EMA Stack",  text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 4, dailyBearStack ? "BEARISH" : "NO", text_color=dailyBearStack ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 5, "SuperTrend",   text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 5, bearST ? "BEAR" : "BULL", text_color=bearST ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 6, "1H EMA",       text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 6, strongBear ? "STRONG BEAR" : modBear ? "MOD BEAR" : "BULL", text_color=strongBear ? color.red : modBear ? color.orange : color.green, text_size=size.small)
+    table.cell(t, 0, 7, "Trigger",      text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 7, hasTrigger ? "YES" : "WAITING", text_color=hasTrigger ? color.red : color.yellow, text_size=size.small)
+    table.cell(t, 0, 8, "ADX",          text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 8, str.tostring(adxVal, "#.0") + (adxBearish ? " DI-" : " DI+"), text_color=adxBearish and adxStrong ? color.red : color.white, text_size=size.small)
+    table.cell(t, 0, 9, "Cooldown",     text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 9, cooldownOk ? "READY" : str.tostring(cooldownBars - barsSinceEntry) + " bars", text_color=cooldownOk ? color.green : color.yellow, text_size=size.small)
