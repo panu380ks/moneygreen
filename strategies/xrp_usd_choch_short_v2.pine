@@ -1,5 +1,5 @@
 //@version=6
-strategy("XRP/USD CHoCH Bear Short v2", overlay=true,
+strategy("XRP/USD CHoCH Bear Short v3", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
      default_qty_value=100, commission_type=strategy.commission.percent,
      commission_value=0.1, slippage=3, pyramiding=0)
@@ -8,16 +8,14 @@ strategy.risk.max_drawdown(25, strategy.percent_of_equity)
 strategy.risk.allow_entry_in(strategy.direction.short)
 
 // ═══════════════════════════════════════════════════════════════
-// CORE CONCEPT:
-// 1. Detect CHoCH Bear (first break below swing low after bullish structure)
-// 2. Mark the Order Block (last bullish candle before the break)
-// 3. Wait for price to RETRACE UP into the Order Block zone
-// 4. Require bearish rejection candle at the OB zone
-// 5. Enter short with tight stop above OB, target swing low
+// CORE CONCEPT v3 — SCORING SYSTEM:
+// v2 had 10+ AND filters → almost never fired.
+// v3 uses a SCORING SYSTEM: each filter adds points.
+// Entry requires minimum score, not ALL filters green.
+// This dramatically increases trade frequency while keeping quality.
 //
-// This avoids the v1 problem of entering immediately at CHoCH
-// and getting chopped in strong trends. The retest filter
-// dramatically reduces false entries.
+// Structure entry logic (OB retest / FVG fill) is unchanged.
+// The momentum/trend filters now ADD SCORE instead of blocking.
 // ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
@@ -25,32 +23,44 @@ strategy.risk.allow_entry_in(strategy.direction.short)
 // ═══════════════════════════════════════════════════════════════
 
 // Structure Detection
-swingLen      = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure", tooltip="Bars left/right for pivot detection. Lower = more signals, higher = stronger pivots")
-maxOBAge      = input.int(30, "Max Order Block Age (bars)", minval=5, maxval=100, group="Structure", tooltip="OB expires after this many bars — stale zones lose power")
-maxFVGAge     = input.int(20, "Max FVG Age (bars)", minval=3, maxval=60, group="Structure", tooltip="FVG expires after this many bars")
+swingLen      = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure")
+maxOBAge      = input.int(40, "Max Order Block Age (bars)", minval=5, maxval=100, group="Structure",
+     tooltip="v2 was 30 — extended to catch more retests")
+maxFVGAge     = input.int(25, "Max FVG Age (bars)", minval=3, maxval=60, group="Structure")
+obLookback    = input.int(20, "OB Lookback Bars", minval=5, maxval=40, group="Structure",
+     tooltip="v2 was 15 — extended to find more OBs")
 
 // Entry Mode
-entryMode     = input.string("OB Retest", "Entry Mode", options=["OB Retest", "FVG Fill", "Both", "Aggressive CHoCH"], group="Entry", tooltip="OB Retest = wait for retest of order block. FVG Fill = enter when price fills the gap. Both = either trigger. Aggressive = enter at CHoCH (like v1)")
-reqRejCandle  = input.bool(true, "Require Rejection Candle at Zone", group="Entry", tooltip="Bearish engulfing, pin bar, or strong bearish close at OB/FVG zone")
-reqBOS        = input.bool(true, "Allow BOS Continuation Entries", group="Entry", tooltip="Also enter on BOS (break of structure in existing downtrend)")
-minRR         = input.float(1.5, "Minimum Risk:Reward", step=0.1, minval=1.0, maxval=5.0, group="Entry", tooltip="Skip trade if R:R is below this threshold")
+entryMode     = input.string("Both", "Entry Mode", options=["OB Retest", "FVG Fill", "Both", "Aggressive CHoCH"], group="Entry",
+     tooltip="'Both' gives 2x the opportunities of v2's default 'OB Retest'")
+reqRejCandle  = input.bool(true, "Require Rejection Candle at Zone", group="Entry")
+reqBOS        = input.bool(true, "Allow BOS Continuation Entries", group="Entry")
+minRR         = input.float(1.2, "Minimum Risk:Reward", step=0.1, minval=0.5, maxval=5.0, group="Entry",
+     tooltip="v2 was 1.5 — lowered slightly since scoring system adds quality control")
 
-// Trend Filters
+// Scoring System
+minScore      = input.int(5, "Minimum Entry Score", minval=2, maxval=12, group="Scoring",
+     tooltip="Total score needed to enter. Max possible ~14. Lower = more trades, higher = pickier")
+aGradeScore   = input.int(10, "A+ Grade Threshold", group="Scoring")
+bGradeScore   = input.int(7, "A Grade Threshold", group="Scoring")
+
+// Trend Filters (now add score instead of blocking)
 emaFastLen    = input.int(21, "Fast EMA", group="Trend Filters")
 emaSlowLen    = input.int(50, "Slow EMA", group="Trend Filters")
-use200EMA     = input.bool(true, "200 EMA Trend Gate", group="Trend Filters", tooltip="Price must be below 200 EMA for shorts")
+use200EMA     = input.bool(true, "200 EMA Trend Gate (HARD)", group="Trend Filters",
+     tooltip="This one stays as hard gate — never short above 200 EMA")
 useHTF        = input.bool(true, "HTF Trend Filter", group="Trend Filters")
 htfTF         = input.timeframe("D", "HTF Timeframe", group="Trend Filters")
 useMidTF      = input.bool(true, "Mid TF Trend Filter", group="Trend Filters")
 midTF         = input.timeframe("240", "Mid Timeframe", group="Trend Filters")
 
-// Momentum Filters
+// Momentum Filters (add score)
 rsiLen        = input.int(14, "RSI Length", group="Momentum")
-rsiOBLevel    = input.float(60.0, "RSI OB Threshold", step=1.0, group="Momentum", tooltip="RSI must have been above this recently to confirm exhaustion")
-rsiOBLookback = input.int(15, "RSI OB Lookback", minval=2, maxval=40, group="Momentum")
+rsiOBLevel    = input.float(60.0, "RSI OB Threshold", step=1.0, group="Momentum")
+rsiOBLookback = input.int(20, "RSI OB Lookback", minval=2, maxval=40, group="Momentum",
+     tooltip="v2 was 15 — extended window")
 adxLen        = input.int(14, "ADX Length", group="Momentum")
 adxMin        = input.float(18.0, "Min ADX", step=1.0, group="Momentum")
-useDI         = input.bool(true, "Require DI- > DI+", group="Momentum")
 useMacd       = input.bool(true, "MACD Bear Filter", group="Momentum")
 macdFast      = input.int(12, "MACD Fast", group="Momentum")
 macdSlow      = input.int(26, "MACD Slow", group="Momentum")
@@ -58,13 +68,13 @@ macdSig       = input.int(9, "MACD Signal", group="Momentum")
 
 // Risk Management
 atrLen        = input.int(14, "ATR Length", group="Risk")
-slBuffer      = input.float(0.3, "SL Buffer (ATR mult above OB)", step=0.1, group="Risk", tooltip="Stop loss placed this many ATRs above the Order Block high")
+slBuffer      = input.float(0.3, "SL Buffer (ATR mult above OB)", step=0.1, group="Risk")
 tp1Mult       = input.float(2.0, "TP1 R:R Multiple", step=0.5, group="Risk")
 tp2Mult       = input.float(4.0, "TP2 R:R Multiple", step=0.5, group="Risk")
 tp3Mult       = input.float(7.0, "TP3 R:R Multiple", step=0.5, group="Risk")
-q1            = input.int(35, "TP1 Qty %", group="Risk")
+q1            = input.int(40, "TP1 Qty %", group="Risk", tooltip="v2 was 35 — take more off early to lock profit")
 q2            = input.int(30, "TP2 Qty %", group="Risk")
-q3            = input.int(20, "TP3 Qty %", group="Risk")
+q3            = input.int(15, "TP3 Qty %", group="Risk")
 useTrail      = input.bool(true, "Trail Remainder", group="Risk")
 trailATR      = input.float(2.0, "Trail ATR Mult", step=0.1, group="Risk")
 
@@ -76,7 +86,8 @@ maxVolRatio   = input.float(2.0, "Max Vol Ratio", step=0.1, group="Drawdown")
 useEqFilter   = input.bool(true, "Equity Curve Filter", group="Drawdown")
 eqFilterLen   = input.int(50, "Equity SMA Length", group="Drawdown")
 useCooldown   = input.bool(true, "Loss Cooldown", group="Drawdown")
-coolBars      = input.int(10, "Cooldown Bars After Loss", group="Drawdown")
+coolBars      = input.int(8, "Cooldown Bars After Loss", group="Drawdown",
+     tooltip="v2 was 10 — reduced to get back in faster")
 
 // Session
 useSession    = input.bool(false, "Session Filter", group="Session")
@@ -134,18 +145,12 @@ if breakAbove
 if breakBelow
     msTrend := -1
 
-// CHoCH Bear = FIRST break below after bullish/neutral structure
 chochBear = breakBelow and msTrend[1] >= 0
-// BOS Short = continuation break in existing downtrend
 bosShort  = breakBelow and msTrend[1] == -1
-// CHoCH Bull = structure flip back to bullish (exit signal)
 chochBull = breakAbove and msTrend[1] <= 0
 
 // ═══════════════════════════════════════════════════════════════
-// ORDER BLOCK DETECTION
-// After CHoCH/BOS bear break, the Order Block is the LAST
-// bullish candle before the impulsive move down that broke structure.
-// We track it and wait for price to come BACK to it.
+// ORDER BLOCK DETECTION — extended lookback
 // ═══════════════════════════════════════════════════════════════
 
 var float obHigh     = na
@@ -153,16 +158,14 @@ var float obLow      = na
 var int   obBar      = 0
 var bool  obActive   = false
 var bool  obTested   = false
-var float obEntryLvl = na // midpoint of OB for entry
+var float obEntryLvl = na
 
-// Find the last bullish candle before the break
 findOB() =>
     float _obH = na
     float _obL = na
     int   _obB = 0
-    // Look back up to 15 bars to find last bullish candle before break
-    for i = 1 to 15
-        if close[i] > open[i]  // bullish candle
+    for i = 1 to obLookback
+        if close[i] > open[i]
             _obH := high[i]
             _obL := low[i]
             _obB := bar_index - i
@@ -177,20 +180,16 @@ if chochBear or (bosShort and reqBOS)
         obBar    := _b
         obActive := true
         obTested := false
-        obEntryLvl := (_h + _l) / 2.0  // midpoint
+        obEntryLvl := (_h + _l) / 2.0
 
-// Expire old OBs
 if obActive and (bar_index - obBar) > maxOBAge
     obActive := false
 
-// Invalidate if price closes ABOVE OB high (buyers reclaimed it)
 if obActive and close > obHigh and close[1] > obHigh
     obActive := false
 
 // ═══════════════════════════════════════════════════════════════
-// FAIR VALUE GAP (FVG) DETECTION — BEARISH
-// Bearish FVG: gap between candle[2].low and candle[0].high
-// (the middle candle's body gaps through)
+// FAIR VALUE GAP DETECTION — BEARISH
 // ═══════════════════════════════════════════════════════════════
 
 var float fvgTop    = na
@@ -205,16 +204,13 @@ if bearFVG
     fvgBar    := bar_index - 1
     fvgActive := true
 
-// Expire old FVGs
 if fvgActive and (bar_index - fvgBar) > maxFVGAge
     fvgActive := false
 
-// FVG filled = price retraces into the gap
 fvgFilled = fvgActive and high >= fvgBot and close < fvgTop
 
 // ═══════════════════════════════════════════════════════════════
 // REJECTION CANDLE PATTERNS
-// These confirm selling pressure at the OB/FVG zone
 // ═══════════════════════════════════════════════════════════════
 
 bodySize    = math.abs(close - open)
@@ -222,82 +218,51 @@ upperWick   = high - math.max(close, open)
 lowerWick   = math.min(close, open) - low
 candleRange = high - low
 
-// Bearish engulfing
-bearEngulf = close < open and close[1] > open[1] and close < open[1] and open > close[1] and bodySize > bodySize[1]
-
-// Bearish pin bar (shooting star) — long upper wick, small body at bottom
-bearPin = upperWick > bodySize * 2.0 and upperWick > lowerWick * 2.0 and close < open
-
-// Strong bearish close — large body, closes near low
+bearEngulf      = close < open and close[1] > open[1] and close < open[1] and open > close[1] and bodySize > bodySize[1]
+bearPin         = upperWick > bodySize * 2.0 and upperWick > lowerWick * 2.0 and close < open
 strongBearClose = close < open and bodySize > candleRange * 0.6 and (close - low) < candleRange * 0.15
-
-// Any rejection pattern
 rejectionCandle = bearEngulf or bearPin or strongBearClose
-
-// Rejection check (use pattern or skip if not required)
 rejectionOK = not reqRejCandle or rejectionCandle
 
 // ═══════════════════════════════════════════════════════════════
-// ORDER BLOCK RETEST ENTRY
-// Price must retrace INTO the OB zone, then show rejection
+// ZONE ENTRY DETECTION
 // ═══════════════════════════════════════════════════════════════
 
 priceInOB = obActive and not obTested and high >= obLow and close < obHigh
 obRetestEntry = priceInOB and rejectionOK and msTrend == -1
 
-// Mark OB as tested after entry attempt (one shot per OB)
 if priceInOB
     obTested := true
 
-// ═══════════════════════════════════════════════════════════════
-// FVG FILL ENTRY
-// Price retraces into the FVG, shows rejection
-// ═══════════════════════════════════════════════════════════════
-
 fvgFillEntry = fvgFilled and rejectionOK and msTrend == -1
-
-// Mark FVG as consumed
 if fvgFilled
     fvgActive := false
 
-// ═══════════════════════════════════════════════════════════════
-// AGGRESSIVE CHoCH ENTRY (like v1, as fallback option)
-// ═══════════════════════════════════════════════════════════════
-
 aggressiveEntry = (chochBear or (bosShort and reqBOS)) and rejectionOK
-
-// ═══════════════════════════════════════════════════════════════
-// ENTRY MODE SELECTOR
-// ═══════════════════════════════════════════════════════════════
 
 structureEntry = switch entryMode
     "OB Retest"       => obRetestEntry
     "FVG Fill"        => fvgFillEntry
     "Both"            => obRetestEntry or fvgFillEntry
     "Aggressive CHoCH" => aggressiveEntry
-    => obRetestEntry
+    => obRetestEntry or fvgFillEntry
 
 // ═══════════════════════════════════════════════════════════════
-// MOMENTUM & TREND FILTERS
+// SCORING SYSTEM — replaces v2's all-or-nothing AND chain
+// Each filter adds points. Entry needs minimum score.
 // ═══════════════════════════════════════════════════════════════
 
 // ADX
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
-adxOK = adxVal >= adxMin
-diOK  = not useDI or diMinus > diPlus
 
 // MACD
 [macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
-macdOK = not useMacd or histLine < 0 or (histLine < histLine[1] and histLine[1] < histLine[2])
 
-// RSI was overbought recently (confirms exhaustion at peak)
+// RSI was overbought recently
 rsiWasOB = ta.highest(rsiVal, rsiOBLookback) > rsiOBLevel
 
 // EMA bearish alignment
 emaBear = emaFast < emaSlow or (emaFast < emaFast[1] and close < emaFast)
-
-// 200 EMA gate
-trendGate = not use200EMA or close < ema200
 
 // HTF filter
 htfEma50  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
@@ -308,20 +273,37 @@ midEmaF   = request.security(syminfo.tickerid, midTF, ta.ema(close, 21))
 midEmaS   = request.security(syminfo.tickerid, midTF, ta.ema(close, 50))
 midBear   = not useMidTF or na(midEmaF) or midEmaF < midEmaS
 
+// Lower high structure
+lowerHigh = not na(lastSH) and not na(prevSH) and lastSH < prevSH
+
+// Score calculation — each true condition adds points
+score = 0
+score += adxVal >= adxMin ? 2 : 0                                           // Trending market
+score += diMinus > diPlus ? 2 : 0                                           // Bearish DI
+score += (not useMacd or histLine < 0) ? 2 : (histLine < histLine[1] ? 1 : 0)  // MACD bearish
+score += rsiWasOB ? 1 : 0                                                   // RSI exhaustion
+score += emaBear ? 2 : 0                                                    // EMA alignment
+score += htfBear ? 2 : 0                                                    // HTF bearish
+score += midBear ? 1 : 0                                                    // Mid TF bearish
+score += lowerHigh ? 1 : 0                                                  // Structure LH
+score += rejectionCandle ? 1 : 0                                            // Candle quality bonus
+
+// Grade
+grade = score >= aGradeScore ? "A+" : score >= bGradeScore ? "A" : score >= minScore ? "B" : "C"
+scoreOK = score >= minScore
+
 // ═══════════════════════════════════════════════════════════════
-// RISK:REWARD CHECK
-// Calculate actual R:R before entering
+// HARD GATES — these still block entry entirely
 // ═══════════════════════════════════════════════════════════════
 
-// Stop loss level: above OB high (or above recent swing high if no OB)
+// 200 EMA: never short above it
+trendGate = not use200EMA or close < ema200
+
+// R:R check
 slLevel = obActive ? obHigh + atrVal * slBuffer : (not na(lastSH) ? lastSH + atrVal * slBuffer : close + atrVal * 2.0)
 slDist  = math.abs(slLevel - close)
-
-// Target: last swing low (the break level)
 tpTarget = not na(lastSL) ? lastSL : close - atrVal * 3.0
 tpDist   = math.abs(close - tpTarget)
-
-// R:R ratio
 rrRatio = slDist > 0 ? tpDist / slDist : 0.0
 rrOK    = rrRatio >= minRR
 
@@ -329,16 +311,13 @@ rrOK    = rrRatio >= minRR
 // DRAWDOWN CONTROLS
 // ═══════════════════════════════════════════════════════════════
 
-// Volatility regime
 atrMA      = ta.sma(atrVal, volFilterLen)
 volRatio   = atrVal / nz(atrMA, atrVal)
 volOK      = not useVolRegime or volRatio < maxVolRatio
 
-// Equity curve
 eqSMA      = ta.sma(strategy.equity, eqFilterLen)
 equityOK   = not useEqFilter or strategy.equity >= eqSMA
 
-// Cooldown after loss
 var int lastLossBar     = -999
 var int prevClosedCount = 0
 if strategy.closedtrades > prevClosedCount
@@ -347,17 +326,18 @@ if strategy.closedtrades > prevClosedCount
     prevClosedCount := strategy.closedtrades
 cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
 
-// Dynamic sizing
-volScale = useVolRegime ? (volRatio > 1.5 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
-unitQty  = strategy.equity * (basePos / 100.0) * volScale / close
+// Dynamic sizing — scale down in high vol, scale up for A+ grades
+volScale   = useVolRegime ? (volRatio > 1.5 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
+gradeScale = grade == "A+" ? 1.0 : grade == "A" ? 0.8 : 0.6
+unitQty    = strategy.equity * (basePos / 100.0) * volScale * gradeScale / close
 
 ddGate = volOK and equityOK and cooldownOK
 
 // ═══════════════════════════════════════════════════════════════
-// COMBINED ENTRY SIGNAL
+// COMBINED ENTRY SIGNAL — scoring replaces AND chain
 // ═══════════════════════════════════════════════════════════════
 
-shortSignal = structureEntry and adxOK and diOK and macdOK and rsiWasOB and emaBear and trendGate and htfBear and midBear and rrOK and inSession and rsiVal < 72 and rsiVal > 20
+shortSignal = structureEntry and scoreOK and trendGate and rrOK and inSession and rsiVal < 75 and rsiVal > 15
 
 // ═══════════════════════════════════════════════════════════════
 // EXECUTE ENTRIES
@@ -370,7 +350,6 @@ if shortSignal and ddGate and strategy.position_size == 0
 // EXITS — R:R based TPs with trailing
 // ═══════════════════════════════════════════════════════════════
 
-// Use entry-relative stops based on actual SL distance
 slTicks    = slDist / syminfo.mintick
 tp1Ticks   = slDist * tp1Mult / syminfo.mintick
 tp2Ticks   = slDist * tp2Mult / syminfo.mintick
@@ -387,7 +366,7 @@ if useTrail
 else
     strategy.exit("x4", profit=tp3Ticks * 1.5, loss=slTicks)
 
-// Emergency exit: bullish CHoCH + price reclaims structure
+// Emergency exit: bullish CHoCH + price reclaims 200 EMA
 if strategy.position_size < 0 and chochBull and close > ema200
     strategy.close("Short", comment="Bull Reversal")
 
@@ -395,11 +374,9 @@ if strategy.position_size < 0 and chochBull and close > ema200
 // PLOTS
 // ═══════════════════════════════════════════════════════════════
 
-// Structure levels
 plot(lastSH, "Swing High", color.new(#ff5252, 30), style=plot.style_stepline_diamond)
 plot(lastSL, "Swing Low", color.new(#00e676, 30), style=plot.style_stepline_diamond)
 
-// EMAs
 plot(emaFast, "EMA 21", color.new(#2196f3, 50))
 plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
 plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
@@ -424,9 +401,8 @@ plotshape(obRetestEntry and structureEntry, "OB Retest", shape.arrowdown, locati
 plotshape(fvgFillEntry and structureEntry and not obRetestEntry, "FVG Fill", shape.arrowdown, location.abovebar, color.new(#ff6d00, 0), size=size.small, text="FVG Short")
 plotshape(rejectionCandle and (priceInOB or fvgFilled), "Rejection", shape.diamond, location.belowbar, color.new(#ffeb3b, 0), size=size.tiny, text="Rej")
 
-// Lower high detection
-lowerHigh = not na(lastSH) and not na(prevSH) and lastSH < prevSH
-plotshape(lowerHigh and not na(swH), "Lower High", shape.xcross, location.abovebar, color.new(#ffab00, 0), size=size.tiny, text="LH")
+lhPlot = not na(lastSH) and not na(prevSH) and lastSH < prevSH
+plotshape(lhPlot and not na(swH), "Lower High", shape.xcross, location.abovebar, color.new(#ffab00, 0), size=size.tiny, text="LH")
 
 // Background
 bgcolor(msTrend == -1 ? color.new(#ff5252, 95) : msTrend == 1 ? color.new(#00e676, 97) : na, title="Structure Trend")
@@ -434,13 +410,13 @@ bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Paused")
 bgcolor(not inSession ? color.new(#000000, 96) : na, title="Out of Session")
 
 // ═══════════════════════════════════════════════════════════════
-// INFO TABLE
+// INFO TABLE — now shows score
 // ═══════════════════════════════════════════════════════════════
 
 var table t = table.new(position.top_right, 2, 15, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0,  "STRATEGY",    text_color=color.yellow, text_size=size.small)
-    table.cell(t, 1, 0,  "CHoCH SHORT v2", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0,  "CHoCH SHORT v3", text_color=color.yellow, text_size=size.small)
 
     table.cell(t, 0, 1,  "Entry Mode",  text_color=color.gray, text_size=size.small)
     table.cell(t, 1, 1,  entryMode, text_color=color.white, text_size=size.small)
@@ -448,38 +424,41 @@ if barstate.islast
     table.cell(t, 0, 2,  "Structure",   text_color=color.gray, text_size=size.small)
     table.cell(t, 1, 2,  msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "NEUTRAL", text_color=msTrend == -1 ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 3,  "Order Block", text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 3,  obActive ? (obTested ? "TESTED" : "ACTIVE " + str.tostring(bar_index - obBar) + "b") : "NONE", text_color=obActive and not obTested ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 3,  "SCORE",       text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 3,  str.tostring(score) + "/14 — " + grade,
+         text_color=score >= aGradeScore ? #00e676 : score >= bGradeScore ? #2196f3 : score >= minScore ? #ffeb3b : #ff5252, text_size=size.small)
 
-    table.cell(t, 0, 4,  "FVG",         text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 4,  fvgActive ? "ACTIVE " + str.tostring(bar_index - fvgBar) + "b" : "NONE", text_color=fvgActive ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 4,  "Order Block", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 4,  obActive ? (obTested ? "TESTED" : "ACTIVE " + str.tostring(bar_index - obBar) + "b") : "NONE", text_color=obActive and not obTested ? color.green : color.gray, text_size=size.small)
 
-    table.cell(t, 0, 5,  "R:R",         text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 5,  str.tostring(rrRatio, "#.#") + ":1", text_color=rrOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5,  "FVG",         text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 5,  fvgActive ? "ACTIVE " + str.tostring(bar_index - fvgBar) + "b" : "NONE", text_color=fvgActive ? color.green : color.gray, text_size=size.small)
 
-    table.cell(t, 0, 6,  "ADX",         text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 6,  str.tostring(adxVal, "#.0") + (adxOK ? " TREND" : " RANGE"), text_color=adxOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6,  "R:R",         text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 6,  str.tostring(rrRatio, "#.#") + ":1", text_color=rrOK ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 7,  "DI",          text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 7,  diMinus > diPlus ? "DI- LEAD" : "DI+ LEAD", text_color=diMinus > diPlus ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 7,  "ADX",         text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 7,  str.tostring(adxVal, "#.0") + (adxVal >= adxMin ? " +2" : " +0"), text_color=adxVal >= adxMin ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 8,  "MACD",        text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 8,  histLine < 0 ? "BEAR" : "BULL", text_color=histLine < 0 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 8,  "DI",          text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 8,  (diMinus > diPlus ? "DI- LEAD +2" : "DI+ LEAD +0"), text_color=diMinus > diPlus ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 9,  "HTF",         text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 9,  htfBear ? "BEAR" : "BULL", text_color=htfBear ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 9,  "MACD",        text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 9,  histLine < 0 ? "BEAR +2" : histLine < histLine[1] ? "FADING +1" : "BULL +0", text_color=histLine < 0 ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 10, "Mid TF",      text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 10, midBear ? "BEAR" : "BULL", text_color=midBear ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 10, "HTF",         text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 10, htfBear ? "BEAR +2" : "BULL +0", text_color=htfBear ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 11, "RSI",         text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 11, str.tostring(rsiVal, "#.0") + (rsiWasOB ? " (was OB)" : ""), text_color=rsiWasOB ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 11, "200 EMA",     text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 11, close < ema200 ? "BELOW (OK)" : "ABOVE (BLOCK)", text_color=close < ema200 ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 12, "200 EMA",     text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 12, close < ema200 ? "BELOW (OK)" : "ABOVE", text_color=close < ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 12, "Vol Ratio",   text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 12, str.tostring(volRatio, "#.##"), text_color=volOK ? color.green : color.red, text_size=size.small)
 
-    table.cell(t, 0, 13, "Vol Ratio",   text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 13, str.tostring(volRatio, "#.##"), text_color=volOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 13, "Cooldown",    text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 13, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
 
-    table.cell(t, 0, 14, "Cooldown",    text_color=color.gray, text_size=size.small)
-    table.cell(t, 1, 14, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
+    table.cell(t, 0, 14, "Position",    text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 14,
+         strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size < 0 ? #ff5252 : color.gray, text_size=size.small)

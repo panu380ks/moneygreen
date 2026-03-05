@@ -1,65 +1,145 @@
-// This Pine Script™ strategy is designed for XRP/USD short-only trading
-// Combines EMA trend filter, RSI mean-reversion, and optional VWAP for short entries
+// XRP/USD Short Only v2 — Profitability Upgrade
+// Key fixes: Higher RSI threshold, MACD confirmation, better R:R (1:3),
+// pullback entry, HTF alignment, trailing stop, drawdown controls
 // Works on market cap charts and price charts — Timeframe: 1H (optimized), works on 15m-4H
 //@version=6
-strategy("XRP/USD Short Only", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+strategy("XRP/USD Short Only v2", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=25,
+     initial_capital=10000, commission_type=strategy.commission.percent,
+     commission_value=0.1, slippage=3, pyramiding=0)
+
+strategy.risk.max_drawdown(25, strategy.percent_of_equity)
+strategy.risk.allow_entry_in(strategy.direction.short)
 
 // ──────────────────────────────────────────────
 // INPUTS
 // ──────────────────────────────────────────────
+
 // Trend Filter
-fastEmaLen    = input.int(9,    "Fast EMA Length",     minval=5)
-slowEmaLen    = input.int(21,   "Slow EMA Length",     minval=10)
+fastEmaLen    = input.int(9,    "Fast EMA Length",     minval=3)
+slowEmaLen    = input.int(21,   "Slow EMA Length",     minval=5)
+ema200Len     = input.int(200,  "200 EMA Length",      minval=50)
+use200Gate    = input.bool(true, "200 EMA Trend Gate",  tooltip="Price must be below 200 EMA for shorts")
 
-// RSI
+// RSI — raised threshold to avoid noise entries
 rsiLen        = input.int(14,   "RSI Length",          minval=2)
-rsiOverbought = input.float(55, "RSI Overbought",      minval=40, maxval=90)
+rsiOverbought = input.float(65, "RSI Overbought",      minval=50, maxval=90,
+     tooltip="v1 was 55 (too low = enters everything). 65+ catches real overbought bounces")
 
-// ATR for stops & targets
+// Pullback Entry
+usePullback   = input.bool(true, "Use Pullback Entry",
+     tooltip="Wait for price to bounce to EMA before shorting, instead of entering immediately")
+pullbackEMA   = input.string("Fast EMA", "Pullback To", options=["Fast EMA", "Slow EMA"])
+
+// MACD Confirmation
+useMacd       = input.bool(true, "MACD Bear Filter")
+macdFast      = input.int(12, "MACD Fast")
+macdSlow      = input.int(26, "MACD Slow")
+macdSig       = input.int(9,  "MACD Signal")
+
+// ADX Filter
+useADX        = input.bool(true, "ADX Trend Filter")
+adxLen        = input.int(14,   "ADX Length")
+adxMin        = input.float(18, "Min ADX", step=1.0)
+
+// ATR for stops & targets — improved R:R
 atrLen        = input.int(14,   "ATR Length",          minval=5)
 atrStopMult   = input.float(2.0,"ATR Stop Multiplier", minval=0.5, step=0.1)
-atrTpMult     = input.float(3.0,"ATR TP Multiplier",   minval=1.0, step=0.1)
+atrTpMult     = input.float(4.5,"ATR TP Multiplier",   minval=1.0, step=0.1,
+     tooltip="v1 was 3.0 (1.5:1 R:R). Now 4.5 for 2.25:1 R:R minimum")
+
+// Trailing Stop
+useTrail      = input.bool(true, "Use Trailing Stop")
+trailATR      = input.float(1.5, "Trail ATR Mult", step=0.1)
 
 // Optional filters
 useVwap       = input.bool(false,"Use VWAP Filter",    tooltip="Turn off for market cap charts that lack volume data")
 useVolFilter  = input.bool(false,"Use Volume Filter",   tooltip="Turn off for market cap charts that lack volume data")
 volLen        = input.int(20,   "Volume MA Length",    minval=5)
-volMult       = input.float(1.0,"Volume Threshold",    minval=0.5, step=0.1)
+volMult       = input.float(1.2,"Volume Threshold",    minval=0.5, step=0.1)
 
-// Session filter (UTC hours)
+// Session filter
 useSession    = input.bool(false,"Use Session Filter")
 sessionStart  = input.int(8,    "Session Start (UTC)", minval=0, maxval=23)
 sessionEnd    = input.int(22,   "Session End (UTC)",   minval=0, maxval=23)
+
+// Drawdown Controls
+useCooldown   = input.bool(true, "Loss Cooldown")
+coolBars      = input.int(8, "Cooldown Bars After Loss")
+
+// Bearish Candle Confirmation
+useRejection  = input.bool(true, "Require Bearish Candle",
+     tooltip="Need engulfing, pin bar, or strong bearish close to enter")
 
 // ──────────────────────────────────────────────
 // CALCULATIONS
 // ──────────────────────────────────────────────
 fastEma = ta.ema(close, fastEmaLen)
 slowEma = ta.ema(close, slowEmaLen)
+ema200  = ta.ema(close, ema200Len)
 rsi     = ta.rsi(close, rsiLen)
 atr     = ta.atr(atrLen)
 
 // Trend direction
 bearTrend = fastEma < slowEma
 
-// Optional VWAP — safely handle charts with no volume
+// 200 EMA gate
+trendGate = not use200Gate or close < ema200
+
+// ADX
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = not useADX or (adxVal >= adxMin and diMinus > diPlus)
+
+// MACD
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdOK = not useMacd or histLine < 0 or (histLine < histLine[1] and histLine[1] < histLine[2])
+
+// Pullback detection — price retraced up to EMA zone
+pullbackTarget = pullbackEMA == "Fast EMA" ? fastEma : slowEma
+pullbackOK = not usePullback or (high >= pullbackTarget * 0.998 and close < pullbackTarget)
+
+// RSI was overbought recently (within last 5 bars)
+rsiRecentOB = ta.highest(rsi, 5) > rsiOverbought
+
+// Bearish rejection candle
+bodySize    = math.abs(close - open)
+upperWick   = high - math.max(close, open)
+lowerWick   = math.min(close, open) - low
+candleRange = high - low
+bearEngulf      = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+bearPin         = upperWick > bodySize * 2.0 and close < open
+strongBearClose = close < open and bodySize > candleRange * 0.55 and (close - low) < candleRange * 0.2
+rejectionCandle = bearEngulf or bearPin or strongBearClose
+rejectionOK = not useRejection or rejectionCandle
+
+// VWAP
 vwap    = ta.vwap(hlc3)
 vwapOk  = useVwap ? (not na(vwap) and close >= vwap * 0.995) : true
 
-// Optional volume confirmation
+// Volume
 volMa   = ta.sma(volume, volLen)
 volOk   = useVolFilter ? (volume > volMa * volMult) : true
 
-// Session filter
+// Session
 hourNow   = hour(time, "UTC")
 inSession = useSession ? (hourNow >= sessionStart and hourNow < sessionEnd) : true
+
+// Loss cooldown
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+if strategy.closedtrades > prevClosedCount
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        lastLossBar := bar_index
+    prevClosedCount := strategy.closedtrades
+cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
 
 // ──────────────────────────────────────────────
 // ENTRY CONDITIONS
 // ──────────────────────────────────────────────
 
-// SHORT: downtrend + RSI overbought + optional VWAP/volume/session
-shortCond = bearTrend and rsi > rsiOverbought and vwapOk and volOk and inSession
+shortCond = bearTrend and trendGate and rsiRecentOB and pullbackOK and
+     rejectionOK and adxOK and macdOK and vwapOk and volOk and
+     inSession and cooldownOK
 
 // ──────────────────────────────────────────────
 // ENTRIES & EXITS
@@ -68,21 +148,68 @@ if shortCond and strategy.position_size == 0
     stopLoss   = close + atr * atrStopMult
     takeProfit = close - atr * atrTpMult
     strategy.entry("Short", strategy.short)
-    strategy.exit("Short Exit", "Short", stop=stopLoss, limit=takeProfit)
+    if useTrail
+        strategy.exit("Short Exit", "Short",
+             stop=stopLoss, limit=takeProfit,
+             trail_points=atr * trailATR / syminfo.mintick,
+             trail_offset=atr * trailATR * 0.4 / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "Short", stop=stopLoss, limit=takeProfit)
 
-// Trend reversal exit — close short if trend flips bullish
-if strategy.position_size < 0 and not bearTrend
+// Trend reversal exit — close short if trend flips bullish hard
+if strategy.position_size < 0 and not bearTrend and close > fastEma and close > slowEma
     strategy.close("Short", comment="Trend Flip")
+
+// Emergency exit on 200 EMA reclaim
+if strategy.position_size < 0 and use200Gate and close > ema200 and close[1] > ema200
+    strategy.close("Short", comment="200 EMA Reclaim")
 
 // ──────────────────────────────────────────────
 // PLOTS
 // ──────────────────────────────────────────────
 plot(fastEma, "Fast EMA", color=color.new(color.teal, 0), linewidth=2)
 plot(slowEma, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
+plot(use200Gate ? ema200 : na, "200 EMA", color=color.new(color.white, 30), linewidth=2)
 plot(useVwap and not na(vwap) ? vwap : na, "VWAP", color=color.new(color.purple, 40), style=plot.style_stepline)
 
-// Background color for trend
-bgcolor(bearTrend ? color.new(color.red, 93) : na)
+// Background
+bgcolor(bearTrend and trendGate ? color.new(color.red, 93) : na, title="Bear Zone")
+bgcolor(not cooldownOK ? color.new(color.orange, 88) : na, title="Cooldown")
 
 // Entry signals
-plotshape(shortCond and strategy.position_size == 0, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(shortCond and strategy.position_size == 0, "Short Signal",
+     shape.triangledown, location.abovebar, color.red, size=size.small, text="SHORT")
+
+// ──────────────────────────────────────────────
+// INFO TABLE
+// ──────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(t, 0, 0, "STRATEGY", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "XRP SHORT v2", text_color=color.yellow, text_size=size.small)
+
+    table.cell(t, 0, 1, "TREND", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 1, bearTrend ? "BEAR" : "BULL", text_color=bearTrend ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 2, "200 EMA", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 2, close < ema200 ? "BELOW (OK)" : "ABOVE", text_color=close < ema200 ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 3, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(rsi, "#.0") + (rsiRecentOB ? " OB" : ""), text_color=rsiRecentOB ? color.green : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 4, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " WEAK"), text_color=adxOK ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 5, "MACD", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 5, histLine < 0 ? "BEAR" : "BULL", text_color=histLine < 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(t, 0, 6, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(t, 1, 6,
+         strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size < 0 ? #ff5252 : color.gray, text_size=size.small)
+
+// ──────────────────────────────────────────────
+// ALERTS
+// ──────────────────────────────────────────────
+alertcondition(shortCond, title="XRP Short Signal", message="XRP/USD Short Entry — Pullback + Rejection Confirmed")
