@@ -1,8 +1,8 @@
-// This Pine Script™ strategy is designed for XRP/USD trading
-// Combines EMA trend filter, RSI mean-reversion, and VWAP for entries
+// This Pine Script™ strategy is designed for XRP/USD short-only trading
+// Combines EMA trend filter, RSI mean-reversion, and VWAP for short entries
 // Timeframe: 1H (optimized), works on 15m-4H
 //@version=6
-strategy("XRP/USD Trend + Mean Reversion", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+strategy("XRP/USD Short Only", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
 
 // ──────────────────────────────────────────────
 // INPUTS
@@ -13,7 +13,6 @@ slowEmaLen    = input.int(55,   "Slow EMA Length",     minval=10)
 
 // RSI
 rsiLen        = input.int(14,   "RSI Length",          minval=2)
-rsiOversold   = input.float(35, "RSI Oversold",        minval=10, maxval=50)
 rsiOverbought = input.float(65, "RSI Overbought",      minval=50, maxval=90)
 
 // ATR for stops & targets
@@ -41,7 +40,6 @@ volMa   = ta.sma(volume, volLen)
 vwap    = ta.vwap(hlc3)
 
 // Trend direction
-bullTrend = fastEma > slowEma
 bearTrend = fastEma < slowEma
 
 // Volume confirmation
@@ -55,31 +53,20 @@ inSession = useSession ? (hourNow >= sessionStart and hourNow < sessionEnd) : tr
 // ENTRY CONDITIONS
 // ──────────────────────────────────────────────
 
-// LONG: uptrend + RSI dip + price near/below VWAP + volume
-longCond = bullTrend and rsi < rsiOversold and close <= vwap * 1.005 and volOk and inSession
-
-// SHORT: downtrend + RSI spike + price near/above VWAP + volume
+// SHORT: downtrend + RSI overbought + price near/above VWAP + volume
 shortCond = bearTrend and rsi > rsiOverbought and close >= vwap * 0.995 and volOk and inSession
 
 // ──────────────────────────────────────────────
 // ENTRIES & EXITS
 // ──────────────────────────────────────────────
-if longCond and strategy.position_size == 0
-    stopLoss   = close - atr * atrStopMult
-    takeProfit = close + atr * atrTpMult
-    strategy.entry("Long", strategy.long)
-    strategy.exit("Long Exit", "Long", stop=stopLoss, limit=takeProfit)
-
 if shortCond and strategy.position_size == 0
     stopLoss   = close + atr * atrStopMult
     takeProfit = close - atr * atrTpMult
     strategy.entry("Short", strategy.short)
     strategy.exit("Short Exit", "Short", stop=stopLoss, limit=takeProfit)
 
-// Trend reversal exit — close if trend flips against position
-if strategy.position_size > 0 and bearTrend
-    strategy.close("Long", comment="Trend Flip")
-if strategy.position_size < 0 and bullTrend
+// Trend reversal exit — close short if trend flips bullish
+if strategy.position_size < 0 and not bearTrend
     strategy.close("Short", comment="Trend Flip")
 
 // ──────────────────────────────────────────────
@@ -90,8 +77,7 @@ plot(slowEma, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
 plot(vwap,    "VWAP",     color=color.new(color.purple, 40), style=plot.style_stepline)
 
 // Background color for trend
-bgcolor(bullTrend ? color.new(color.green, 93) : bearTrend ? color.new(color.red, 93) : na)
+bgcolor(bearTrend ? color.new(color.red, 93) : na)
 
 // Entry signals
-plotshape(longCond  and strategy.position_size == 0, "Long Signal",  shape.triangleup,   location.belowbar, color.green, size=size.small)
-plotshape(shortCond and strategy.position_size == 0, "Short Signal", shape.triangledown, location.abovebar, color.red,   size=size.small)
+plotshape(shortCond and strategy.position_size == 0, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
