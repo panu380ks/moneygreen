@@ -1,0 +1,334 @@
+//@version=6
+strategy("XAUUSD Bear Peak Short v1", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.02, slippage=5, pyramiding=0)
+
+strategy.risk.max_drawdown(30, strategy.percent_of_equity)
+strategy.risk.allow_entry_in(strategy.direction.short)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Peak Detection
+swingLen     = input.int(6, "Swing Length", minval=2, maxval=20, group="Peak Detection", tooltip="Bars left/right for pivot high detection")
+peakConfirm  = input.int(3, "Peak Confirm Bars", minval=1, maxval=10, group="Peak Detection", tooltip="Bars after swing high before considering short")
+useHTF       = input.bool(true, "Use HTF Filter", group="Peak Detection")
+htfTF        = input.timeframe("D", "HTF Timeframe", group="Peak Detection")
+useMidTF     = input.bool(true, "Use Mid TF Filter", group="Peak Detection")
+midTF        = input.timeframe("240", "Mid Timeframe", group="Peak Detection")
+
+// Filters
+emaFastLen   = input.int(21, "Fast EMA", group="Filters")
+emaSlowLen   = input.int(50, "Slow EMA", group="Filters")
+rsiLen       = input.int(14, "RSI Length", group="Filters")
+rsiOBLevel   = input.float(65.0, "RSI Overbought Threshold", step=1.0, group="Filters", tooltip="RSI must have been above this recently to confirm peak")
+rsiOBLookback = input.int(10, "RSI OB Lookback Bars", minval=2, maxval=30, group="Filters")
+volLen       = input.int(20, "Volume MA Length", group="Filters")
+
+// ADX
+adxLen       = input.int(14, "ADX Length", group="ADX Filter")
+adxMinTrend  = input.float(18.0, "Min ADX for Entry", step=1.0, minval=10, maxval=40, group="ADX Filter")
+useDIconfirm = input.bool(true, "Require DI- > DI+", group="ADX Filter")
+
+// MACD
+macdFast     = input.int(12, "MACD Fast", group="Momentum")
+macdSlow     = input.int(26, "MACD Slow", group="Momentum")
+macdSig      = input.int(9, "MACD Signal", group="Momentum")
+useMacd      = input.bool(true, "Require MACD Bear", group="Momentum")
+
+// Entry refinement
+usePullback    = input.bool(true, "Require Pullback to EMA After Peak", group="Entry", tooltip="Wait for price to retrace up to fast EMA after peak, then reject")
+pullbackBars   = input.int(10, "Pullback Lookback Bars", minval=2, maxval=25, group="Entry")
+useEMAcross    = input.bool(true, "Require EMA Bear Cross", group="Entry", tooltip="Fast EMA must be below Slow EMA or crossing down")
+
+// Risk — ATR-based
+atrMultSL    = input.float(2.0, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1   = input.float(2.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrMultTP2   = input.float(5.0, "TP2 ATR Multiplier", step=0.5, group="Risk")
+atrMultTP3   = input.float(8.0, "TP3 ATR Multiplier", step=0.5, group="Risk")
+q1           = input.int(30, "TP1 Qty %", group="Risk")
+q2           = input.int(30, "TP2 Qty %", group="Risk")
+q3           = input.int(20, "TP3 Qty %", group="Risk")
+useTrail     = input.bool(true, "Use Trailing Stop on Remainder", group="Risk")
+trailMult    = input.float(2.5, "Trail ATR Multiplier", step=0.1, group="Risk")
+
+// Drawdown controls
+basePos      = input.float(75.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
+use200EMA    = input.bool(true, "200 EMA Trend Gate (price below = OK)", group="Drawdown")
+useVolFilter = input.bool(true, "Volatility Regime Filter", group="Drawdown")
+volFilterLen = input.int(40, "Vol Filter MA Length", minval=10, group="Drawdown")
+maxVolRatio  = input.float(1.8, "Max Vol Ratio", step=0.1, minval=1.0, maxval=3.0, group="Drawdown")
+useEqFilter  = input.bool(true, "Equity Curve Filter", group="Drawdown")
+eqFilterLen  = input.int(50, "Equity SMA Length", minval=10, group="Drawdown")
+useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
+coolBars     = input.int(8, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+
+// Session filter
+useSession   = input.bool(true, "Session Filter", group="Session", tooltip="London + NY overlap = best for Gold shorts")
+sessionStr   = input.session("0800-2000", "Trading Session (UTC)", group="Session")
+
+// ═══════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ═══════════════════════════════════════════════════════════════
+
+inSession = not useSession or not na(time(timeframe.period, sessionStr, "UTC"))
+
+// ═══════════════════════════════════════════════════════════════
+// CORE INDICATORS
+// ═══════════════════════════════════════════════════════════════
+
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+ema200   = ta.ema(close, 200)
+rsiVal   = ta.rsi(close, rsiLen)
+atrVal   = ta.atr(14)
+volMA    = ta.sma(volume, volLen)
+volOK    = na(volume) or volume > volMA * 0.8
+
+// ═══════════════════════════════════════════════════════════════
+// PEAK DETECTION — Swing Highs
+// ═══════════════════════════════════════════════════════════════
+
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+var float prevSH = na
+
+// Track swing highs — a LOWER swing high after a higher one = peak confirmed
+if not na(swH)
+    prevSH := lastSH
+    lastSH := swH
+if not na(swL)
+    lastSL := swL
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE (bear-focused)
+// ═══════════════════════════════════════════════════════════════
+
+// Break below swing low = bearish structure break
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+// Break above swing high (for exit detection)
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+
+// Sweep high = wick above swing high, close back below (liquidity grab at peak)
+sweepHigh = not na(lastSH) and high > lastSH and close < lastSH
+
+var int msTrend = 0
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+// CHoCH Bear = first break below after bullish trend (THE peak signal)
+chochBear = breakBelow and msTrend[1] >= 0
+// BOS Short = continuation break lower in downtrend
+bosShort  = breakBelow and msTrend[1] == -1
+// CHoCH Bull (for exit only)
+chochBull = breakAbove and msTrend[1] <= 0
+
+// ═══════════════════════════════════════════════════════════════
+// PEAK CONFIRMATION SIGNALS
+// ═══════════════════════════════════════════════════════════════
+
+// 1. Lower high formed: current swing high < previous swing high
+lowerHigh = not na(lastSH) and not na(prevSH) and lastSH < prevSH
+
+// 2. RSI was overbought recently (confirms we were at a peak)
+rsiWasOB = ta.highest(rsiVal, rsiOBLookback) > rsiOBLevel
+
+// 3. RSI now turning down from high levels
+rsiTurningDown = rsiVal < rsiVal[1] and rsiVal[1] < rsiVal[2] and rsiVal < 70
+
+// 4. Price rejected from swing high zone (within last N bars)
+var int barsSincePeak = 999
+if not na(swH)
+    barsSincePeak := 0
+else
+    barsSincePeak += 1
+nearPeak = barsSincePeak <= peakConfirm + swingLen
+
+// ═══════════════════════════════════════════════════════════════
+// PULLBACK AFTER BEAR BREAK — better entries
+// ═══════════════════════════════════════════════════════════════
+
+var int barsSinceBearBreak = 999
+if chochBear or bosShort
+    barsSinceBearBreak := 0
+else
+    barsSinceBearBreak += 1
+
+// Pullback: price retraces UP to fast EMA then closes below with bearish candle
+pullbackShort = barsSinceBearBreak > 0 and barsSinceBearBreak <= pullbackBars and high >= emaFast and close < emaFast and close < open
+
+// Entry mode
+bearStructure = usePullback ? pullbackShort : (chochBear or bosShort)
+
+// Sweep entries (liquidity grab at highs = immediate short)
+sweepShortSig = sweepHigh and (msTrend <= 0 or rsiWasOB)
+
+// ═══════════════════════════════════════════════════════════════
+// ADX FILTER
+// ═══════════════════════════════════════════════════════════════
+
+[diPlus, diMinus, adxVal2] = ta.dmi(adxLen, adxLen)
+adxTrending = adxVal2 >= adxMinTrend
+diBearOK    = not useDIconfirm or diMinus > diPlus
+
+// ═══════════════════════════════════════════════════════════════
+// MACD MOMENTUM
+// ═══════════════════════════════════════════════════════════════
+
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdBearOK = not useMacd or histLine < 0 or (histLine < histLine[1] and histLine[1] < histLine[2])
+
+// ═══════════════════════════════════════════════════════════════
+// EMA CROSS FILTER
+// ═══════════════════════════════════════════════════════════════
+
+emaBearCross = not useEMAcross or emaFast < emaSlow or (emaFast < emaFast[1] and emaSlow > emaSlow[1])
+
+// ═══════════════════════════════════════════════════════════════
+// HTF + MID TF FILTERS
+// ═══════════════════════════════════════════════════════════════
+
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBear = not useHTF or na(htfEma) or close < htfEma
+
+midEmaFast = request.security(syminfo.tickerid, midTF, ta.ema(close, 21))
+midEmaSlow = request.security(syminfo.tickerid, midTF, ta.ema(close, 50))
+midBear    = not useMidTF or na(midEmaFast) or midEmaFast < midEmaSlow
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWDOWN CONTROLS
+// ═══════════════════════════════════════════════════════════════
+
+// 200 EMA gate — for shorts, price should be BELOW 200 EMA (or disabled)
+trendShortOK = not use200EMA or close < ema200
+
+// Volatility regime
+atrMA       = ta.sma(atrVal, volFilterLen)
+volRatio    = atrVal / nz(atrMA, atrVal)
+volRegimeOK = not useVolFilter or volRatio < maxVolRatio
+
+// Equity curve filter
+eqSMA    = ta.sma(strategy.equity, eqFilterLen)
+equityOK = not useEqFilter or strategy.equity >= eqSMA
+
+// Loss cooldown
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+if strategy.closedtrades > prevClosedCount
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        lastLossBar := bar_index
+    prevClosedCount := strategy.closedtrades
+cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
+
+// Dynamic position sizing
+volScale = useVolFilter ? (volRatio > 1.4 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
+unitQty  = strategy.equity * (basePos / 100.0) * volScale / close
+
+// Combined gate
+ddGate = volRegimeOK and equityOK and cooldownOK
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS — SHORT ONLY, AFTER PEAK
+// ═══════════════════════════════════════════════════════════════
+
+// Primary: structure break/pullback + peak confirmation + all filters
+shortEntry = bearStructure and (rsiWasOB or lowerHigh or nearPeak) and adxTrending and diBearOK and macdBearOK and htfBear and midBear and emaBearCross and rsiVal < 70 and rsiVal > 25 and volOK and inSession and close < emaFast
+
+// Sweep: liquidity grab above swing high = immediate short
+shortSweepEntry = sweepShortSig and adxTrending and rsiVal > 55 and volOK and inSession
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE ENTRIES
+// ═══════════════════════════════════════════════════════════════
+
+if (shortEntry or shortSweepEntry) and ddGate and trendShortOK
+    strategy.entry("Short", strategy.short, qty=unitQty)
+
+// ═══════════════════════════════════════════════════════════════
+// EXITS — ATR-based TPs + Trailing Stop
+// ═══════════════════════════════════════════════════════════════
+
+slTicks    = atrVal * atrMultSL / syminfo.mintick
+tp1Ticks   = atrVal * atrMultTP1 / syminfo.mintick
+tp2Ticks   = atrVal * atrMultTP2 / syminfo.mintick
+tp3Ticks   = atrVal * atrMultTP3 / syminfo.mintick
+trailTicks = atrVal * trailMult / syminfo.mintick
+trailOff   = atrVal * trailMult * 0.5 / syminfo.mintick
+
+strategy.exit("x1", qty_percent=q1, profit=tp1Ticks, loss=slTicks)
+strategy.exit("x2", qty_percent=q2, profit=tp2Ticks, loss=slTicks)
+strategy.exit("x3", qty_percent=q3, profit=tp3Ticks, loss=slTicks)
+
+if useTrail
+    strategy.exit("xTrail", profit=tp3Ticks * 1.5, loss=slTicks, trail_points=trailTicks, trail_offset=trailOff)
+else
+    strategy.exit("x4", profit=tp3Ticks * 1.5, loss=slTicks)
+
+// Emergency exit: bullish CHoCH + price reclaims 200 EMA = trend reversed
+if strategy.position_size < 0 and chochBull and close > ema200
+    strategy.close("Short", comment="Bull Reversal")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+plot(lastSH, "Swing High", color.new(#ff5252, 30), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 30), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+// Peak / structure labels
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="PEAK")
+plotshape(bosShort and not chochBear, "BOS Short", shape.circle, location.abovebar, color.new(#ff9800, 0), size=size.tiny, text="BOS")
+plotshape(sweepHigh, "Sweep High", shape.diamond, location.abovebar, color.new(#ff6f00, 0), size=size.tiny, text="Sweep")
+plotshape(shortEntry, "Short Entry", shape.arrowdown, location.abovebar, color.new(#ff1744, 0), size=size.small, text="Bear")
+plotshape(shortSweepEntry and not shortEntry, "Sweep Entry", shape.arrowdown, location.abovebar, color.new(#ff6f00, 0), size=size.tiny, text="Sweep")
+plotshape(lowerHigh and not na(swH), "Lower High", shape.xcross, location.abovebar, color.new(#ffab00, 0), size=size.tiny, text="LH")
+
+// Background
+bgcolor(msTrend == -1 ? color.new(#ff5252, 95) : msTrend == 1 ? color.new(#00e676, 97) : na, title="Structure Trend")
+bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Paused")
+bgcolor(not adxTrending ? color.new(#9e9e9e, 94) : na, title="Ranging (ADX Low)")
+bgcolor(not inSession ? color.new(#000000, 96) : na, title="Out of Session")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "STRATEGY",    text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "BEAR PEAK v1", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1, "Struct",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 1, msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "NEUTRAL", text_color=msTrend == -1 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "ADX",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(adxVal2, "#.0") + (adxTrending ? " TREND" : " RANGE"), text_color=adxTrending ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 3, "DI",          text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 3, diMinus > diPlus ? "DI- LEAD" : "DI+ LEAD", text_color=diMinus > diPlus ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4, "MACD",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4, histLine < 0 ? "BEAR" : "BULL", text_color=histLine < 0 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "HTF",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5, htfBear ? "BEAR" : "BULL", text_color=htfBear ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6, "Mid TF",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6, midBear ? "BEAR" : "BULL", text_color=midBear ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 7, "RSI",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(rsiVal, "#.0") + (rsiWasOB ? " (was OB)" : ""), text_color=rsiWasOB ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 8, "Peak",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8, nearPeak ? "NEAR" : lowerHigh ? "LH FORMED" : "NONE", text_color=nearPeak or lowerHigh ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 9, "200 EMA",     text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9, close < ema200 ? "BELOW (OK)" : "ABOVE", text_color=close < ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 10, "Vol Ratio",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(volRatio, "#.##"), text_color=volRegimeOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 11, "Cooldown",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
+    table.cell(t, 0, 12, "Session",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 12, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.green : color.gray, text_size=size.small)
