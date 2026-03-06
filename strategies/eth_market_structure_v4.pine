@@ -1,22 +1,21 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// ETH Market Structure Strategy v3 — Improved Edition
-// Key changes from v2:
-//   1. ADX filter blocks entries in ranging/choppy markets
-//   2. Pullback entry: waits for retrace to EMA after BOS/CHoCH instead of raw breaks
-//   3. ATR-based dynamic TPs and SL (adapts to volatility)
-//   4. Trailing stop replaces aggressive CHoCH exit (lets winners run)
-//   5. Multi-timeframe trend alignment (HTF + mid TF)
-//   6. Momentum confirmation via MACD histogram
-//   7. Larger swing length to reduce false signals
-//   8. Session filter to avoid low-liquidity fakeouts
+// ETH Market Structure Strategy v4 — Profit & Drawdown Optimized
+// Key changes from v3:
+//   1. Tighter SL (1.5 ATR) — stops losers faster
+//   2. Realistic TPs (1.5/3/5 ATR) — actually reachable on 1h
+//   3. Front-loaded TP1 (40%) — locks profit early
+//   4. Supertrend directional gate — eliminates counter-trend entries
+//   5. Smarter emergency exits — Supertrend flip + tighter CHoCH threshold
+//   6. Stricter sweep entries — full confluence required
+//   7. Tighter risk controls — 30% DD cap, 60% position, 12-bar cooldown
 
 //@version=6
-strategy("ETH Market Structure v3", overlay=true,
+strategy("ETH Market Structure v4", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
      default_qty_value=100, commission_type=strategy.commission.percent,
      commission_value=0.075, slippage=3, pyramiding=0)
 
-strategy.risk.max_drawdown(40, strategy.percent_of_equity)
+strategy.risk.max_drawdown(30, strategy.percent_of_equity)
 
 // ═══════════════════════════════════════════════════════════════
 // INPUTS
@@ -49,23 +48,28 @@ macdSlow   = input.int(26, "MACD Slow", group="Momentum")
 macdSig    = input.int(9, "MACD Signal", group="Momentum")
 useMacd    = input.bool(true, "Require MACD Confirmation", group="Momentum")
 
+// Supertrend — directional gate (from eth_trend_longs_v3)
+useSupertrend = input.bool(true, "Supertrend Direction Gate", group="Supertrend")
+stATRLen      = input.int(10, "Supertrend ATR Length", minval=1, group="Supertrend")
+stFactor      = input.float(2.5, "Supertrend Factor", minval=0.01, step=0.01, group="Supertrend")
+
 // Pullback entry
 usePullback  = input.bool(true, "Require Pullback to EMA", group="Entry", tooltip="Wait for price to retrace to fast EMA after structure break before entering")
 pullbackBars = input.int(8, "Pullback Lookback Bars", minval=2, maxval=20, group="Entry", tooltip="How many bars after a break to wait for pullback")
 
 // Risk — ATR-based instead of fixed %
-atrMultSL  = input.float(2.0, "SL ATR Multiplier", step=0.1, group="Risk")
-atrMultTP1 = input.float(2.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
-atrMultTP2 = input.float(5.0, "TP2 ATR Multiplier", step=0.5, group="Risk")
-atrMultTP3 = input.float(8.0, "TP3 ATR Multiplier", step=0.5, group="Risk")
-q1         = input.int(30, "TP1 Qty %", group="Risk")
+atrMultSL  = input.float(1.5, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1 = input.float(1.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrMultTP2 = input.float(3.0, "TP2 ATR Multiplier", step=0.5, group="Risk")
+atrMultTP3 = input.float(5.0, "TP3 ATR Multiplier", step=0.5, group="Risk")
+q1         = input.int(40, "TP1 Qty %", group="Risk")
 q2         = input.int(30, "TP2 Qty %", group="Risk")
 q3         = input.int(20, "TP3 Qty %", group="Risk")
 useTrail   = input.bool(true, "Use Trailing Stop on Remainder", group="Risk")
 trailMult  = input.float(2.5, "Trail ATR Multiplier", step=0.1, group="Risk")
 
 // Drawdown controls
-basePos      = input.float(75.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
+basePos      = input.float(60.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
 use200EMA    = input.bool(true, "200 EMA Trend Gate", group="Drawdown")
 useVolFilter = input.bool(true, "Volatility Regime Filter", group="Drawdown")
 volFilterLen = input.int(40, "Vol Filter MA Length", minval=10, group="Drawdown")
@@ -73,7 +77,7 @@ maxVolRatio  = input.float(1.8, "Max Vol Ratio", step=0.1, minval=1.0, maxval=3.
 useEqFilter  = input.bool(true, "Equity Curve Filter", group="Drawdown")
 eqFilterLen  = input.int(50, "Equity SMA Length", minval=10, group="Drawdown")
 useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
-coolBars     = input.int(8, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+coolBars     = input.int(12, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
 
 // Session filter
 useSession   = input.bool(true, "Session Filter", group="Session", tooltip="Only trade during high-liquidity sessions")
@@ -183,6 +187,20 @@ macdBullOK = not useMacd or histLine > 0 or (histLine > histLine[1] and histLine
 macdBearOK = not useMacd or histLine < 0 or (histLine < histLine[1] and histLine[1] < histLine[2])
 
 // ═══════════════════════════════════════════════════════════════
+// SUPERTREND — directional gate
+// ═══════════════════════════════════════════════════════════════
+
+[supertrend, stDirection] = ta.supertrend(stFactor, stATRLen)
+stGreen = stDirection < 0   // bullish
+stRed   = stDirection > 0   // bearish
+stBullOK = not useSupertrend or stGreen
+stBearOK = not useSupertrend or stRed
+
+// Detect Supertrend flip for emergency exits
+stFlipBear = stDirection > 0 and stDirection[1] < 0
+stFlipBull = stDirection < 0 and stDirection[1] > 0
+
+// ═══════════════════════════════════════════════════════════════
 // CONFLUENCE FILTERS
 // ═══════════════════════════════════════════════════════════════
 
@@ -224,7 +242,7 @@ volRegimeOK = not useVolFilter or volRatio < maxVolRatio
 eqSMA    = ta.sma(strategy.equity, eqFilterLen)
 equityOK = not useEqFilter or strategy.equity >= eqSMA
 
-// Layer 4 — Loss cooldown (increased default from 5 to 8)
+// Layer 4 — Loss cooldown (increased default from 8 to 12)
 var int lastLossBar     = -999
 var int prevClosedCount = 0
 if strategy.closedtrades > prevClosedCount
@@ -244,15 +262,15 @@ ddGate = volRegimeOK and equityOK and cooldownOK
 // ENTRY CONDITIONS — much stricter than v2
 // ═══════════════════════════════════════════════════════════════
 
-// Long: structure + pullback + ADX trending + DI confirmation + MACD + HTF + mid TF + RSI + volume + session
-longEntry = longStructure and adxTrending and diBullOK and macdBullOK and htfBull and midBull and rsiOKlong and volOK and inSession and close > emaFast
+// Long: structure + pullback + ADX + DI + MACD + Supertrend + HTF + mid TF + RSI + volume + session
+longEntry = longStructure and adxTrending and diBullOK and macdBullOK and stBullOK and htfBull and midBull and rsiOKlong and volOK and inSession and close > emaFast
 
 // Short: mirror
-shortEntry = shortStructure and adxTrending and diBearOK and macdBearOK and htfBear and midBear and rsiOKshort and volOK and inSession and close < emaFast
+shortEntry = shortStructure and adxTrending and diBearOK and macdBearOK and stBearOK and htfBear and midBear and rsiOKshort and volOK and inSession and close < emaFast
 
-// Sweep entries — slightly relaxed but still need ADX + HTF
-longSweepEntry  = longSweepSig and adxTrending and htfBull and rsiVal < 40 and volOK and inSession
-shortSweepEntry = shortSweepSig and adxTrending and htfBear and rsiVal > 60 and volOK and inSession
+// Sweep entries — now require full confluence (was too loose in v3)
+longSweepEntry  = longSweepSig and adxTrending and diBullOK and macdBullOK and stBullOK and htfBull and midBull and rsiVal < 40 and volOK and inSession
+shortSweepEntry = shortSweepSig and adxTrending and diBearOK and macdBearOK and stBearOK and htfBear and midBear and rsiVal > 60 and volOK and inSession
 
 // ═══════════════════════════════════════════════════════════════
 // EXECUTE ENTRIES
@@ -286,12 +304,17 @@ if useTrail
 else
     strategy.exit("x4", profit=tp3Ticks * 1.5, loss=slTicks)
 
-// Emergency structure exit — only on STRONG reversal (CHoCH + price crosses 200 EMA)
-// Much less aggressive than v2's raw CHoCH exit
-if strategy.position_size > 0 and chochBear and close < ema200
-    strategy.close("Long", comment="Structure Reversal")
-if strategy.position_size < 0 and chochBull and close > ema200
-    strategy.close("Short", comment="Structure Reversal")
+// Emergency exit 1: Supertrend flip — fastest reversal signal
+if strategy.position_size > 0 and stFlipBear
+    strategy.close("Long", comment="ST Flip Bear")
+if strategy.position_size < 0 and stFlipBull
+    strategy.close("Short", comment="ST Flip Bull")
+
+// Emergency exit 2: CHoCH + price below 50 EMA (tighter than v3's 200 EMA requirement)
+if strategy.position_size > 0 and chochBear and close < emaSlow
+    strategy.close("Long", comment="CHoCH + EMA50")
+if strategy.position_size < 0 and chochBull and close > emaSlow
+    strategy.close("Short", comment="CHoCH + EMA50")
 
 // ═══════════════════════════════════════════════════════════════
 // PLOTS
@@ -303,6 +326,11 @@ plot(emaFast, "EMA 21", color.new(#2196f3, 50))
 plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
 plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
 plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+// Supertrend
+stVal = barstate.isfirst ? na : supertrend
+plot(useSupertrend and stGreen ? stVal : na, "ST Up", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(useSupertrend and stRed ? stVal : na, "ST Down", color=color.red, style=plot.style_linebr, linewidth=2)
 
 // Structure labels
 plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="CHoCH")
@@ -326,10 +354,10 @@ bgcolor(not inSession ? color.new(#000000, 96) : na, title="Out of Session")
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0, "VERSION",     text_color=color.yellow, text_size=size.small)
-    table.cell(t, 1, 0, "v3",          text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "v4",          text_color=color.yellow, text_size=size.small)
     table.cell(t, 0, 1, "Struct",      text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 1, msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "NEUTRAL", text_color=msTrend == 1 ? color.green : msTrend == -1 ? color.red : color.gray, text_size=size.small)
     table.cell(t, 0, 2, "ADX",         text_color=color.gray,   text_size=size.small)
@@ -338,17 +366,19 @@ if barstate.islast
     table.cell(t, 1, 3, diPlus > diMinus ? "DI+ LEAD" : "DI- LEAD", text_color=diPlus > diMinus ? color.green : color.red, text_size=size.small)
     table.cell(t, 0, 4, "MACD",        text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 4, histLine > 0 ? "BULL" : "BEAR", text_color=histLine > 0 ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 5, "HTF",         text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 5, htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 6, "Mid TF",      text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 6, midBull ? "BULL" : "BEAR", text_color=midBull ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 7, "200 EMA",     text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 7, close > ema200 ? "ABOVE" : "BELOW", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 8, "Vol Ratio",   text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 8, str.tostring(volRatio, "#.##"), text_color=volRegimeOK ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 9, "Equity",      text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 9, equityOK ? "OK" : "BELOW SMA", text_color=equityOK ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 10, "Cooldown",   text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 10, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
-    table.cell(t, 0, 11, "Session",    text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 11, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 5, "Supertrend",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5, stGreen ? "GREEN" : "RED", text_color=stGreen ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6, "HTF",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6, htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 7, "Mid TF",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, midBull ? "BULL" : "BEAR", text_color=midBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 8, "200 EMA",     text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8, close > ema200 ? "ABOVE" : "BELOW", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 9, "Vol Ratio",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9, str.tostring(volRatio, "#.##"), text_color=volRegimeOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 10, "Equity",     text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 10, equityOK ? "OK" : "BELOW SMA", text_color=equityOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 11, "Cooldown",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
+    table.cell(t, 0, 12, "Session",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 12, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.green : color.gray, text_size=size.small)
