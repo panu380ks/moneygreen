@@ -1,6 +1,6 @@
-// Gaussian Channel Strategy v3 — Forex Optimized
+// Gaussian Channel Strategy v3 — Forex + NY Session
 // Buy ONCE on GREEN flip, Sell ONCE on RED flip. No re-entry until next flip.
-// v3: MTF confirmation, MACD filter, dynamic stops, break-even, win-rate sizing
+// v3: MTF, MACD, dynamic stops, break-even, win-rate sizing, NY session mode
 //@version=6
 strategy("Gaussian Channel FX v3", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
@@ -53,7 +53,7 @@ minATRpct     = input.float(0.5, "Min ATR % of Average", step=0.1, group="Entry"
 // Direction
 direction = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"], group="Direction")
 
-// Risk — ATR-based with dynamic band stops
+// Risk
 atrLen     = input.int(14, "ATR Length", group="Risk")
 useBandSL  = input.bool(true, "Use Band-Width Stop", group="Risk",
      tooltip="Stop loss based on channel width instead of fixed ATR multiple")
@@ -81,9 +81,18 @@ useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
 coolBars     = input.int(15, "Cooldown Bars", group="Drawdown")
 maxConsLoss  = input.int(3, "Max Consecutive Losses", group="Drawdown")
 
-// Session
-useSession   = input.bool(false, "Session Filter", group="Session")
-sessionStr   = input.session("0700-1700", "Trading Session (UTC)", group="Session")
+// Session — supports NY session mode or custom session
+sessionMode  = input.string("NY Session", "Session Mode",
+     options=["Off", "NY Session", "London/NY Overlap", "Custom"], group="Session",
+     tooltip="Off = trade 24/7. NY = 0800-1600 EST. Overlap = London/NY. Custom = your hours")
+customSess   = input.session("0700-1700", "Custom Session (UTC)", group="Session")
+closeAtEnd   = input.bool(true, "Close All at Session End", group="Session",
+     tooltip="Flatten all positions when session closes — no overnight risk")
+noLateEntry  = input.bool(true, "No Late Entries", group="Session",
+     tooltip="Block new entries in last 2 hours of session")
+useKillzone  = input.bool(true, "Killzone Size Boost", group="Session",
+     tooltip="Increase position size during London/NY overlap (1300-1700 UTC)")
+kzSizeMult   = input.float(1.25, "Killzone Size Multiplier", step=0.05, group="Session")
 
 // ═══════════════════════════════════════════════════════════════
 // GAUSSIAN FILTER — Multi-pole IIR implementation
@@ -155,7 +164,7 @@ htfIsGreen   = htfFilter > htfFilter[1]
 htfIsRed     = htfFilter < htfFilter[1]
 
 // ═══════════════════════════════════════════════════════════════
-// CHANNEL DIRECTION — Green vs Red
+// CHANNEL DIRECTION
 // ═══════════════════════════════════════════════════════════════
 
 isGreen = gaussFilter > gaussFilter[1]
@@ -165,7 +174,7 @@ justTurnedGreen = isGreen and not isGreen[1]
 justTurnedRed   = isRed and not isRed[1]
 
 // ═══════════════════════════════════════════════════════════════
-// BARS SINCE FLIP — only enter once per flip, with confirmation
+// BARS SINCE FLIP
 // ═══════════════════════════════════════════════════════════════
 
 var int barsSinceGreen = 999
@@ -192,27 +201,52 @@ rsiVal = ta.rsi(close, rsiLen)
 atrVal = ta.atr(atrLen)
 ema200 = ta.ema(close, emaLen)
 
-// ADX
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 adxOK = not useADX or adxVal >= adxMin
 
-// MACD
 [macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
 macdBullOK = not useMACD or histLine > 0
 macdBearOK = not useMACD or histLine < 0
 
-// Session
-inSession = not useSession or not na(time(timeframe.period, sessionStr, "UTC"))
-
-// Minimum ATR filter
 atrMA    = ta.sma(atrVal, volScaleLen)
 atrOK    = not useMinATR or (atrVal >= atrMA * minATRpct)
+
+// ═══════════════════════════════════════════════════════════════
+// SESSION LOGIC — NY, London/NY overlap, Custom, or Off
+// ═══════════════════════════════════════════════════════════════
+
+// Session windows (UTC)
+nySess       = "1300-2100"   // NY 08:00-16:00 EST
+nyEntrySess  = "1300-1900"   // No entries last 2 hours
+lonNySess    = "1300-1700"   // London/NY overlap
+lonNyEntry   = "1300-1500"   // Overlap entry window
+
+sessStr = switch sessionMode
+    "NY Session"        => nySess
+    "London/NY Overlap" => lonNySess
+    "Custom"            => customSess
+    => ""
+
+entryStr = switch sessionMode
+    "NY Session"        => nyEntrySess
+    "London/NY Overlap" => lonNyEntry
+    "Custom"            => customSess
+    => ""
+
+inSession     = sessionMode == "Off" or not na(time(timeframe.period, sessStr, "UTC"))
+inEntryWindow = sessionMode == "Off" or not noLateEntry or not na(time(timeframe.period, entryStr, "UTC"))
+
+// Detect session end
+wasInSession    = sessionMode != "Off" and not na(time(timeframe.period, sessStr, "UTC")[1])
+sessionJustEnded = wasInSession and not inSession
+
+// Killzone — London/NY overlap
+inKillzone = not na(time(timeframe.period, "1300-1700", "UTC"))
 
 // ═══════════════════════════════════════════════════════════════
 // CONSECUTIVE CLOSE CONFIRMATION
 // ═══════════════════════════════════════════════════════════════
 
-// Count consecutive closes above/below filter
 var int consAbove = 0
 var int consBelow = 0
 
@@ -230,34 +264,27 @@ consCloseOKlong  = consAbove >= reqConsClose
 consCloseOKshort = consBelow >= reqConsClose
 
 // ═══════════════════════════════════════════════════════════════
-// ENTRY CONDITIONS — strict, one entry per flip
+// ENTRY CONDITIONS
 // ═══════════════════════════════════════════════════════════════
 
-// Trend alignment
 emaBullOK = not useEMA or close > ema200
 emaBearOK = not useEMA or close < ema200
 
-// MTF alignment
 mtfBullOK = not useMTF or htfIsGreen
 mtfBearOK = not useMTF or htfIsRed
 
-// RSI — tighter band
 rsiBuyOK  = not useRSI or (rsiVal >= rsiLongMin and rsiVal <= rsiLongMax)
 rsiSellOK = not useRSI or (rsiVal >= rsiShortMin and rsiVal <= rsiShortMax)
 
-// Price position
 priceLongOK  = not reqPricePos or close > gaussFilter
 priceShortOK = not reqPricePos or close < gaussFilter
 
-// Direction
 canLong  = direction == "Both" or direction == "Long Only"
 canShort = direction == "Both" or direction == "Short Only"
 
-// ═══ LONG: Enter once after channel flips GREEN + all confirmations ═══
-longEntry = greenConfirmed and canLong and emaBullOK and mtfBullOK and adxOK and macdBullOK and rsiBuyOK and priceLongOK and consCloseOKlong and atrOK and inSession
+longEntry = greenConfirmed and canLong and emaBullOK and mtfBullOK and adxOK and macdBullOK and rsiBuyOK and priceLongOK and consCloseOKlong and atrOK and inSession and inEntryWindow
 
-// ═══ SHORT: Enter once after channel flips RED + all confirmations ═══
-shortEntry = redConfirmed and canShort and emaBearOK and mtfBearOK and adxOK and macdBearOK and rsiSellOK and priceShortOK and consCloseOKshort and atrOK and inSession
+shortEntry = redConfirmed and canShort and emaBearOK and mtfBearOK and adxOK and macdBearOK and rsiSellOK and priceShortOK and consCloseOKshort and atrOK and inSession and inEntryWindow
 
 // ═══════════════════════════════════════════════════════════════
 // DRAWDOWN CONTROLS & WIN RATE TRACKING
@@ -279,7 +306,6 @@ if strategy.closedtrades > prevClosedCount
 cooldownOK  = not useCooldown or (bar_index - lastLossBar) > coolBars
 consLossOK  = consLosses < maxConsLoss
 
-// Rolling win rate
 totalTrades = strategy.closedtrades
 lookbackN   = math.min(wrLookback, totalTrades)
 var float rollingWR = 0.5
@@ -290,22 +316,21 @@ if lookbackN > 0
             wins := wins + 1
     rollingWR := wins / lookbackN
 
-// Win rate position scaling
 wrScale = useWRscale ? (rollingWR < 0.40 ? 0.5 : rollingWR > 0.55 ? 1.0 : 0.75) : 1.0
 
-// Volatility scaling
 volRatio = nz(atrVal / atrMA, 1.0)
 volScale = useVolScale ? (volRatio > 1.5 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
 
+kzScale = useKillzone and inKillzone and sessionMode != "Off" ? kzSizeMult : 1.0
+
 ddGate = cooldownOK and consLossOK
 
-posSize = strategy.equity * (basePos / 100.0) * volScale * wrScale / close
+posSize = strategy.equity * (basePos / 100.0) * volScale * wrScale * kzScale / close
 
 // ═══════════════════════════════════════════════════════════════
 // EXECUTE TRADES
 // ═══════════════════════════════════════════════════════════════
 
-// Dynamic stop loss — band width based or ATR fallback
 slDist     = useBandSL ? bandWidth * bandSLmult : atrVal * slATR
 slTicks    = slDist / syminfo.mintick
 tp1Ticks   = atrVal * tp1ATR / syminfo.mintick
@@ -313,7 +338,6 @@ tp2Ticks   = atrVal * tp2ATR / syminfo.mintick
 trailTicks = atrVal * trailATR / syminfo.mintick
 trailOff   = atrVal * trailATR * 0.4 / syminfo.mintick
 
-// Track entry price and TP1 hit for break-even logic
 var float entryPrice  = na
 var bool  tp1Hit      = false
 
@@ -350,10 +374,9 @@ if shortEntry and ddGate and strategy.position_size >= 0
 // ═══════════════════════════════════════════════════════════════
 
 if useBE and strategy.position_size != 0 and not tp1Hit
-    // Detect TP1 hit by checking if position size decreased (partial fill)
     if strategy.position_size > 0 and high >= entryPrice + atrVal * tp1ATR
         tp1Hit := true
-        beTicks = math.max(1, (close - entryPrice) * 0.1 / syminfo.mintick)  // small buffer above entry
+        beTicks = math.max(1, (close - entryPrice) * 0.1 / syminfo.mintick)
         if useTrail
             strategy.exit("L-Trail", "Long", profit=tp2Ticks, loss=beTicks,
                  trail_points=trailTicks, trail_offset=trailOff)
@@ -369,7 +392,7 @@ if useBE and strategy.position_size != 0 and not tp1Hit
             strategy.exit("S-TP2", "Short", profit=tp2Ticks, loss=beTicks)
 
 // ═══════════════════════════════════════════════════════════════
-// BAND-COLOR EXITS — close when band flips
+// EXITS — Band flip + Session end
 // ═══════════════════════════════════════════════════════════════
 
 if strategy.position_size > 0 and justTurnedRed
@@ -377,6 +400,10 @@ if strategy.position_size > 0 and justTurnedRed
 
 if strategy.position_size < 0 and justTurnedGreen
     strategy.close("Short", comment="Channel Green")
+
+// Close ALL at session end
+if closeAtEnd and sessionJustEnded and strategy.position_size != 0
+    strategy.close_all(comment="Session Close")
 
 // ═══════════════════════════════════════════════════════════════
 // PLOTS
@@ -395,7 +422,6 @@ fill(p_filter, p_lower, color=isGreen ? color.new(#00e676, 85) : color.new(#ff52
 plot(useEMA ? ema200 : na, "EMA 200", color.new(#ffeb3b, 30), linewidth=2)
 plot(useMTF ? htfFilter : na, "HTF Gaussian", color.new(#ff9800, 40), linewidth=1)
 
-// Entry signals
 plotshape(longEntry and ddGate and strategy.position_size <= 0, "Buy",
      shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="BUY")
 plotshape(shortEntry and ddGate and strategy.position_size >= 0, "Sell",
@@ -406,6 +432,9 @@ plotshape(justTurnedGreen, "Green Flip", shape.circle, location.belowbar,
 plotshape(justTurnedRed, "Red Flip", shape.circle, location.abovebar,
      color.new(#ff5252, 30), size=size.tiny)
 
+// Session backgrounds
+bgcolor(inSession and sessionMode != "Off" ? color.new(#2196f3, 94) : na, title="Session Active")
+bgcolor(inKillzone and useKillzone and sessionMode != "Off" ? color.new(#ff9800, 92) : na, title="Killzone")
 bgcolor(isGreen ? color.new(#00e676, 96) : isRed ? color.new(#ff5252, 96) : na, title="Channel Direction")
 bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Paused")
 
@@ -413,52 +442,61 @@ bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Paused")
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
 
-var table infoT = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+var table infoT = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(infoT, 0, 0, "STRATEGY", text_color=color.yellow, text_size=size.small)
     table.cell(infoT, 1, 0, "GAUSS CH FX v3", text_color=color.yellow, text_size=size.small)
 
-    table.cell(infoT, 0, 1, "CHANNEL", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 1, isGreen ? "GREEN" : isRed ? "RED" : "FLAT",
+    table.cell(infoT, 0, 1, "SESSION", text_color=color.gray, text_size=size.small)
+    sessStatus = sessionMode == "Off" ? "24/7" : inSession ? (inEntryWindow ? "ACTIVE" : "EXIT ONLY") : "CLOSED"
+    sessColor  = sessionMode == "Off" ? color.white : inSession ? (inEntryWindow ? color.green : color.orange) : color.red
+    table.cell(infoT, 1, 1, sessStatus, text_color=sessColor, text_size=size.small)
+
+    table.cell(infoT, 0, 2, "CHANNEL", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 2, isGreen ? "GREEN" : isRed ? "RED" : "FLAT",
          text_color=isGreen ? color.green : isRed ? color.red : color.gray, text_size=size.small)
 
-    table.cell(infoT, 0, 2, "HTF TREND", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 2, htfIsGreen ? "BULL" : htfIsRed ? "BEAR" : "FLAT",
+    table.cell(infoT, 0, 3, "HTF TREND", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 3, htfIsGreen ? "BULL" : htfIsRed ? "BEAR" : "FLAT",
          text_color=htfIsGreen ? color.green : htfIsRed ? color.red : color.gray, text_size=size.small)
 
-    table.cell(infoT, 0, 3, "EMA 200", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 3, close > ema200 ? "ABOVE" : "BELOW",
+    table.cell(infoT, 0, 4, "EMA 200", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 4, close > ema200 ? "ABOVE" : "BELOW",
          text_color=close > ema200 ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoT, 0, 4, "ADX", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 4, str.tostring(adxVal, "#.0") + (adxVal >= adxMin ? " OK" : " WEAK"),
+    table.cell(infoT, 0, 5, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 5, str.tostring(adxVal, "#.0") + (adxVal >= adxMin ? " OK" : " WEAK"),
          text_color=adxVal >= adxMin ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoT, 0, 5, "MACD HIST", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 5, histLine > 0 ? "BULL" : "BEAR",
+    table.cell(infoT, 0, 6, "MACD HIST", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 6, histLine > 0 ? "BULL" : "BEAR",
          text_color=histLine > 0 ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoT, 0, 6, "RSI", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 6, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+    table.cell(infoT, 0, 7, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 7, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
 
-    table.cell(infoT, 0, 7, "WIN RATE", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 7, str.tostring(rollingWR * 100, "#.0") + "% (" + str.tostring(lookbackN) + ")",
+    table.cell(infoT, 0, 8, "WIN RATE", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 8, str.tostring(rollingWR * 100, "#.0") + "% (" + str.tostring(lookbackN) + ")",
          text_color=rollingWR >= 0.50 ? color.green : color.red, text_size=size.small)
 
-    table.cell(infoT, 0, 8, "SIZE SCALE", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 8, str.tostring(volScale * wrScale * 100, "#") + "%",
+    table.cell(infoT, 0, 9, "SIZE SCALE", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 9, str.tostring(volScale * wrScale * kzScale * 100, "#") + "%",
          text_color=volScale * wrScale < 1 ? color.orange : color.green, text_size=size.small)
 
-    table.cell(infoT, 0, 9, "SL TYPE", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 9, useBandSL ? "BAND" : "ATR",
+    table.cell(infoT, 0, 10, "SL TYPE", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 10, useBandSL ? "BAND" : "ATR",
          text_color=color.white, text_size=size.small)
 
-    table.cell(infoT, 0, 10, "CONS LOSS", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 10, str.tostring(consLosses) + "/" + str.tostring(maxConsLoss),
+    table.cell(infoT, 0, 11, "KILLZONE", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 11, inKillzone and sessionMode != "Off" ? "LON/NY" : "OFF",
+         text_color=inKillzone and sessionMode != "Off" ? color.green : color.gray, text_size=size.small)
+
+    table.cell(infoT, 0, 12, "CONS LOSS", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 12, str.tostring(consLosses) + "/" + str.tostring(maxConsLoss),
          text_color=consLosses >= maxConsLoss ? color.red : color.green, text_size=size.small)
 
-    table.cell(infoT, 0, 11, "POSITION", text_color=color.gray, text_size=size.small)
-    table.cell(infoT, 1, 11,
+    table.cell(infoT, 0, 13, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 13,
          strategy.position_size > 0 ? "LONG" + (tp1Hit ? " (BE)" : "") :
          strategy.position_size < 0 ? "SHORT" + (tp1Hit ? " (BE)" : "") : "FLAT",
          text_color=strategy.position_size > 0 ? #00e676 : strategy.position_size < 0 ? #ff5252 : color.gray,
@@ -467,7 +505,8 @@ if barstate.islast
 // ═══════════════════════════════════════════════════════════════
 // ALERTS
 // ═══════════════════════════════════════════════════════════════
-alertcondition(justTurnedGreen, title="Channel Green", message="Gaussian Channel turned GREEN — Buy zone")
-alertcondition(justTurnedRed, title="Channel Red", message="Gaussian Channel turned RED — Sell zone")
+alertcondition(justTurnedGreen and inSession, title="Channel Green", message="Gaussian Channel turned GREEN — Buy zone")
+alertcondition(justTurnedRed and inSession, title="Channel Red", message="Gaussian Channel turned RED — Sell zone")
 alertcondition(longEntry and ddGate, title="Long Entry", message="Gaussian Channel v3 — Long entry signal")
 alertcondition(shortEntry and ddGate, title="Short Entry", message="Gaussian Channel v3 — Short entry signal")
+alertcondition(sessionJustEnded, title="Session End", message="Session closed — all positions flattened")
