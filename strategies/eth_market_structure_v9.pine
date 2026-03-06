@@ -1,14 +1,13 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// ETH Market Structure v8 — v6 base + equity curve filter only
-// v6 was our best: PF 0.903, WR 36%, 123 trades, DD 4.25%
-// v7 over-filtered (7 changes): PF dropped to 0.676, only 39 trades
-// v8 lesson: change ONE thing at a time
-//   1. Equity curve filter — stops trading during drawdown streaks
-//   2. TP1 2.0→2.5 ATR — slightly more room for winners (not 3.0 like v7)
-//   Everything else identical to v6.
+// ETH Market Structure v9 — Faster equity filter + consecutive loss brake
+// v8: PF 0.964, WR 35.6%, 132 trades, DD 3.87% — closest yet!
+// Equity peaked +$190 then collapsed — equity filter SMA(30) reacted too slowly.
+// v9 changes (2 only):
+//   1. Equity filter SMA 30→15 (react faster to drawdowns)
+//   2. Consecutive loss limit: 3 losses in a row → pause until a win
 
 //@version=6
-strategy("ETH Market Structure v8", overlay=true,
+strategy("ETH Market Structure v9", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
      default_qty_value=100, commission_type=strategy.commission.percent,
      commission_value=0.075, slippage=3, pyramiding=0)
@@ -68,9 +67,12 @@ useVolScale = input.bool(true, "Scale Down in High Volatility", group="Sizing")
 // Drawdown controls — NEW: equity curve filter
 useEqFilter = input.bool(true, "Equity Curve Filter", group="Drawdown",
      tooltip="Stop trading when equity < SMA(equity). Prevents drawdown spirals.")
-eqFilterLen = input.int(30, "Equity SMA Length", minval=10, group="Drawdown")
+eqFilterLen = input.int(15, "Equity SMA Length", minval=5, group="Drawdown")
 useCooldown = input.bool(true, "Loss Cooldown", group="Drawdown")
 coolBars    = input.int(8, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+useConsecFilter = input.bool(true, "Consecutive Loss Brake", group="Drawdown",
+     tooltip="Pause after N consecutive losses until next win")
+maxConsecLoss   = input.int(3, "Max Consecutive Losses", minval=2, maxval=10, group="Drawdown")
 
 // ═══════════════════════════════════════════════════════════════
 // SUPERTREND — PRIMARY SIGNAL
@@ -176,17 +178,22 @@ unitQty  = strategy.equity * (basePos / 100.0) * volScale / close
 eqSMA    = ta.sma(strategy.equity, eqFilterLen)
 equityOK = not useEqFilter or strategy.equity >= eqSMA
 
-// Cooldown (same as v6: 8 bars)
+// Cooldown + consecutive loss tracking
 var int lastLossBar     = -999
 var int prevClosedCount = 0
+var int consecLosses    = 0
 if strategy.closedtrades > prevClosedCount
     if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
         lastLossBar := bar_index
+        consecLosses += 1
+    else
+        consecLosses := 0
     prevClosedCount := strategy.closedtrades
 cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
+consecOK   = not useConsecFilter or consecLosses < maxConsecLoss
 
 // Combined gate
-ddGate = equityOK and cooldownOK
+ddGate = equityOK and cooldownOK and consecOK
 
 // ═══════════════════════════════════════════════════════════════
 // ENTRY — Supertrend flip + confirmations (same as v6 + equity gate)
@@ -262,10 +269,10 @@ bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Active")
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0,  "VERSION",    text_color=color.yellow, text_size=size.small)
-    table.cell(t, 1, 0,  "v8",         text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0,  "v9",         text_color=color.yellow, text_size=size.small)
     table.cell(t, 0, 1,  "Supertrend", text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 1,  stGreen ? "GREEN" : "RED", text_color=stGreen ? color.green : color.red, text_size=size.small)
     table.cell(t, 0, 2,  "Structure",  text_color=color.gray,   text_size=size.small)
@@ -284,5 +291,7 @@ if barstate.islast
     table.cell(t, 1, 8,  str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
     table.cell(t, 0, 9,  "Cooldown",   text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 9,  cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
-    table.cell(t, 0, 10, "Position",   text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 10, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(t, 0, 10, "Consec L",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(consecLosses) + "/" + str.tostring(maxConsecLoss), text_color=consecOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 11, "Position",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
