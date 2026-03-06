@@ -1,11 +1,10 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// Hull Suite Strategy — London Session Filter
+// Hull Suite Strategy v2 — London + NY Session
 // Based on InSilico's Hull Ma Pack, converted by DashTrader
-// Enhanced with London session filter, EMA 200 trend gate, ADX filter,
-// ATR-based SL/TP, and post-loss cooldown for AUDUSD 1H
+// v2: Pullback re-entries, extended session, partial TP + trailing stop, faster Hull
 
 //@version=6
-strategy("Hull Suite — London Session", overlay=true, pyramiding=0,
+strategy("Hull Suite — London v2", overlay=true, pyramiding=1,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
      default_qty_value=100, calc_on_order_fills=false, slippage=2,
      commission_type=strategy.commission.percent, commission_value=0.005)
@@ -39,7 +38,7 @@ testPeriod()    => time >= testPeriodStart and time <= testPeriodStop
 
 src         = input(close, title="Source")
 modeSwitch  = input.string("Hma", "Hull Variation", options=["Hma", "Thma", "Ehma"], group="Hull MA")
-length      = input.int(55, "Length (180-200 for S/R, 55 for swing)", group="Hull MA")
+length      = input.int(40, "Length (40=more signals, 55=swing, 180+=S/R)", group="Hull MA")
 switchColor = input.bool(true, "Color Hull according to trend?", group="Hull MA")
 candleCol   = input.bool(false, "Color candles based on Hull's Trend?", group="Hull MA")
 visualSwitch   = input.bool(true, "Show as a Band?", group="Hull MA")
@@ -47,14 +46,15 @@ thicknesSwitch = input.int(1, "Line Thickness", group="Hull MA")
 transpSwitch   = input.int(40, "Band Transparency", step=5, group="Hull MA")
 
 // ═══════════════════════════════════════════════════════════════
-// LONDON SESSION FILTER
+// SESSION FILTER
 // ═══════════════════════════════════════════════════════════════
 
-useSession = input.bool(true, "London Session Filter", group="Session",
-     tooltip="Only enter trades during London session hours")
-sessionStr = input.session("0700-1600", "London Session (UTC)", group="Session")
+useSession = input.bool(true, "Session Filter", group="Session",
+     tooltip="Only enter trades during active session hours")
+sessionStr = input.session("0700-2100", "Session Window (UTC)", group="Session",
+     tooltip="0700-2100 covers London open through NY afternoon")
 closeAtEnd = input.bool(true, "Close Positions at Session End", group="Session",
-     tooltip="Auto-close all open positions when London session ends")
+     tooltip="Auto-close all open positions when session ends")
 sessionTZ  = input.string("UTC", "Session Timezone",
      options=["UTC", "Europe/London", "America/New_York"], group="Session")
 
@@ -71,9 +71,11 @@ use200EMA = input.bool(true, "EMA 200 Trend Gate", group="Filters",
 useADX    = input.bool(true, "ADX Trend Strength Filter", group="Filters",
      tooltip="Only trade when ADX confirms a trend")
 adxLen    = input.int(14, "ADX Length", group="Filters")
-adxMin    = input.float(20.0, "Min ADX", step=1.0, group="Filters")
+adxMin    = input.float(15.0, "Min ADX", step=1.0, group="Filters",
+     tooltip="15 = early trend detection on 1H forex")
 
 ema200 = ta.ema(close, 200)
+ema21  = ta.ema(close, 21)
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 
 above200 = not use200EMA or close > ema200
@@ -84,22 +86,27 @@ adxOK    = not useADX or adxVal >= adxMin
 // RISK MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
 
-atrLen     = input.int(14, "ATR Length", group="Risk")
-atrMultSL  = input.float(1.5, "SL ATR Multiplier", step=0.1, group="Risk")
-atrMultTP1 = input.float(2.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrLen      = input.int(14, "ATR Length", group="Risk")
+atrMultSL   = input.float(1.5, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1  = input.float(2.0, "TP1 ATR Multiplier (partial exit)", step=0.1, group="Risk")
+atrMultTrail = input.float(1.5, "Trailing Stop ATR Multiplier", step=0.1, group="Risk",
+     tooltip="After TP1, trail remainder by this ATR distance from swing high/low")
+tp1Pct      = input.float(50.0, "TP1 Exit %", step=5.0, group="Risk",
+     tooltip="Percentage of position to close at TP1")
 useCooldown = input.bool(true, "Post-Loss Cooldown", group="Risk")
 coolBars    = input.int(3, "Cooldown Bars After Loss", minval=1, maxval=20, group="Risk")
+usePullback = input.bool(true, "Pullback Re-Entries", group="Risk",
+     tooltip="Re-enter on EMA 21 pullback bounces during Hull trend")
 
 atrVal = ta.atr(atrLen)
 
 // ═══════════════════════════════════════════════════════════════
-// COOLDOWN TRACKING
+// COOLDOWN TRACKING (losses only)
 // ═══════════════════════════════════════════════════════════════
 
 var int lastExitBar  = -999
 var float lastExitPL = 0.0
 
-wasFlat    = strategy.position_size[1] == 0
 wasInPos   = strategy.position_size[1] != 0
 justExited = wasInPos and strategy.position_size == 0
 
@@ -145,38 +152,104 @@ hullColor = switchColor ? (hullBull ? #00ff00 : #ff0000) : #ff9800
 // ENTRY SIGNALS
 // ═══════════════════════════════════════════════════════════════
 
-longSignal  = hullBull and not hullBull[1]   // Hull just flipped bullish
-shortSignal = hullBear and not hullBear[1]   // Hull just flipped bearish
+// Signal 1: Hull flip (original)
+longFlip  = hullBull and not hullBull[1]
+shortFlip = hullBear and not hullBear[1]
 
-longEntry  = longSignal and inSession and above200 and adxOK and cooldownOK and testPeriod()
-shortEntry = shortSignal and inSession and below200 and adxOK and cooldownOK and testPeriod()
+// Signal 2: Pullback re-entry during Hull trend
+// Long: Hull bullish, price touched EMA 21 (low <= ema21), then closed above it
+pullbackLong  = usePullback and hullBull and hullBull[1] and hullBull[2] and
+     low[1] <= ema21[1] and close > ema21 and close > open and
+     strategy.position_size == 0
+
+// Short: Hull bearish, price touched EMA 21 (high >= ema21), then closed below it
+pullbackShort = usePullback and hullBear and hullBear[1] and hullBear[2] and
+     high[1] >= ema21[1] and close < ema21 and close < open and
+     strategy.position_size == 0
+
+// Combined signals
+longEntry  = (longFlip or pullbackLong) and inSession and above200 and adxOK and cooldownOK and testPeriod()
+shortEntry = (shortFlip or pullbackShort) and inSession and below200 and adxOK and cooldownOK and testPeriod()
+
+isPullbackEntry = pullbackLong or pullbackShort
+
+// ═══════════════════════════════════════════════════════════════
+// POSITION TRACKING FOR TRAILING STOP
+// ═══════════════════════════════════════════════════════════════
+
+var float entryPrice   = na
+var float entrySL      = na
+var float entryTP1     = na
+var float entryATR     = na
+var float trailHigh    = na
+var float trailLow     = na
+var bool  tp1Hit       = false
+var bool  isLong       = false
 
 // ═══════════════════════════════════════════════════════════════
 // EXECUTE TRADES
 // ═══════════════════════════════════════════════════════════════
 
 if longEntry
-    sl = close - atrVal * atrMultSL
-    tp = close + atrVal * atrMultTP1
+    entryPrice := close
+    entryATR   := atrVal
+    entrySL    := close - atrVal * atrMultSL
+    entryTP1   := close + atrVal * atrMultTP1
+    trailHigh  := close
+    tp1Hit     := false
+    isLong     := true
     strategy.entry("buy", strategy.long)
-    strategy.exit("buy_exit", "buy", stop=sl, limit=tp)
+    strategy.exit("buy_tp1", "buy", stop=entrySL, limit=entryTP1, qty_percent=tp1Pct)
 
 if shortEntry
-    sl = close + atrVal * atrMultSL
-    tp = close - atrVal * atrMultTP1
+    entryPrice := close
+    entryATR   := atrVal
+    entrySL    := close + atrVal * atrMultSL
+    entryTP1   := close - atrVal * atrMultTP1
+    trailLow   := close
+    tp1Hit     := false
+    isLong     := false
     strategy.entry("sell", strategy.short)
-    strategy.exit("sell_exit", "sell", stop=sl, limit=tp)
+    strategy.exit("sell_tp1", "sell", stop=entrySL, limit=entryTP1, qty_percent=tp1Pct)
 
-// Hull flip exit (backup — if Hull flips against position before SL/TP)
+// Track swing high/low for trailing stop
+if strategy.position_size > 0
+    trailHigh := math.max(nz(trailHigh, high), high)
+if strategy.position_size < 0
+    trailLow := math.min(nz(trailLow, low), low)
+
+// Detect TP1 hit — switch to trailing stop for remainder
+if strategy.position_size > 0 and not tp1Hit
+    if high >= entryTP1
+        tp1Hit := true
+        trailStop = trailHigh - entryATR * atrMultTrail
+        strategy.exit("buy_trail", "buy", stop=trailStop)
+
+if strategy.position_size < 0 and not tp1Hit
+    if low <= entryTP1
+        tp1Hit := true
+        trailStop = trailLow + entryATR * atrMultTrail
+        strategy.exit("sell_trail", "sell", stop=trailStop)
+
+// Update trailing stop each bar after TP1
+if strategy.position_size > 0 and tp1Hit
+    trailStop = trailHigh - entryATR * atrMultTrail
+    strategy.exit("buy_trail", "buy", stop=trailStop)
+
+if strategy.position_size < 0 and tp1Hit
+    trailStop = trailLow + entryATR * atrMultTrail
+    strategy.exit("sell_trail", "sell", stop=trailStop)
+
+// Hull flip exit (backup)
 if strategy.position_size > 0 and hullBear
     strategy.close("buy", comment="Hull Flip")
 
 if strategy.position_size < 0 and hullBull
     strategy.close("sell", comment="Hull Flip")
 
-// Close at London session end
+// Close at session end
 if closeAtEnd and sessionJustEnded and strategy.position_size != 0
-    strategy.close_all(comment="London Close")
+    strategy.close_all(comment="Session Close")
 
 // ═══════════════════════════════════════════════════════════════
 // PLOTS
@@ -187,26 +260,51 @@ Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=hullColor, linewidth=
 fill(Fi1, Fi2, title="Band Filler", color=color.new(hullColor, transpSwitch))
 
 plot(use200EMA ? ema200 : na, "EMA 200", color=color.new(#ffffff, 30), linewidth=2)
+plot(ema21, "EMA 21", color=color.new(#2196f3, 40), linewidth=1)
 
 barcolor(candleCol ? (switchColor ? hullColor : na) : na)
 
 // Session background
-bgcolor(useSession and inSession ? color.new(#2196f3, 93) : na, title="London Session")
+bgcolor(useSession and inSession ? color.new(#2196f3, 93) : na, title="Session Window")
 
 // Entry markers
-plotshape(longEntry, "Long Entry", shape.arrowup, location.belowbar,
+plotshape(longEntry and longFlip, "Long Flip", shape.arrowup, location.belowbar,
      color=color.new(#00e676, 0), size=size.normal, text="BUY")
-plotshape(shortEntry, "Short Entry", shape.arrowdown, location.abovebar,
+plotshape(shortEntry and shortFlip, "Short Flip", shape.arrowdown, location.abovebar,
      color=color.new(#ff5252, 0), size=size.normal, text="SELL")
+
+// Pullback re-entry markers (different shape)
+plotshape(longEntry and pullbackLong, "Long Pullback", shape.triangleup, location.belowbar,
+     color=color.new(#00e676, 0), size=size.small, text="PB")
+plotshape(shortEntry and pullbackShort, "Short Pullback", shape.triangledown, location.abovebar,
+     color=color.new(#ff5252, 0), size=size.small, text="PB")
+
+// Trailing stop level
+plot(strategy.position_size > 0 and tp1Hit ? trailHigh - entryATR * atrMultTrail : na,
+     "Long Trail", color=color.new(#ff9800, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and tp1Hit ? trailLow + entryATR * atrMultTrail : na,
+     "Short Trail", color=color.new(#ff9800, 0), style=plot.style_linebr, linewidth=1)
+
+// SL level
+plot(strategy.position_size > 0 and not tp1Hit ? entrySL : na,
+     "Long SL", color=color.new(#ff5252, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and not tp1Hit ? entrySL : na,
+     "Short SL", color=color.new(#ff5252, 0), style=plot.style_linebr, linewidth=1)
+
+// TP1 level
+plot(strategy.position_size > 0 and not tp1Hit ? entryTP1 : na,
+     "Long TP1", color=color.new(#00e676, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and not tp1Hit ? entryTP1 : na,
+     "Short TP1", color=color.new(#00e676, 0), style=plot.style_linebr, linewidth=1)
 
 // ═══════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0, "STRATEGY",  text_color=color.yellow, text_size=size.small)
-    table.cell(t, 1, 0, "Hull London", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "Hull London v2", text_color=color.yellow, text_size=size.small)
     table.cell(t, 0, 1, "Hull",       text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 1, hullBull ? "BULL" : "BEAR",
          text_color=hullBull ? color.green : color.red, text_size=size.small)
@@ -225,7 +323,13 @@ if barstate.islast
     table.cell(t, 0, 6, "Cooldown",   text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 6, cooldownActive ? "ACTIVE" : "OK",
          text_color=cooldownActive ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 7, "Position",   text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 7, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+    table.cell(t, 0, 7, "TP1 Hit",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, strategy.position_size != 0 ? (tp1Hit ? "YES — TRAILING" : "NO") : "—",
+         text_color=tp1Hit and strategy.position_size != 0 ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 8, "Pullbacks",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8, usePullback ? "ON" : "OFF",
+         text_color=usePullback ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 9, "Position",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
          text_size=size.small)
