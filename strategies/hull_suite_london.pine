@@ -1,0 +1,231 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Hull Suite Strategy — London Session Filter
+// Based on InSilico's Hull Ma Pack, converted by DashTrader
+// Enhanced with London session filter, EMA 200 trend gate, ADX filter,
+// ATR-based SL/TP, and post-loss cooldown for AUDUSD 1H
+
+//@version=6
+strategy("Hull Suite — London Session", overlay=true, pyramiding=0,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, calc_on_order_fills=false, slippage=2,
+     commission_type=strategy.commission.percent, commission_value=0.005)
+
+// ═══════════════════════════════════════════════════════════════
+// DIRECTION
+// ═══════════════════════════════════════════════════════════════
+
+strat_dir_input = input.string("long", "Strategy Direction", options=["long", "short", "all"], group="Direction")
+strat_dir_value = strat_dir_input == "long" ? strategy.direction.long : strat_dir_input == "short" ? strategy.direction.short : strategy.direction.all
+strategy.risk.allow_entry_in(strat_dir_value)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST PERIOD
+// ═══════════════════════════════════════════════════════════════
+
+testStartYear  = input.int(2016, "Backtest Start Year", group="Backtest")
+testStartMonth = input.int(1, "Backtest Start Month", group="Backtest")
+testStartDay   = input.int(1, "Backtest Start Day", group="Backtest")
+testStopYear   = input.int(2030, "Backtest Stop Year", group="Backtest")
+testStopMonth  = input.int(12, "Backtest Stop Month", group="Backtest")
+testStopDay    = input.int(30, "Backtest Stop Day", group="Backtest")
+
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+testPeriodStop  = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+testPeriod()    => time >= testPeriodStart and time <= testPeriodStop
+
+// ═══════════════════════════════════════════════════════════════
+// HULL MA INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+src         = input(close, title="Source")
+modeSwitch  = input.string("Hma", "Hull Variation", options=["Hma", "Thma", "Ehma"], group="Hull MA")
+length      = input.int(55, "Length (180-200 for S/R, 55 for swing)", group="Hull MA")
+switchColor = input.bool(true, "Color Hull according to trend?", group="Hull MA")
+candleCol   = input.bool(false, "Color candles based on Hull's Trend?", group="Hull MA")
+visualSwitch   = input.bool(true, "Show as a Band?", group="Hull MA")
+thicknesSwitch = input.int(1, "Line Thickness", group="Hull MA")
+transpSwitch   = input.int(40, "Band Transparency", step=5, group="Hull MA")
+
+// ═══════════════════════════════════════════════════════════════
+// LONDON SESSION FILTER
+// ═══════════════════════════════════════════════════════════════
+
+useSession = input.bool(true, "London Session Filter", group="Session",
+     tooltip="Only enter trades during London session hours")
+sessionStr = input.session("0700-1600", "London Session (UTC)", group="Session")
+closeAtEnd = input.bool(true, "Close Positions at Session End", group="Session",
+     tooltip="Auto-close all open positions when London session ends")
+sessionTZ  = input.string("UTC", "Session Timezone",
+     options=["UTC", "Europe/London", "America/New_York"], group="Session")
+
+inSession        = not useSession or not na(time(timeframe.period, sessionStr, sessionTZ))
+wasInSession     = not na(time(timeframe.period, sessionStr, sessionTZ)[1])
+sessionJustEnded = useSession and wasInSession and not inSession
+
+// ═══════════════════════════════════════════════════════════════
+// TREND FILTERS
+// ═══════════════════════════════════════════════════════════════
+
+use200EMA = input.bool(true, "EMA 200 Trend Gate", group="Filters",
+     tooltip="Longs only above EMA 200, shorts only below")
+useADX    = input.bool(true, "ADX Trend Strength Filter", group="Filters",
+     tooltip="Only trade when ADX confirms a trend")
+adxLen    = input.int(14, "ADX Length", group="Filters")
+adxMin    = input.float(20.0, "Min ADX", step=1.0, group="Filters")
+
+ema200 = ta.ema(close, 200)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+above200 = not use200EMA or close > ema200
+below200 = not use200EMA or close < ema200
+adxOK    = not useADX or adxVal >= adxMin
+
+// ═══════════════════════════════════════════════════════════════
+// RISK MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
+
+atrLen     = input.int(14, "ATR Length", group="Risk")
+atrMultSL  = input.float(1.5, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1 = input.float(2.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+useCooldown = input.bool(true, "Post-Loss Cooldown", group="Risk")
+coolBars    = input.int(3, "Cooldown Bars After Loss", minval=1, maxval=20, group="Risk")
+
+atrVal = ta.atr(atrLen)
+
+// ═══════════════════════════════════════════════════════════════
+// COOLDOWN TRACKING
+// ═══════════════════════════════════════════════════════════════
+
+var int lastExitBar  = -999
+var float lastExitPL = 0.0
+
+wasFlat    = strategy.position_size[1] == 0
+wasInPos   = strategy.position_size[1] != 0
+justExited = wasInPos and strategy.position_size == 0
+
+if justExited
+    lastExitBar  := bar_index
+    lastExitPL   := strategy.netprofit - strategy.netprofit[1]
+
+cooldownActive = useCooldown and lastExitPL < 0 and (bar_index - lastExitBar) <= coolBars
+cooldownOK     = not cooldownActive
+
+// ═══════════════════════════════════════════════════════════════
+// HULL MA FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+HMA(_src, _length) =>
+    ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+
+EHMA(_src, _length) =>
+    ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+
+THMA(_src, _length) =>
+    ta.wma(ta.wma(_src, _length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+
+Mode(modeSwitch, src, len) =>
+    modeSwitch == "Hma"  ? HMA(src, len) :
+      modeSwitch == "Ehma" ? EHMA(src, len) :
+      modeSwitch == "Thma" ? THMA(src, len / 2) : na
+
+// ═══════════════════════════════════════════════════════════════
+// HULL OUTPUT
+// ═══════════════════════════════════════════════════════════════
+
+HULL  = Mode(modeSwitch, src, length)
+MHULL = HULL[0]
+SHULL = HULL[2]
+
+hullBull = HULL > HULL[2]
+hullBear = HULL < HULL[2]
+
+hullColor = switchColor ? (hullBull ? #00ff00 : #ff0000) : #ff9800
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ═══════════════════════════════════════════════════════════════
+
+longSignal  = hullBull and not hullBull[1]   // Hull just flipped bullish
+shortSignal = hullBear and not hullBear[1]   // Hull just flipped bearish
+
+longEntry  = longSignal and inSession and above200 and adxOK and cooldownOK and testPeriod()
+shortEntry = shortSignal and inSession and below200 and adxOK and cooldownOK and testPeriod()
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE TRADES
+// ═══════════════════════════════════════════════════════════════
+
+if longEntry
+    sl = close - atrVal * atrMultSL
+    tp = close + atrVal * atrMultTP1
+    strategy.entry("buy", strategy.long)
+    strategy.exit("buy_exit", "buy", stop=sl, limit=tp)
+
+if shortEntry
+    sl = close + atrVal * atrMultSL
+    tp = close - atrVal * atrMultTP1
+    strategy.entry("sell", strategy.short)
+    strategy.exit("sell_exit", "sell", stop=sl, limit=tp)
+
+// Hull flip exit (backup — if Hull flips against position before SL/TP)
+if strategy.position_size > 0 and hullBear
+    strategy.close("buy", comment="Hull Flip")
+
+if strategy.position_size < 0 and hullBull
+    strategy.close("sell", comment="Hull Flip")
+
+// Close at London session end
+if closeAtEnd and sessionJustEnded and strategy.position_size != 0
+    strategy.close_all(comment="London Close")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+Fi1 = plot(MHULL, title="MHULL", color=hullColor, linewidth=thicknesSwitch)
+Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=hullColor, linewidth=thicknesSwitch)
+fill(Fi1, Fi2, title="Band Filler", color=color.new(hullColor, transpSwitch))
+
+plot(use200EMA ? ema200 : na, "EMA 200", color=color.new(#ffffff, 30), linewidth=2)
+
+barcolor(candleCol ? (switchColor ? hullColor : na) : na)
+
+// Session background
+bgcolor(useSession and inSession ? color.new(#2196f3, 93) : na, title="London Session")
+
+// Entry markers
+plotshape(longEntry, "Long Entry", shape.arrowup, location.belowbar,
+     color=color.new(#00e676, 0), size=size.normal, text="BUY")
+plotshape(shortEntry, "Short Entry", shape.arrowdown, location.abovebar,
+     color=color.new(#ff5252, 0), size=size.normal, text="SELL")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "STRATEGY",  text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "Hull London", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1, "Hull",       text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 1, hullBull ? "BULL" : "BEAR",
+         text_color=hullBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "Session",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 2, inSession ? "ACTIVE" : "CLOSED",
+         text_color=inSession ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 3, "200 EMA",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 3, close > ema200 ? "ABOVE" : "BELOW",
+         text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4, "ADX",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " LOW"),
+         text_color=adxOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "ATR",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(atrVal, "#.00000"),
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 6, "Cooldown",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6, cooldownActive ? "ACTIVE" : "OK",
+         text_color=cooldownActive ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 7, "Position",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
+         text_size=size.small)
