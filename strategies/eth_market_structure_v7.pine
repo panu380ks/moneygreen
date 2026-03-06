@@ -75,6 +75,11 @@ useTrail   = input.bool(true, "Trail Remainder", group="Risk")
 basePos     = input.float(60.0, "Base Position %", minval=10, maxval=100, step=5, group="Sizing")
 useVolScale = input.bool(true, "Scale Down in High Volatility", group="Sizing")
 
+// Session filter — London session has highest ETH volume/follow-through
+useSession = input.bool(true, "London Session Filter", group="Session",
+     tooltip="Only enter during London session (0700-1600 UTC). Best liquidity + trend follow-through.")
+sessionStr = input.session("0700-1600", "Session Window (UTC)", group="Session")
+
 // Drawdown controls
 useEqFilter = input.bool(true, "Equity Curve Filter", group="Drawdown",
      tooltip="Stop trading when equity < SMA(equity)")
@@ -204,12 +209,15 @@ cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
 // Combined drawdown gate
 ddGate = equityOK and cooldownOK
 
+// Session filter
+inSession = not useSession or not na(time(timeframe.period, sessionStr, "UTC"))
+
 // ═══════════════════════════════════════════════════════════════
 // ENTRY — Supertrend flip + all confirmations
 // ═══════════════════════════════════════════════════════════════
 
-longEntry = recentFlipBull and stGreen and above200 and emaStackBull and structBullOK and htfBull and adxOK and diBullOK and macdBullOK and rsiBullOK and ddGate
-shortEntry = recentFlipBear and stRed and below200 and emaStackBear and structBearOK and htfBear and adxOK and diBearOK and macdBearOK and rsiBearOK and ddGate
+longEntry = recentFlipBull and stGreen and above200 and emaStackBull and structBullOK and htfBull and adxOK and diBullOK and macdBullOK and rsiBullOK and ddGate and inSession
+shortEntry = recentFlipBear and stRed and below200 and emaStackBear and structBearOK and htfBear and adxOK and diBearOK and macdBearOK and rsiBearOK and ddGate and inSession
 
 // One entry per flip
 var int lastLongFlipBar  = -999
@@ -273,12 +281,13 @@ plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.
 
 bgcolor(msTrend == 1 ? color.new(#00e676, 96) : msTrend == -1 ? color.new(#ff5252, 96) : na, title="Structure")
 bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Active")
+bgcolor(not inSession ? color.new(#000000, 96) : na, title="Out of Session")
 
 // ═══════════════════════════════════════════════════════════════
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0,  "VERSION",    text_color=color.yellow, text_size=size.small)
     table.cell(t, 1, 0,  "v7",         text_color=color.yellow, text_size=size.small)
@@ -302,5 +311,7 @@ if barstate.islast
     table.cell(t, 1, 9,  equityOK ? "OK" : "BELOW SMA", text_color=equityOK ? color.green : color.red, text_size=size.small)
     table.cell(t, 0, 10, "Cooldown",   text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 10, cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
-    table.cell(t, 0, 11, "Position",   text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(t, 0, 11, "Session",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, inSession ? "LONDON" : "CLOSED", text_color=inSession ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 12, "Position",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 12, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
