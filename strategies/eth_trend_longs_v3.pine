@@ -1,0 +1,308 @@
+// ETH Market Structure v3 — Long Only, Confirmed Uptrend
+// ONLY buys in confirmed uptrends. Skips sideways/chop entirely.
+// 5 uptrend confirmations must align before any entry.
+// No shorts. Fewer trades, higher quality.
+// v3.1: Tighter SL (2%), scaled TPs for forex-friendly R:R, higher ADX/swing filters
+//@version=6
+strategy("ETH Trend Longs v3", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.075, slippage=3, pyramiding=0)
+
+strategy.risk.max_drawdown(30, strategy.percent_of_equity)
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Structure
+swingLen   = input.int(7, "Swing Length", minval=2, maxval=20, group="Structure",
+     tooltip="Higher = catches only major swings, fewer false signals")
+useHTF     = input.bool(true, "HTF Trend Filter", group="Structure")
+htfTF      = input.timeframe("D", "HTF Timeframe", group="Structure")
+
+// Trend Confirmation
+emaFastLen = input.int(21, "Fast EMA", group="Trend Confirmation")
+emaSlowLen = input.int(50, "Slow EMA", group="Trend Confirmation")
+use200EMA  = input.bool(true, "200 EMA Gate (must be above)", group="Trend Confirmation")
+adxLen     = input.int(14, "ADX Length", group="Trend Confirmation")
+adxMin     = input.float(25.0, "Min ADX (trend strength)", step=1.0, group="Trend Confirmation",
+     tooltip="Below this = sideways/ranging. 25+ = strong trend. Kills chop trades.")
+
+// Supertrend
+useSupertrend = input.bool(true, "Supertrend Must Be GREEN", group="Supertrend")
+stATRLen   = input.int(10,    "Supertrend ATR Length", minval=1, group="Supertrend")
+stFactor   = input.float(2.5, "Supertrend Factor", minval=0.01, step=0.01, group="Supertrend")
+
+// Entry Quality
+rsiLen     = input.int(14, "RSI Length", group="Entry Quality")
+rsiMax     = input.float(65, "Max RSI (don't buy overbought)", group="Entry Quality")
+rsiMin     = input.float(35, "Min RSI (don't buy in freefall)", group="Entry Quality")
+reqPullback = input.bool(true, "Require Pullback to EMA", group="Entry Quality",
+     tooltip="Wait for price to dip near fast EMA before buying — better entries")
+volLen     = input.int(20, "Volume MA Length", group="Entry Quality")
+
+// Risk
+tp1Pct = input.float(1.5,  "TP1 %", step=0.5, group="Risk")
+tp2Pct = input.float(3.0,  "TP2 %", step=0.5, group="Risk")
+tp3Pct = input.float(5.0,  "TP3 %", step=1.0, group="Risk")
+tp4Pct = input.float(8.0,  "TP4 %", step=1.0, group="Risk")
+slPct  = input.float(2.0,  "Stop Loss %", step=0.5, group="Risk")
+q1     = input.int(25, "TP1 Qty %", group="Risk")
+q2     = input.int(25, "TP2 Qty %", group="Risk")
+q3     = input.int(25, "TP3 Qty %", group="Risk")
+useTrail = input.bool(true, "Trail Remainder", group="Risk")
+trailPct = input.float(3.0, "Trail %", step=0.5, group="Risk")
+
+// Drawdown
+basePos      = input.float(75.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
+useVolFilter = input.bool(true, "Volatility Regime Filter", group="Drawdown")
+volFilterLen = input.int(40, "Vol Filter MA Length", group="Drawdown")
+maxVolRatio  = input.float(1.8, "Max Vol Ratio", step=0.1, group="Drawdown")
+useEqFilter  = input.bool(true, "Equity Curve Filter", group="Drawdown")
+eqFilterLen  = input.int(50, "Equity SMA Length", group="Drawdown")
+useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
+coolBars     = input.int(8, "Cooldown Bars", group="Drawdown")
+
+// ═══════════════════════════════════════════════════════════════
+// CORE INDICATORS
+// ═══════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+ema200  = ta.ema(close, 200)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(14)
+
+// ADX — the sideways killer
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+isTrending = adxVal >= adxMin
+isBullDI   = diPlus > diMinus
+
+// Supertrend
+[supertrend, stDirection] = ta.supertrend(stFactor, stATRLen)
+stGreen = stDirection < 0
+
+// Volume
+volMA = ta.sma(volume, volLen)
+volOK = na(volume) or volume > volMA * 0.8
+
+// HTF
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBull = not useHTF or na(htfEma) or close > htfEma
+
+// ═══════════════════════════════════════════════════════════════
+// SWING STRUCTURE
+// ═══════════════════════════════════════════════════════════════
+
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+var float prevSH = na
+var float prevSL = na
+
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+sweepLow   = not na(lastSL) and low < lastSL and close > lastSL
+
+if not na(swH)
+    prevSH := lastSH
+    lastSH := swH
+if not na(swL)
+    prevSL := lastSL
+    lastSL := swL
+
+// Market structure trend
+var int msTrend = 0
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+chochBull = breakAbove and msTrend[1] <= 0
+chochBear = breakBelow and msTrend[1] >= 0
+bosLong   = breakAbove and msTrend[1] == 1
+
+// Higher highs + higher lows = confirmed uptrend structure
+higherHigh = not na(lastSH) and not na(prevSH) and lastSH > prevSH
+higherLow  = not na(lastSL) and not na(prevSL) and lastSL > prevSL
+structureBull = higherHigh or higherLow
+
+// ═══════════════════════════════════════════════════════════════
+// 5-GATE UPTREND CONFIRMATION
+// All 5 must be true. This is what kills sideways trades.
+// ═══════════════════════════════════════════════════════════════
+
+// Gate 1: EMAs stacked bullish (fast > slow, both rising)
+emasBull = emaFast > emaSlow and emaFast > emaFast[1] and emaSlow > emaSlow[1]
+
+// Gate 2: Price above 200 EMA
+above200 = not use200EMA or close > ema200
+
+// Gate 3: ADX confirms trend (NOT sideways) + bullish DI
+trendConfirmed = isTrending and isBullDI
+
+// Gate 4: Supertrend GREEN
+stConfirmed = not useSupertrend or stGreen
+
+// Gate 5: HTF bullish
+htfConfirmed = htfBull
+
+// Master uptrend gate — ALL must pass
+uptrendConfirmed = emasBull and above200 and trendConfirmed and stConfirmed and htfConfirmed
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY SIGNALS — only in confirmed uptrend
+// ═══════════════════════════════════════════════════════════════
+
+// Pullback: price dipped near fast EMA (within 0.5%)
+pullbackOK = not reqPullback or (low <= emaFast * 1.005 and close > emaFast)
+
+// RSI in sweet spot
+rsiOK = rsiVal > rsiMin and rsiVal < rsiMax
+
+// Structure entry: CHoCH bull or BOS continuation
+structureEntry = chochBull or (bosLong and close > emaFast)
+
+// Sweep entry: liquidity grab below swing low in uptrend
+sweepEntry = sweepLow and msTrend >= 0 and rsiVal < 45
+
+// Final signal
+longSignal = uptrendConfirmed and (structureEntry or sweepEntry) and rsiOK and pullbackOK and volOK
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWDOWN CONTROLS
+// ═══════════════════════════════════════════════════════════════
+
+atrMA      = ta.sma(atrVal, volFilterLen)
+volRatio   = atrVal / nz(atrMA, atrVal)
+volRegimeOK = not useVolFilter or volRatio < maxVolRatio
+
+eqSMA    = ta.sma(strategy.equity, eqFilterLen)
+equityOK = not useEqFilter or strategy.equity >= eqSMA
+
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+if strategy.closedtrades > prevClosedCount
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        lastLossBar := bar_index
+    prevClosedCount := strategy.closedtrades
+cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
+
+volScale = useVolFilter ? (volRatio > 1.4 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
+unitQty  = strategy.equity * (basePos / 100.0) * volScale / close
+
+ddGate = volRegimeOK and equityOK and cooldownOK
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE
+// ═══════════════════════════════════════════════════════════════
+
+if longSignal and ddGate
+    strategy.entry("Long", strategy.long, qty=unitQty)
+
+// ═══════════════════════════════════════════════════════════════
+// EXITS
+// ═══════════════════════════════════════════════════════════════
+
+per(pcnt) =>
+    strategy.position_size != 0 ? math.round(pcnt / 100 * strategy.position_avg_price / syminfo.mintick) : float(na)
+
+strategy.exit("x1", qty_percent=q1, profit=per(tp1Pct), loss=per(slPct))
+strategy.exit("x2", qty_percent=q2, profit=per(tp2Pct), loss=per(slPct))
+strategy.exit("x3", qty_percent=q3, profit=per(tp3Pct), loss=per(slPct))
+
+if useTrail
+    strategy.exit("xTrail", profit=per(tp4Pct), loss=per(slPct),
+         trail_points=per(trailPct), trail_offset=per(trailPct * 0.4))
+else
+    strategy.exit("x4", profit=per(tp4Pct), loss=per(slPct))
+
+// Exit on bearish CHoCH (trend reversal)
+if strategy.position_size > 0 and chochBear
+    strategy.close("Long", comment="CHoCH Bear")
+
+// Exit if Supertrend flips RED
+if strategy.position_size > 0 and useSupertrend and stDirection > 0 and stDirection[1] < 0
+    strategy.close("Long", comment="ST Red")
+
+// Exit if ADX drops below minimum (trend died → sideways)
+if strategy.position_size > 0 and adxVal < adxMin * 0.7 and adxVal[1] >= adxMin * 0.7
+    strategy.close("Long", comment="Trend Died")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+plot(lastSH, "Swing High", color.new(#ff5252, 30), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 30), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+// Supertrend
+stVal = barstate.isfirst ? na : supertrend
+plot(useSupertrend and stGreen ? stVal : na, "ST Up", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(useSupertrend and not stGreen ? stVal : na, "ST Down", color=color.red, style=plot.style_linebr, linewidth=2)
+
+// Signals
+plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="CHoCH")
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="CHoCH")
+plotshape(bosLong and not chochBull, "BOS", shape.circle, location.belowbar, color.new(#2196f3, 0), size=size.tiny)
+plotshape(sweepLow and msTrend >= 0, "Sweep", shape.diamond, location.belowbar, color.new(#00bcd4, 0), size=size.tiny)
+plotshape(longSignal and ddGate, "ENTRY", shape.arrowup, location.belowbar, color.new(#00e676, 0), size=size.normal, text="BUY")
+
+// Background
+bgcolor(uptrendConfirmed ? color.new(#00e676, 95) : na, title="Uptrend Confirmed")
+bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Paused")
+bgcolor(not isTrending ? color.new(#9e9e9e, 95) : na, title="Sideways Zone")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table infoT = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(infoT, 0, 0, "STRATEGY", text_color=color.yellow, text_size=size.small)
+    table.cell(infoT, 1, 0, "TREND LONGS v3", text_color=color.yellow, text_size=size.small)
+
+    table.cell(infoT, 0, 1, "UPTREND", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 1, uptrendConfirmed ? "CONFIRMED" : "NOT CONFIRMED",
+         text_color=uptrendConfirmed ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoT, 0, 2, "ADX", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 2, str.tostring(adxVal, "#.0") + (isTrending ? " TREND" : " SIDEWAYS"),
+         text_color=isTrending ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoT, 0, 3, "SUPERTREND", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 3, stGreen ? "GREEN" : "RED",
+         text_color=stGreen ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoT, 0, 4, "EMAs", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 4, emasBull ? "BULL STACK" : "NOT ALIGNED",
+         text_color=emasBull ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoT, 0, 5, "200 EMA", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 5, close > ema200 ? "ABOVE" : "BELOW",
+         text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoT, 0, 6, "STRUCTURE", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 6, msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "NEUTRAL",
+         text_color=msTrend == 1 ? color.green : msTrend == -1 ? color.red : color.gray, text_size=size.small)
+
+    table.cell(infoT, 0, 7, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 7, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+
+    table.cell(infoT, 0, 8, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 8, strategy.position_size > 0 ? "LONG" : "FLAT",
+         text_color=strategy.position_size > 0 ? #00e676 : color.gray, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(longSignal and ddGate, title="ETH Trend Long", message="Confirmed uptrend — Long entry")
+alertcondition(chochBear, title="ETH CHoCH Bear", message="Bearish CHoCH — Trend may be reversing")
