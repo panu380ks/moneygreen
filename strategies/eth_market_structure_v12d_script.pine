@@ -1,0 +1,308 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// ETH Market Structure v12d — Indicator Script
+// Converted from strategy to indicator with SL/TP levels and alerts
+// Same logic: SL 1.3, TP1 3.0, TP2 5.5, basePos 82.5
+
+//@version=6
+indicator("ETH Market Structure v12d", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+strat_dir = input.string("long", "Direction", options=["long", "short", "all"])
+
+// Supertrend
+stATRLen   = input.int(10, "Supertrend ATR Length", minval=1, group="Supertrend")
+stFactor   = input.float(3.0, "Supertrend Factor", minval=0.01, step=0.1, group="Supertrend",
+     tooltip="3.0 = fewer flips, higher quality signals.")
+
+// EMAs
+emaFastLen = input.int(21, "Fast EMA", group="Trend")
+emaSlowLen = input.int(50, "Slow EMA", group="Trend")
+use200EMA  = input.bool(true, "200 EMA Trend Gate", group="Trend")
+reqEMAstack = input.bool(true, "Require EMA Stack (fast > slow)", group="Trend")
+
+// Structure
+swingLen   = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure")
+reqStructure = input.bool(true, "Require Bullish Structure", group="Structure",
+     tooltip="msTrend must be bullish (1) for longs.")
+
+// HTF
+useHTF     = input.bool(true, "HTF Trend Filter", group="HTF")
+htfTF      = input.timeframe("D", "HTF Timeframe", group="HTF")
+
+// ADX + DI Direction
+adxLen     = input.int(14, "ADX Length", group="ADX")
+adxMin     = input.float(20.0, "Min ADX", step=1.0, group="ADX",
+     tooltip="20 = confirmed trend.")
+useDIdir   = input.bool(true, "Require DI Direction", group="ADX",
+     tooltip="DI+ > DI- for longs, DI- > DI+ for shorts.")
+
+// RSI
+rsiLen     = input.int(14, "RSI Length", group="Entry Quality")
+rsiMaxLong = input.float(70.0, "Max RSI for Long", group="Entry Quality")
+rsiMinShort = input.float(30.0, "Min RSI for Short", group="Entry Quality")
+
+// Risk
+atrMultSL  = input.float(1.3, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1 = input.float(3.0, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrMultTP2 = input.float(5.5, "TP2 ATR Multiplier", step=0.5, group="Risk")
+showLevels = input.bool(true, "Show SL/TP Levels", group="Risk")
+
+// Cooldown
+useCooldown = input.bool(true, "Loss Cooldown", group="Drawdown")
+coolBars    = input.int(8, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+
+// Volatility scaling
+useVolScale = input.bool(true, "Scale Down in High Volatility", group="Sizing")
+
+// ═══════════════════════════════════════════════════════════════
+// SUPERTREND
+// ═══════════════════════════════════════════════════════════════
+
+[supertrend, stDirection] = ta.supertrend(stFactor, stATRLen)
+stGreen = stDirection < 0
+stRed   = stDirection > 0
+
+stFlipBull = stDirection < 0 and stDirection[1] > 0
+stFlipBear = stDirection > 0 and stDirection[1] < 0
+
+var int barsSinceFlipBull = 999
+var int barsSinceFlipBear = 999
+if stFlipBull
+    barsSinceFlipBull := 0
+else
+    barsSinceFlipBull += 1
+if stFlipBear
+    barsSinceFlipBear := 0
+else
+    barsSinceFlipBear += 1
+
+recentFlipBull = barsSinceFlipBull <= 3
+recentFlipBear = barsSinceFlipBear <= 3
+
+// ═══════════════════════════════════════════════════════════════
+// TREND CONFIRMATION
+// ═══════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+ema200  = ta.ema(close, 200)
+
+emaStackBull = not reqEMAstack or (emaFast > emaSlow)
+emaStackBear = not reqEMAstack or (emaFast < emaSlow)
+above200     = not use200EMA or close > ema200
+below200     = not use200EMA or close < ema200
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE
+// ═══════════════════════════════════════════════════════════════
+
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+
+if not na(swH)
+    lastSH := swH
+if not na(swL)
+    lastSL := swL
+
+var int msTrend = 0
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+chochBull = breakAbove and msTrend[1] <= 0
+chochBear = breakBelow and msTrend[1] >= 0
+
+structBullOK = not reqStructure or msTrend >= 0
+structBearOK = not reqStructure or msTrend <= 0
+
+// ═══════════════════════════════════════════════════════════════
+// HTF TREND
+// ═══════════════════════════════════════════════════════════════
+
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBull = not useHTF or na(htfEma) or close > htfEma
+htfBear = not useHTF or na(htfEma) or close < htfEma
+
+// ═══════════════════════════════════════════════════════════════
+// ADX + DI DIRECTION
+// ═══════════════════════════════════════════════════════════════
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = adxVal >= adxMin
+
+diBullOK = not useDIdir or diPlus > diMinus
+diBearOK = not useDIdir or diMinus > diPlus
+
+// ═══════════════════════════════════════════════════════════════
+// RSI
+// ═══════════════════════════════════════════════════════════════
+
+rsiVal    = ta.rsi(close, rsiLen)
+rsiBullOK = rsiVal < rsiMaxLong
+rsiBearOK = rsiVal > rsiMinShort
+
+// ═══════════════════════════════════════════════════════════════
+// VOLATILITY & COOLDOWN
+// ═══════════════════════════════════════════════════════════════
+
+atrVal   = ta.atr(14)
+atrMA    = ta.sma(atrVal, 40)
+volRatio = atrVal / nz(atrMA, atrVal)
+
+volScale = useVolScale ? (volRatio > 1.5 ? 0.5 : volRatio > 1.3 ? 0.75 : 1.0) : 1.0
+volOK    = volScale > 0
+
+// Simple cooldown tracker (no equity tracking in indicator mode)
+var int lastSignalBar = -999
+cooldownOK = not useCooldown or (bar_index - lastSignalBar) > coolBars
+
+// ═══════════════════════════════════════════════════════════════
+// SIGNALS
+// ═══════════════════════════════════════════════════════════════
+
+allowLong  = strat_dir == "long" or strat_dir == "all"
+allowShort = strat_dir == "short" or strat_dir == "all"
+
+longEntry  = allowLong and recentFlipBull and stGreen and above200 and emaStackBull and structBullOK and htfBull and adxOK and diBullOK and rsiBullOK and cooldownOK
+shortEntry = allowShort and recentFlipBear and stRed and below200 and emaStackBear and structBearOK and htfBear and adxOK and diBearOK and rsiBearOK and cooldownOK
+
+// One entry per flip
+var int lastLongFlipBar  = -999
+var int lastShortFlipBar = -999
+
+longOK  = longEntry and barsSinceFlipBull != lastLongFlipBar
+shortOK = shortEntry and barsSinceFlipBear != lastShortFlipBar
+
+if longOK
+    lastLongFlipBar := barsSinceFlipBull
+    lastSignalBar   := bar_index
+
+if shortOK
+    lastShortFlipBar := barsSinceFlipBear
+    lastSignalBar    := bar_index
+
+// ═══════════════════════════════════════════════════════════════
+// SL / TP LEVELS
+// ═══════════════════════════════════════════════════════════════
+
+var float entrySL  = na
+var float entryTP1 = na
+var float entryTP2 = na
+var int   posDir   = 0  // 1=long, -1=short, 0=flat
+
+// Close signal: supertrend flip against position
+closeLong  = posDir == 1 and stFlipBear
+closeShort = posDir == -1 and stFlipBull
+
+if longOK
+    entrySL  := close - atrVal * atrMultSL
+    entryTP1 := close + atrVal * atrMultTP1
+    entryTP2 := close + atrVal * atrMultTP2
+    posDir   := 1
+
+if shortOK
+    entrySL  := close + atrVal * atrMultSL
+    entryTP1 := close - atrVal * atrMultTP1
+    entryTP2 := close - atrVal * atrMultTP2
+    posDir   := -1
+
+// Check if price hit SL/TP levels
+if posDir == 1
+    if low <= entrySL or high >= entryTP2 or closeLong
+        posDir   := 0
+        entrySL  := na
+        entryTP1 := na
+        entryTP2 := na
+
+if posDir == -1
+    if high >= entrySL or low <= entryTP2 or closeShort
+        posDir   := 0
+        entrySL  := na
+        entryTP1 := na
+        entryTP2 := na
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+plot(lastSH, "Swing High", color.new(#ff5252, 50), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 50), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+stVal = barstate.isfirst ? na : supertrend
+plot(stGreen ? stVal : na, "ST Up", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(stRed ? stVal : na, "ST Down", color=color.red, style=plot.style_linebr, linewidth=2)
+
+// SL/TP level plots
+plot(showLevels and posDir != 0 ? entrySL : na, "Stop Loss", color.new(#ff5252, 0), style=plot.style_linebr, linewidth=1)
+plot(showLevels and posDir != 0 ? entryTP1 : na, "TP1", color.new(#00e676, 0), style=plot.style_linebr, linewidth=1)
+plot(showLevels and posDir != 0 ? entryTP2 : na, "TP2", color.new(#00e676, 40), style=plot.style_linebr, linewidth=1)
+
+// Entry signals
+plotshape(longOK, "Long Entry", shape.arrowup, location.belowbar, color.new(#00e676, 0), size=size.normal, text="BUY")
+plotshape(shortOK, "Short Entry", shape.arrowdown, location.abovebar, color.new(#ff5252, 0), size=size.normal, text="SELL")
+
+// Close signals
+plotshape(closeLong, "Close Long", shape.xcross, location.abovebar, color.new(#ff9800, 0), size=size.small, text="EXIT")
+plotshape(closeShort, "Close Short", shape.xcross, location.belowbar, color.new(#ff9800, 0), size=size.small, text="EXIT")
+
+// Structure
+plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 50), size=size.tiny)
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 50), size=size.tiny)
+
+bgcolor(msTrend == 1 ? color.new(#00e676, 96) : msTrend == -1 ? color.new(#ff5252, 96) : na, title="Structure")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0,  "VERSION",     text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0,  "v12d SCRIPT", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1,  "Supertrend",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 1,  stGreen ? "GREEN" : "RED", text_color=stGreen ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2,  "Structure",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 2,  msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "FLAT", text_color=msTrend == 1 ? color.green : msTrend == -1 ? color.red : color.gray, text_size=size.small)
+    table.cell(t, 0, 3,  "ADX",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 3,  str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " LOW"), text_color=adxOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4,  "DI Dir",      text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4,  diPlus > diMinus ? "DI+ LEAD" : "DI- LEAD", text_color=diPlus > diMinus ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5,  "EMA Stack",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5,  emaFast > emaSlow ? "BULL" : "BEAR", text_color=emaFast > emaSlow ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6,  "200 EMA",     text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6,  close > ema200 ? "ABOVE" : "BELOW", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 7,  "HTF",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7,  htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 8,  "RSI",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8,  str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 9,  "Vol Scale",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9,  str.tostring(volScale * 100, "#") + "%", text_color=volScale < 1 ? color.yellow : color.green, text_size=size.small)
+    table.cell(t, 0, 10, "Position",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 10, posDir == 1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT", text_color=posDir == 1 ? color.green : posDir == -1 ? color.red : color.gray, text_size=size.small)
+    table.cell(t, 0, 11, "ATR",         text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, str.tostring(atrVal, "#.00"), text_color=color.white, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+alertcondition(longOK, "Long Entry", "ETH v12d: BUY signal")
+alertcondition(shortOK, "Short Entry", "ETH v12d: SELL signal")
+alertcondition(closeLong, "Close Long", "ETH v12d: Close LONG (ST flip red)")
+alertcondition(closeShort, "Close Short", "ETH v12d: Close SHORT (ST flip green)")
+alertcondition(longOK or shortOK, "Any Entry", "ETH v12d: Entry signal")
+alertcondition(closeLong or closeShort, "Any Exit", "ETH v12d: Exit signal")
