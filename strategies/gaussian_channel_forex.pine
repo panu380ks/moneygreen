@@ -1,0 +1,297 @@
+// Gaussian Channel Strategy — Forex Optimized
+// Buy in GREEN band (channel rising), Sell in RED band (channel falling)
+// Self-contained: implements Gaussian filter internally
+// Matching GaussianChannel v3.3 params: hlc3, 4 poles, period 144, mult 1.414
+//@version=6
+strategy("Gaussian Channel FX", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.005, slippage=2, pyramiding=0)
+
+strategy.risk.max_drawdown(20, strategy.percent_of_equity)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Gaussian Channel
+src       = input.source(hlc3, "Source", group="Gaussian Channel")
+poles     = input.int(4, "Poles (1-4)", minval=1, maxval=4, group="Gaussian Channel",
+     tooltip="Higher = smoother. 4 matches your indicator")
+period    = input.int(144, "Period", minval=1, group="Gaussian Channel")
+mult      = input.float(1.414, "Band Multiplier", step=0.001, group="Gaussian Channel",
+     tooltip="Controls band width. 1.414 = default from your chart")
+
+// Entry Filters
+useRSI      = input.bool(true, "RSI Filter", group="Entry")
+rsiLen      = input.int(14, "RSI Length", group="Entry")
+rsiMax      = input.float(70, "Max RSI (skip overbought)", group="Entry")
+rsiMin      = input.float(30, "Min RSI (skip oversold for shorts)", group="Entry")
+reqPullback = input.bool(false, "Require Pullback Into Band", group="Entry",
+     tooltip="Price must touch or dip into the band before entry")
+
+// Direction
+direction = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"], group="Direction")
+
+// Risk — ATR-based
+atrLen     = input.int(14, "ATR Length", group="Risk")
+slATR      = input.float(1.5, "Stop Loss ATR x", step=0.25, group="Risk")
+tp1ATR     = input.float(2.0, "TP1 ATR x", step=0.25, group="Risk")
+tp2ATR     = input.float(4.0, "TP2 ATR x", step=0.5, group="Risk")
+q1         = input.int(50, "TP1 Qty %", group="Risk")
+useTrail   = input.bool(true, "Trailing Stop", group="Risk")
+trailATR   = input.float(1.5, "Trail ATR x", step=0.25, group="Risk")
+
+// Drawdown
+basePos      = input.float(50.0, "Base Position %", minval=10, maxval=100, step=5, group="Drawdown")
+useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
+coolBars     = input.int(10, "Cooldown Bars", group="Drawdown")
+useEqFilter  = input.bool(true, "Equity Curve Filter", group="Drawdown")
+eqFilterLen  = input.int(50, "Equity SMA Length", group="Drawdown")
+
+// Session
+useSession   = input.bool(false, "Session Filter", group="Session")
+sessionStr   = input.session("0700-1700", "Trading Session (UTC)", group="Session")
+
+// ═══════════════════════════════════════════════════════════════
+// GAUSSIAN FILTER — Multi-pole IIR implementation
+// ═══════════════════════════════════════════════════════════════
+
+// Beta and alpha from Gaussian distribution
+// Formula: beta = (1 - cos(2*pi/period)) / (sqrt(2)^(2/poles) - 1)
+//          alpha = -beta + sqrt(beta^2 + 2*beta)
+beta  = (1 - math.cos(2 * math.pi / period)) / (math.pow(math.sqrt(2.0), 2.0 / poles) - 1)
+alpha = -beta + math.sqrt(beta * beta + 2 * beta)
+
+// Pole 1
+var float f1 = na
+f1 := alpha * src + (1 - alpha) * nz(f1[1], src)
+
+// Pole 2
+var float f2 = na
+f2 := poles >= 2 ? alpha * f1 + (1 - alpha) * nz(f2[1], f1) : f1
+
+// Pole 3
+var float f3 = na
+f3 := poles >= 3 ? alpha * f2 + (1 - alpha) * nz(f3[1], f2) : f2
+
+// Pole 4 (final filter output)
+var float f4 = na
+f4 := poles >= 4 ? alpha * f3 + (1 - alpha) * nz(f4[1], f3) : f3
+
+gaussFilter = f4
+
+// ═══════════════════════════════════════════════════════════════
+// BAND CALCULATION — RMS deviation for upper/lower bands
+// ═══════════════════════════════════════════════════════════════
+
+// Filtered deviation (same multi-pole filtering on |src - filter|)
+dev = math.abs(src - gaussFilter)
+
+var float d1 = na
+d1 := alpha * dev + (1 - alpha) * nz(d1[1], dev)
+
+var float d2 = na
+d2 := poles >= 2 ? alpha * d1 + (1 - alpha) * nz(d2[1], d1) : d1
+
+var float d3 = na
+d3 := poles >= 3 ? alpha * d2 + (1 - alpha) * nz(d3[1], d2) : d2
+
+var float d4 = na
+d4 := poles >= 4 ? alpha * d3 + (1 - alpha) * nz(d4[1], d3) : d3
+
+filteredDev = d4
+
+upperBand = gaussFilter + mult * filteredDev
+lowerBand = gaussFilter - mult * filteredDev
+
+// ═══════════════════════════════════════════════════════════════
+// CHANNEL DIRECTION — Green vs Red
+// ═══════════════════════════════════════════════════════════════
+
+isGreen = gaussFilter > gaussFilter[1]  // rising = bullish = green
+isRed   = gaussFilter < gaussFilter[1]  // falling = bearish = red
+
+justTurnedGreen = isGreen and not isGreen[1]
+justTurnedRed   = isRed and not isRed[1]
+
+// ═══════════════════════════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════════════════════════
+
+rsiVal = ta.rsi(close, rsiLen)
+atrVal = ta.atr(atrLen)
+
+// Session
+inSession = not useSession or not na(time(timeframe.period, sessionStr, "UTC"))
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Price is within the channel bands
+priceInChannel = close >= lowerBand and close <= upperBand
+
+// Pullback: price near the lower band (for longs) or upper band (for shorts)
+pullbackLong  = not reqPullback or low <= gaussFilter
+pullbackShort = not reqPullback or high >= gaussFilter
+
+// RSI filters
+rsiBuyOK  = not useRSI or rsiVal < rsiMax
+rsiSellOK = not useRSI or rsiVal > rsiMin
+
+// Direction
+canLong  = direction == "Both" or direction == "Long Only"
+canShort = direction == "Both" or direction == "Short Only"
+
+// ═══ LONG: Buy when channel is GREEN ═══
+// Channel just turned green OR price is in green channel and we're flat
+longEntry = isGreen and canLong and rsiBuyOK and pullbackLong and inSession
+
+// ═══ SHORT: Sell when channel is RED ═══
+shortEntry = isRed and canShort and rsiSellOK and pullbackShort and inSession
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWDOWN CONTROLS
+// ═══════════════════════════════════════════════════════════════
+
+eqSMA    = ta.sma(strategy.equity, eqFilterLen)
+equityOK = not useEqFilter or strategy.equity >= eqSMA
+
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+if strategy.closedtrades > prevClosedCount
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        lastLossBar := bar_index
+    prevClosedCount := strategy.closedtrades
+cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
+
+ddGate = equityOK and cooldownOK
+
+// Position sizing
+posSize = strategy.equity * (basePos / 100.0) / close
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE TRADES
+// ═══════════════════════════════════════════════════════════════
+
+slTicks    = atrVal * slATR / syminfo.mintick
+tp1Ticks   = atrVal * tp1ATR / syminfo.mintick
+tp2Ticks   = atrVal * tp2ATR / syminfo.mintick
+trailTicks = atrVal * trailATR / syminfo.mintick
+trailOff   = atrVal * trailATR * 0.4 / syminfo.mintick
+
+// ═══ LONG ENTRY — only in GREEN band ═══
+if longEntry and ddGate and strategy.position_size <= 0
+    // Close any existing short first
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Flip to Long")
+    strategy.entry("Long", strategy.long, qty=posSize)
+    strategy.exit("L-TP1", "Long", qty_percent=q1, profit=tp1Ticks, loss=slTicks)
+    if useTrail
+        strategy.exit("L-Trail", "Long", profit=tp2Ticks, loss=slTicks,
+             trail_points=trailTicks, trail_offset=trailOff)
+    else
+        strategy.exit("L-TP2", "Long", profit=tp2Ticks, loss=slTicks)
+
+// ═══ SHORT ENTRY — only in RED band ═══
+if shortEntry and ddGate and strategy.position_size >= 0
+    // Close any existing long first
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Flip to Short")
+    strategy.entry("Short", strategy.short, qty=posSize)
+    strategy.exit("S-TP1", "Short", qty_percent=q1, profit=tp1Ticks, loss=slTicks)
+    if useTrail
+        strategy.exit("S-Trail", "Short", profit=tp2Ticks, loss=slTicks,
+             trail_points=trailTicks, trail_offset=trailOff)
+    else
+        strategy.exit("S-TP2", "Short", profit=tp2Ticks, loss=slTicks)
+
+// ═══════════════════════════════════════════════════════════════
+// BAND-COLOR EXITS — close when band flips
+// ═══════════════════════════════════════════════════════════════
+
+// Close long when channel turns RED
+if strategy.position_size > 0 and justTurnedRed
+    strategy.close("Long", comment="Channel Red")
+
+// Close short when channel turns GREEN
+if strategy.position_size < 0 and justTurnedGreen
+    strategy.close("Short", comment="Channel Green")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS — Gaussian Channel with Green/Red coloring
+// ═══════════════════════════════════════════════════════════════
+
+// Filter line
+filterColor = isGreen ? color.new(#00e676, 0) : isRed ? color.new(#ff5252, 0) : color.new(#9e9e9e, 0)
+plot(gaussFilter, "Gaussian Filter", filterColor, linewidth=2)
+
+// Upper band
+p_upper = plot(upperBand, "Upper Band", color.new(#ffffff, 70), linewidth=1)
+
+// Lower band
+p_lower = plot(lowerBand, "Lower Band", color.new(#ffffff, 70), linewidth=1)
+
+// Fill between bands — green when rising, red when falling
+p_filter = plot(gaussFilter, "Filter Fill", color.new(color.black, 100), display=display.none)
+fill(p_upper, p_filter, color=isGreen ? color.new(#00e676, 85) : color.new(#ff5252, 85), title="Upper Fill")
+fill(p_filter, p_lower, color=isGreen ? color.new(#00e676, 85) : color.new(#ff5252, 85), title="Lower Fill")
+
+// Entry signals
+plotshape(longEntry and ddGate and strategy.position_size <= 0, "Buy",
+     shape.triangleup, location.belowbar, color.new(#00e676, 0), size=size.small, text="BUY")
+plotshape(shortEntry and ddGate and strategy.position_size >= 0, "Sell",
+     shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.small, text="SELL")
+
+// Band flip markers
+plotshape(justTurnedGreen, "Green Flip", shape.circle, location.belowbar,
+     color.new(#00e676, 30), size=size.tiny)
+plotshape(justTurnedRed, "Red Flip", shape.circle, location.abovebar,
+     color.new(#ff5252, 30), size=size.tiny)
+
+// Background
+bgcolor(isGreen ? color.new(#00e676, 96) : isRed ? color.new(#ff5252, 96) : na, title="Channel Direction")
+bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Paused")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table infoT = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(infoT, 0, 0, "STRATEGY", text_color=color.yellow, text_size=size.small)
+    table.cell(infoT, 1, 0, "GAUSS CH FX", text_color=color.yellow, text_size=size.small)
+
+    table.cell(infoT, 0, 1, "CHANNEL", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 1, isGreen ? "GREEN — BUY" : isRed ? "RED — SELL" : "FLAT",
+         text_color=isGreen ? color.green : isRed ? color.red : color.gray, text_size=size.small)
+
+    table.cell(infoT, 0, 2, "FILTER", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 2, str.tostring(gaussFilter, format.mintick), text_color=color.white, text_size=size.small)
+
+    table.cell(infoT, 0, 3, "UPPER", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 3, str.tostring(upperBand, format.mintick), text_color=#ff5252, text_size=size.small)
+
+    table.cell(infoT, 0, 4, "LOWER", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 4, str.tostring(lowerBand, format.mintick), text_color=#00e676, text_size=size.small)
+
+    table.cell(infoT, 0, 5, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 5, str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+
+    table.cell(infoT, 0, 6, "DIRECTION", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 6, direction, text_color=color.white, text_size=size.small)
+
+    table.cell(infoT, 0, 7, "POSITION", text_color=color.gray, text_size=size.small)
+    table.cell(infoT, 1, 7,
+         strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? #00e676 : strategy.position_size < 0 ? #ff5252 : color.gray,
+         text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(justTurnedGreen, title="Channel Green", message="Gaussian Channel turned GREEN — Buy zone")
+alertcondition(justTurnedRed, title="Channel Red", message="Gaussian Channel turned RED — Sell zone")
+alertcondition(longEntry and ddGate, title="Long Entry", message="Gaussian Channel — Long entry signal")
+alertcondition(shortEntry and ddGate, title="Short Entry", message="Gaussian Channel — Short entry signal")
