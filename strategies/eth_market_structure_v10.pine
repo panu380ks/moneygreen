@@ -1,0 +1,286 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// ETH Market Structure v10 — Tighter SL for better R:R
+// v8 was our best: PF 0.964, WR 35.6%, 132 trades, DD 3.87%
+// v9 over-filtered (SMA 15 + consec brake): PF 0.45, only 18 trades
+// v10: back to v8 base, ONE change — tighter SL for better R:R
+//   SL 1.5→1.2 ATR: losses 20% smaller, R:R from 1.67:1 to 2.08:1
+
+//@version=6
+strategy("ETH Market Structure v10", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, commission_type=strategy.commission.percent,
+     commission_value=0.075, slippage=3, pyramiding=0)
+
+strategy.risk.max_drawdown(25, strategy.percent_of_equity)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+strat_dir = input.string("long", "Direction", options=["long", "short", "all"])
+strategy.risk.allow_entry_in(strat_dir == "long" ? strategy.direction.long : strat_dir == "short" ? strategy.direction.short : strategy.direction.all)
+
+// Supertrend — PRIMARY entry signal
+stATRLen   = input.int(10, "Supertrend ATR Length", minval=1, group="Supertrend")
+stFactor   = input.float(3.0, "Supertrend Factor", minval=0.01, step=0.1, group="Supertrend",
+     tooltip="3.0 = fewer flips, higher quality signals. Lower = more sensitive.")
+
+// EMAs
+emaFastLen = input.int(21, "Fast EMA", group="Trend")
+emaSlowLen = input.int(50, "Slow EMA", group="Trend")
+use200EMA  = input.bool(true, "200 EMA Trend Gate", group="Trend")
+reqEMAstack = input.bool(true, "Require EMA Stack (fast > slow)", group="Trend")
+
+// Structure — CONFIRMATION only
+swingLen   = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure")
+reqStructure = input.bool(true, "Require Bullish Structure", group="Structure",
+     tooltip="msTrend must be bullish (1) for longs. Prevents buying in downtrends.")
+
+// HTF
+useHTF     = input.bool(true, "HTF Trend Filter", group="HTF")
+htfTF      = input.timeframe("D", "HTF Timeframe", group="HTF")
+
+// ADX
+adxLen     = input.int(14, "ADX Length", group="ADX")
+adxMin     = input.float(20.0, "Min ADX", step=1.0, group="ADX",
+     tooltip="20 = confirmed trend. Blocks ranging/choppy entries.")
+
+// RSI
+rsiLen     = input.int(14, "RSI Length", group="Entry Quality")
+rsiMaxLong = input.float(70.0, "Max RSI for Long", group="Entry Quality",
+     tooltip="Don't buy overbought")
+rsiMinShort = input.float(30.0, "Min RSI for Short", group="Entry Quality")
+
+// Risk — TP1 bumped to 2.5 (was 2.0 in v6, 3.0 was too aggressive in v7)
+atrMultSL  = input.float(1.2, "SL ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1 = input.float(2.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrMultTP2 = input.float(4.0, "TP2 ATR Multiplier", step=0.5, group="Risk")
+q1         = input.int(50, "TP1 Qty %", group="Risk")
+q2         = input.int(30, "TP2 Qty %", group="Risk")
+useTrail   = input.bool(true, "Trail Remainder on Supertrend", group="Risk")
+
+// Position sizing
+basePos    = input.float(60.0, "Base Position %", minval=10, maxval=100, step=5, group="Sizing")
+useVolScale = input.bool(true, "Scale Down in High Volatility", group="Sizing")
+
+// Drawdown controls — NEW: equity curve filter
+useEqFilter = input.bool(true, "Equity Curve Filter", group="Drawdown",
+     tooltip="Stop trading when equity < SMA(equity). Prevents drawdown spirals.")
+eqFilterLen = input.int(30, "Equity SMA Length", minval=10, group="Drawdown")
+useCooldown = input.bool(true, "Loss Cooldown", group="Drawdown")
+coolBars    = input.int(8, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+
+// ═══════════════════════════════════════════════════════════════
+// SUPERTREND — PRIMARY SIGNAL
+// ═══════════════════════════════════════════════════════════════
+
+[supertrend, stDirection] = ta.supertrend(stFactor, stATRLen)
+stGreen = stDirection < 0
+stRed   = stDirection > 0
+
+// Flip detection — entry trigger
+stFlipBull = stDirection < 0 and stDirection[1] > 0
+stFlipBear = stDirection > 0 and stDirection[1] < 0
+
+// 3-bar window (same as v6 — v7's 1-bar was too tight)
+var int barsSinceFlipBull = 999
+var int barsSinceFlipBear = 999
+if stFlipBull
+    barsSinceFlipBull := 0
+else
+    barsSinceFlipBull += 1
+if stFlipBear
+    barsSinceFlipBear := 0
+else
+    barsSinceFlipBear += 1
+
+recentFlipBull = barsSinceFlipBull <= 3
+recentFlipBear = barsSinceFlipBear <= 3
+
+// ═══════════════════════════════════════════════════════════════
+// TREND CONFIRMATION
+// ═══════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+ema200  = ta.ema(close, 200)
+
+emaStackBull = not reqEMAstack or (emaFast > emaSlow)
+emaStackBear = not reqEMAstack or (emaFast < emaSlow)
+above200     = not use200EMA or close > ema200
+below200     = not use200EMA or close < ema200
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE — CONFIRMATION
+// ═══════════════════════════════════════════════════════════════
+
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSH = na
+var float lastSL = na
+
+breakAbove = not na(lastSH) and close > lastSH and close[1] <= lastSH
+breakBelow = not na(lastSL) and close < lastSL and close[1] >= lastSL
+
+if not na(swH)
+    lastSH := swH
+if not na(swL)
+    lastSL := swL
+
+var int msTrend = 0
+if breakAbove
+    msTrend := 1
+if breakBelow
+    msTrend := -1
+
+chochBull = breakAbove and msTrend[1] <= 0
+chochBear = breakBelow and msTrend[1] >= 0
+
+structBullOK = not reqStructure or msTrend >= 0
+structBearOK = not reqStructure or msTrend <= 0
+
+// ═══════════════════════════════════════════════════════════════
+// HTF TREND
+// ═══════════════════════════════════════════════════════════════
+
+htfEma  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50))
+htfBull = not useHTF or na(htfEma) or close > htfEma
+htfBear = not useHTF or na(htfEma) or close < htfEma
+
+// ═══════════════════════════════════════════════════════════════
+// ADX + RSI
+// ═══════════════════════════════════════════════════════════════
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = adxVal >= adxMin
+
+rsiVal  = ta.rsi(close, rsiLen)
+rsiBullOK = rsiVal < rsiMaxLong
+rsiBearOK = rsiVal > rsiMinShort
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWDOWN CONTROLS
+// ═══════════════════════════════════════════════════════════════
+
+atrVal = ta.atr(14)
+atrMA  = ta.sma(atrVal, 40)
+volRatio = atrVal / nz(atrMA, atrVal)
+
+volScale = useVolScale ? (volRatio > 1.4 ? 0.5 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
+unitQty  = strategy.equity * (basePos / 100.0) * volScale / close
+
+// NEW: Equity curve filter — stop trading when in drawdown
+eqSMA    = ta.sma(strategy.equity, eqFilterLen)
+equityOK = not useEqFilter or strategy.equity >= eqSMA
+
+// Cooldown (same as v6: 8 bars)
+var int lastLossBar     = -999
+var int prevClosedCount = 0
+if strategy.closedtrades > prevClosedCount
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        lastLossBar := bar_index
+    prevClosedCount := strategy.closedtrades
+cooldownOK = not useCooldown or (bar_index - lastLossBar) > coolBars
+
+// Combined gate
+ddGate = equityOK and cooldownOK
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY — Supertrend flip + confirmations (same as v6 + equity gate)
+// ═══════════════════════════════════════════════════════════════
+
+longEntry = recentFlipBull and stGreen and above200 and emaStackBull and structBullOK and htfBull and adxOK and rsiBullOK and ddGate
+shortEntry = recentFlipBear and stRed and below200 and emaStackBear and structBearOK and htfBear and adxOK and rsiBearOK and ddGate
+
+// One entry per flip
+var int lastLongFlipBar  = -999
+var int lastShortFlipBar = -999
+
+longOK  = longEntry and barsSinceFlipBull != lastLongFlipBar
+shortOK = shortEntry and barsSinceFlipBear != lastShortFlipBar
+
+if longOK
+    strategy.entry("Long", strategy.long, qty=unitQty)
+    lastLongFlipBar := barsSinceFlipBull
+
+if shortOK
+    strategy.entry("Short", strategy.short, qty=unitQty)
+    lastShortFlipBar := barsSinceFlipBear
+
+// ═══════════════════════════════════════════════════════════════
+// EXITS — Same as v6 but TP1 at 2.5 ATR
+// ═══════════════════════════════════════════════════════════════
+
+slTicks  = atrVal * atrMultSL / syminfo.mintick
+tp1Ticks = atrVal * atrMultTP1 / syminfo.mintick
+tp2Ticks = atrVal * atrMultTP2 / syminfo.mintick
+
+strategy.exit("x1", qty_percent=q1, profit=tp1Ticks, loss=slTicks)
+strategy.exit("x2", qty_percent=q2, profit=tp2Ticks, loss=slTicks)
+
+if useTrail
+    trailTicks  = atrVal * 2.0 / syminfo.mintick
+    trailOffset = atrVal * 1.0 / syminfo.mintick
+    strategy.exit("xTrail", profit=tp2Ticks * 1.5, loss=slTicks, trail_points=trailTicks, trail_offset=trailOffset)
+else
+    strategy.exit("x3", profit=tp2Ticks * 1.5, loss=slTicks)
+
+// Supertrend flip = get out
+if strategy.position_size > 0 and stFlipBear
+    strategy.close("Long", comment="ST Red")
+if strategy.position_size < 0 and stFlipBull
+    strategy.close("Short", comment="ST Green")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+plot(lastSH, "Swing High", color.new(#ff5252, 50), style=plot.style_stepline_diamond)
+plot(lastSL, "Swing Low", color.new(#00e676, 50), style=plot.style_stepline_diamond)
+plot(emaFast, "EMA 21", color.new(#2196f3, 50))
+plot(emaSlow, "EMA 50", color.new(#ff9800, 50))
+plot(use200EMA ? ema200 : na, "EMA 200", color.new(#ffffff, 30), linewidth=2)
+plot(useHTF and not na(htfEma) ? htfEma : na, "HTF EMA", color.new(#e040fb, 0), linewidth=2)
+
+stVal = barstate.isfirst ? na : supertrend
+plot(stGreen ? stVal : na, "ST Up", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(stRed ? stVal : na, "ST Down", color=color.red, style=plot.style_linebr, linewidth=2)
+
+plotshape(longOK, "Long Entry", shape.arrowup, location.belowbar, color.new(#00e676, 0), size=size.normal, text="BUY")
+plotshape(shortOK, "Short Entry", shape.arrowdown, location.abovebar, color.new(#ff5252, 0), size=size.normal, text="SELL")
+
+plotshape(chochBull, "CHoCH Bull", shape.triangleup, location.belowbar, color.new(#00e676, 50), size=size.tiny)
+plotshape(chochBear, "CHoCH Bear", shape.triangledown, location.abovebar, color.new(#ff5252, 50), size=size.tiny)
+
+bgcolor(msTrend == 1 ? color.new(#00e676, 96) : msTrend == -1 ? color.new(#ff5252, 96) : na, title="Structure")
+bgcolor(not ddGate ? color.new(#ff9800, 88) : na, title="DD Gate Active")
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0,  "VERSION",    text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0,  "v10",        text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1,  "Supertrend", text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 1,  stGreen ? "GREEN" : "RED", text_color=stGreen ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2,  "Structure",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 2,  msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "FLAT", text_color=msTrend == 1 ? color.green : msTrend == -1 ? color.red : color.gray, text_size=size.small)
+    table.cell(t, 0, 3,  "ADX",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 3,  str.tostring(adxVal, "#.0") + (adxOK ? " OK" : " LOW"), text_color=adxOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4,  "EMA Stack",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4,  emaFast > emaSlow ? "BULL" : "BEAR", text_color=emaFast > emaSlow ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5,  "200 EMA",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5,  close > ema200 ? "ABOVE" : "BELOW", text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6,  "HTF",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6,  htfBull ? "BULL" : "BEAR", text_color=htfBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 7,  "Equity",     text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7,  equityOK ? "OK" : "BELOW SMA", text_color=equityOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 8,  "RSI",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8,  str.tostring(rsiVal, "#.0"), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 9,  "Cooldown",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9,  cooldownOK ? "READY" : str.tostring(coolBars - (bar_index - lastLossBar)) + " bars", text_color=cooldownOK ? color.green : color.yellow, text_size=size.small)
+    table.cell(t, 0, 10, "Position",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 10, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
