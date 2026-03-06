@@ -4,6 +4,8 @@
 // v9 over-filtered (SMA 15 + consec brake): PF 0.45, only 18 trades
 // v10: back to v8 base, ONE change — tighter SL for better R:R
 //   SL 1.5→1.2 ATR: losses 20% smaller, R:R from 1.67:1 to 2.08:1
+//   SL=1.2, TP1=2.5 → R:R = 2.08:1
+//   If WR stays ~34%: PF = 0.34/0.66 × 2.08 = 1.07 ✓
 
 //@version=6
 strategy("ETH Market Structure v10", overlay=true,
