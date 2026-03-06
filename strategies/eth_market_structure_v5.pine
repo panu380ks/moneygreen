@@ -1,16 +1,18 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// ETH Market Structure Strategy v4 — Profit & Drawdown Optimized
-// Key changes from v3:
-//   1. Tighter SL (1.5 ATR) — stops losers faster
-//   2. Realistic TPs (1.5/3/5 ATR) — actually reachable on 1h
-//   3. Front-loaded TP1 (40%) — locks profit early
-//   4. Supertrend directional gate — eliminates counter-trend entries
-//   5. Smarter emergency exits — Supertrend flip + tighter CHoCH threshold
-//   6. Stricter sweep entries — full confluence required
-//   7. Tighter risk controls — 30% DD cap, 60% position, 12-bar cooldown
+// ETH Market Structure Strategy v5 — Balanced Filter Tuning
+// v4 was too filtered (14 trades, 35% WR). v5 selectively loosens:
+//   1. ADX 20→15 (allows moderate trends, not just strong)
+//   2. Mid-TF OFF by default (redundant with HTF + Supertrend)
+//   3. RSI widened to 30-80 (other gates already filter quality)
+//   4. Pullback window 8→12 bars (more time to form)
+//   5. Cooldown 12→6 bars (can't afford long pauses with few trades)
+//   6. MACD loosened — single bar turn OK (not 2 consecutive)
+//   7. TP1 1.5→2.0 ATR (better R:R on the 40% bulk exit)
+//   8. Swing length 6→5 (detect more structure breaks)
+//   9. Session widened to 0600-2200 (catch Asia close + US close)
 
 //@version=6
-strategy("ETH Market Structure v4", overlay=true,
+strategy("ETH Market Structure v5", overlay=true,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
      default_qty_value=100, commission_type=strategy.commission.percent,
      commission_value=0.075, slippage=3, pyramiding=0)
@@ -25,10 +27,10 @@ strat_dir = input.string("long", "Direction", options=["long", "short", "all"])
 strategy.risk.allow_entry_in(strat_dir == "long" ? strategy.direction.long : strat_dir == "short" ? strategy.direction.short : strategy.direction.all)
 
 // Structure
-swingLen   = input.int(6, "Swing Length", minval=2, maxval=20, group="Structure", tooltip="Increased from 4 to reduce noise")
+swingLen   = input.int(5, "Swing Length", minval=2, maxval=20, group="Structure", tooltip="5 balances signal frequency vs noise")
 useHTF     = input.bool(true, "Use HTF Filter", group="Structure")
 htfTF      = input.timeframe("D", "HTF Timeframe", group="Structure")
-useMidTF   = input.bool(true, "Use Mid TF Filter", group="Structure")
+useMidTF   = input.bool(false, "Use Mid TF Filter", group="Structure")
 midTF      = input.timeframe("240", "Mid Timeframe", group="Structure")
 
 // Filters
@@ -39,7 +41,7 @@ volLen     = input.int(20, "Volume MA Length", group="Filters")
 
 // ADX — the #1 improvement: blocks entries in ranging markets
 adxLen       = input.int(14, "ADX Length", group="ADX Filter")
-adxMinTrend  = input.float(20.0, "Min ADX for Entry", step=1.0, minval=10, maxval=40, group="ADX Filter", tooltip="Below this = ranging market, no entries")
+adxMinTrend  = input.float(15.0, "Min ADX for Entry", step=1.0, minval=10, maxval=40, group="ADX Filter", tooltip="15 = moderate trend, 20+ = strong trend")
 useDIconfirm = input.bool(true, "Require DI Confirmation", group="ADX Filter", tooltip="DI+ > DI- for longs, DI- > DI+ for shorts")
 
 // MACD momentum
@@ -55,11 +57,11 @@ stFactor      = input.float(2.5, "Supertrend Factor", minval=0.01, step=0.01, gr
 
 // Pullback entry
 usePullback  = input.bool(true, "Require Pullback to EMA", group="Entry", tooltip="Wait for price to retrace to fast EMA after structure break before entering")
-pullbackBars = input.int(8, "Pullback Lookback Bars", minval=2, maxval=20, group="Entry", tooltip="How many bars after a break to wait for pullback")
+pullbackBars = input.int(12, "Pullback Lookback Bars", minval=2, maxval=20, group="Entry", tooltip="How many bars after a break to wait for pullback")
 
 // Risk — ATR-based instead of fixed %
 atrMultSL  = input.float(1.5, "SL ATR Multiplier", step=0.1, group="Risk")
-atrMultTP1 = input.float(1.5, "TP1 ATR Multiplier", step=0.1, group="Risk")
+atrMultTP1 = input.float(2.0, "TP1 ATR Multiplier", step=0.1, group="Risk")
 atrMultTP2 = input.float(3.0, "TP2 ATR Multiplier", step=0.5, group="Risk")
 atrMultTP3 = input.float(5.0, "TP3 ATR Multiplier", step=0.5, group="Risk")
 q1         = input.int(40, "TP1 Qty %", group="Risk")
@@ -77,11 +79,11 @@ maxVolRatio  = input.float(1.8, "Max Vol Ratio", step=0.1, minval=1.0, maxval=3.
 useEqFilter  = input.bool(true, "Equity Curve Filter", group="Drawdown")
 eqFilterLen  = input.int(50, "Equity SMA Length", minval=10, group="Drawdown")
 useCooldown  = input.bool(true, "Loss Cooldown", group="Drawdown")
-coolBars     = input.int(12, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
+coolBars     = input.int(6, "Cooldown Bars", minval=1, maxval=30, group="Drawdown")
 
 // Session filter
 useSession   = input.bool(true, "Session Filter", group="Session", tooltip="Only trade during high-liquidity sessions")
-sessionStr   = input.session("0800-2000", "Trading Session (UTC)", group="Session")
+sessionStr   = input.session("0600-2200", "Trading Session (UTC)", group="Session")
 
 // ═══════════════════════════════════════════════════════════════
 // SESSION FILTER
@@ -181,10 +183,10 @@ diBearOK    = not useDIconfirm or diMinus > diPlus
 
 [macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
 
-// For longs: histogram positive or turning up
-macdBullOK = not useMacd or histLine > 0 or (histLine > histLine[1] and histLine[1] > histLine[2])
-// For shorts: histogram negative or turning down
-macdBearOK = not useMacd or histLine < 0 or (histLine < histLine[1] and histLine[1] < histLine[2])
+// For longs: histogram positive OR turning up (single bar turn OK)
+macdBullOK = not useMacd or histLine > 0 or histLine > histLine[1]
+// For shorts: histogram negative OR turning down (single bar turn OK)
+macdBearOK = not useMacd or histLine < 0 or histLine < histLine[1]
 
 // ═══════════════════════════════════════════════════════════════
 // SUPERTREND — directional gate
@@ -205,8 +207,8 @@ stFlipBull = stDirection < 0 and stDirection[1] > 0
 // ═══════════════════════════════════════════════════════════════
 
 rsiVal     = ta.rsi(close, rsiLen)
-rsiOKlong  = rsiVal > 35 and rsiVal < 75
-rsiOKshort = rsiVal > 25 and rsiVal < 65
+rsiOKlong  = rsiVal > 30 and rsiVal < 80
+rsiOKshort = rsiVal > 20 and rsiVal < 70
 
 volMA = ta.sma(volume, volLen)
 volOK = na(volume) or volume > volMA * 0.8
@@ -242,7 +244,7 @@ volRegimeOK = not useVolFilter or volRatio < maxVolRatio
 eqSMA    = ta.sma(strategy.equity, eqFilterLen)
 equityOK = not useEqFilter or strategy.equity >= eqSMA
 
-// Layer 4 — Loss cooldown (increased default from 8 to 12)
+// Layer 4 — Loss cooldown (reduced from 12 to 6 — can't pause long with few trades)
 var int lastLossBar     = -999
 var int prevClosedCount = 0
 if strategy.closedtrades > prevClosedCount
@@ -357,7 +359,7 @@ bgcolor(not inSession ? color.new(#000000, 96) : na, title="Out of Session")
 var table t = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0, "VERSION",     text_color=color.yellow, text_size=size.small)
-    table.cell(t, 1, 0, "v4",          text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "v5",          text_color=color.yellow, text_size=size.small)
     table.cell(t, 0, 1, "Struct",      text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 1, msTrend == 1 ? "BULL" : msTrend == -1 ? "BEAR" : "NEUTRAL", text_color=msTrend == 1 ? color.green : msTrend == -1 ? color.red : color.gray, text_size=size.small)
     table.cell(t, 0, 2, "ADX",         text_color=color.gray,   text_size=size.small)
