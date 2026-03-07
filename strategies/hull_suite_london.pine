@@ -1,10 +1,10 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// Hull Suite Strategy v3 — London Session, Selective Entries
+// Hull Suite Strategy v4 — London Session, HTF Trend Filter
 // Based on InSilico's Hull Ma Pack, converted by DashTrader
-// v3: Stricter pullbacks, RSI filter, ADX 20, Hull 55, tighter trail, loss brake, no pyramiding
+// v4: Daily EMA 50 trend gate, flip confirmation candle, session start skip, wider flip TP, ATR vol floor
 
 //@version=6
-strategy("Hull Suite — London v3", overlay=true, pyramiding=0,
+strategy("Hull Suite — London v4", overlay=true, pyramiding=0,
      initial_capital=10000, default_qty_type=strategy.percent_of_equity,
      default_qty_value=100, calc_on_order_fills=false, slippage=2,
      commission_type=strategy.commission.percent, commission_value=0.005)
@@ -62,12 +62,22 @@ inSession        = not useSession or not na(time(timeframe.period, sessionStr, s
 wasInSession     = not na(time(timeframe.period, sessionStr, sessionTZ)[1])
 sessionJustEnded = useSession and wasInSession and not inSession
 
+// Skip first bar of session — London open fakeouts
+sessionJustStarted = inSession and not inSession[1]
+var int sessionStartBar = 0
+if sessionJustStarted
+    sessionStartBar := bar_index
+notFirstBar = bar_index > sessionStartBar
+
 // ═══════════════════════════════════════════════════════════════
 // TREND FILTERS
 // ═══════════════════════════════════════════════════════════════
 
 use200EMA = input.bool(true, "EMA 200 Trend Gate", group="Filters",
      tooltip="Longs only above EMA 200, shorts only below")
+useHTF    = input.bool(true, "Daily EMA 50 HTF Trend Gate", group="Filters",
+     tooltip="Longs only above daily EMA 50, shorts only below — eliminates counter-trend trades")
+htfEmaLen = input.int(50, "HTF EMA Length", group="Filters")
 useADX    = input.bool(true, "ADX Trend Strength Filter", group="Filters",
      tooltip="Only trade when ADX confirms a trend")
 adxLen    = input.int(14, "ADX Length", group="Filters")
@@ -80,11 +90,21 @@ useRSI    = input.bool(true, "RSI Exhaustion Filter", group="Filters",
 rsiLen    = input.int(14, "RSI Length", group="Filters")
 rsiOB     = input.float(70.0, "RSI Overbought", step=1.0, group="Filters")
 rsiOS     = input.float(30.0, "RSI Oversold", step=1.0, group="Filters")
+useVolFloor = input.bool(true, "ATR Volatility Floor", group="Filters",
+     tooltip="Skip entries when ATR is below 70% of its 50-bar average — avoids choppy consolidation")
+volFloorMult = input.float(0.7, "Vol Floor Multiplier", step=0.05, group="Filters",
+     tooltip="ATR must be above this fraction of its average")
+volFloorLen  = input.int(50, "Vol Floor Lookback", group="Filters")
 
 ema200 = ta.ema(close, 200)
 ema21  = ta.ema(close, 21)
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 rsiVal = ta.rsi(close, rsiLen)
+
+// Daily EMA 50 — higher timeframe trend filter
+dailyEma50 = request.security(syminfo.tickerid, "D", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_on)
+htfLongOK  = not useHTF or close > dailyEma50
+htfShortOK = not useHTF or close < dailyEma50
 
 above200 = not use200EMA or close > ema200
 below200 = not use200EMA or close < ema200
@@ -101,8 +121,8 @@ rsiShortOK = not useRSI or rsiVal > rsiOS
 
 atrLen        = input.int(14, "ATR Length", group="Risk")
 atrMultSLFlip = input.float(1.5, "SL ATR Mult (Flip)", step=0.1, group="Risk")
-atrMultTPFlip = input.float(2.5, "TP1 ATR Mult (Flip)", step=0.1, group="Risk",
-     tooltip="R:R = 1.67:1 for flip entries")
+atrMultTPFlip = input.float(3.0, "TP1 ATR Mult (Flip)", step=0.1, group="Risk",
+     tooltip="R:R = 2.0:1 for flip entries — let trend catches run")
 atrMultSLPB   = input.float(1.0, "SL ATR Mult (Pullback)", step=0.1, group="Risk",
      tooltip="Tighter SL for pullbacks since entering at support/resistance")
 atrMultTPPB   = input.float(2.0, "TP1 ATR Mult (Pullback)", step=0.1, group="Risk",
@@ -120,6 +140,10 @@ maxPBPerTrend = input.int(1, "Max Pullbacks per Hull Trend", minval=1, maxval=3,
      tooltip="Limit re-entries to prevent repeated entries in weakening trends")
 
 atrVal = ta.atr(atrLen)
+
+// ATR volatility floor — skip low-vol consolidation
+atrAvg = ta.sma(atrVal, volFloorLen)
+volOK  = not useVolFloor or atrVal >= atrAvg * volFloorMult
 
 // ═══════════════════════════════════════════════════════════════
 // CONSECUTIVE LOSS TRACKING
@@ -200,9 +224,10 @@ pbBearAllowed = pbCountBear < maxPBPerTrend
 // ENTRY SIGNALS
 // ═══════════════════════════════════════════════════════════════
 
-// Signal 1: Hull flip
-longFlip  = hullBull and not hullBull[1]
-shortFlip = hullBear and not hullBear[1]
+// Signal 1: Hull flip with confirmation candle
+// Hull flipped on PREVIOUS bar, current bar closes in direction = confirmed
+longFlip  = hullBull[1] and not hullBull[2] and hullBull and close > open
+shortFlip = hullBear[1] and not hullBear[2] and hullBear and close < open
 
 // Signal 2: Pullback re-entry during STRONG Hull trend
 // Long: Hull bullish 3+ bars, price touched EMA 21, closed above, DI+ > DI-, slope accelerating
@@ -217,9 +242,9 @@ pullbackShort = usePullback and hullBear and hullBear[1] and hullBear[2] and
      strategy.position_size == 0 and
      adxPBOK and diMinus > diPlus and hullAccelBear and pbBearAllowed
 
-// Combined signals
-longEntry  = (longFlip and adxFlipOK or pullbackLong) and inSession and above200 and rsiLongOK and cooldownOK and testPeriod()
-shortEntry = (shortFlip and adxFlipOK or pullbackShort) and inSession and below200 and rsiShortOK and cooldownOK and testPeriod()
+// Combined signals — v4: added htf gate, vol floor, session start skip
+longEntry  = (longFlip and adxFlipOK or pullbackLong) and inSession and notFirstBar and above200 and htfLongOK and rsiLongOK and volOK and cooldownOK and testPeriod()
+shortEntry = (shortFlip and adxFlipOK or pullbackShort) and inSession and notFirstBar and below200 and htfShortOK and rsiShortOK and volOK and cooldownOK and testPeriod()
 
 isPullbackEntry = pullbackLong or pullbackShort
 
@@ -320,6 +345,7 @@ Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=hullColor, linewidth=
 fill(Fi1, Fi2, title="Band Filler", color=color.new(hullColor, transpSwitch))
 
 plot(use200EMA ? ema200 : na, "EMA 200", color=color.new(#ffffff, 30), linewidth=2)
+plot(useHTF ? dailyEma50 : na, "Daily EMA 50", color=color.new(#ff9800, 30), linewidth=2)
 plot(ema21, "EMA 21", color=color.new(#2196f3, 40), linewidth=1)
 
 barcolor(candleCol ? (switchColor ? hullColor : na) : na)
@@ -361,10 +387,10 @@ plot(strategy.position_size < 0 and not tp1Hit ? entryTP1 : na,
 // INFO TABLE
 // ═══════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+var table t = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(t, 0, 0, "STRATEGY",  text_color=color.yellow, text_size=size.small)
-    table.cell(t, 1, 0, "Hull London v3", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "Hull London v4", text_color=color.yellow, text_size=size.small)
     table.cell(t, 0, 1, "Hull",       text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 1, hullBull ? "BULL" : "BEAR",
          text_color=hullBull ? color.green : color.red, text_size=size.small)
@@ -374,29 +400,35 @@ if barstate.islast
     table.cell(t, 0, 3, "200 EMA",    text_color=color.gray,   text_size=size.small)
     table.cell(t, 1, 3, close > ema200 ? "ABOVE" : "BELOW",
          text_color=close > ema200 ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 4, "ADX",        text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 4, str.tostring(adxVal, "#.0") + (adxFlipOK ? " OK" : " LOW"),
+    table.cell(t, 0, 4, "D EMA 50",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4, close > dailyEma50 ? "ABOVE" : "BELOW",
+         text_color=close > dailyEma50 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "ADX",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(adxVal, "#.0") + (adxFlipOK ? " OK" : " LOW"),
          text_color=adxFlipOK ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 5, "RSI",        text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 5, str.tostring(rsiVal, "#.0"),
+    table.cell(t, 0, 6, "RSI",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(rsiVal, "#.0"),
          text_color=rsiVal > rsiOB ? color.red : rsiVal < rsiOS ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 6, "DI+/DI-",   text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 6, str.tostring(diPlus, "#.0") + "/" + str.tostring(diMinus, "#.0"),
+    table.cell(t, 0, 7, "DI+/DI-",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(diPlus, "#.0") + "/" + str.tostring(diMinus, "#.0"),
          text_color=diPlus > diMinus ? color.green : color.red, text_size=size.small)
-    table.cell(t, 0, 7, "ATR",        text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 7, str.tostring(atrVal, "#.00000"),
+    table.cell(t, 0, 8, "ATR",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8, str.tostring(atrVal, "#.00000"),
          text_color=color.white, text_size=size.small)
-    table.cell(t, 0, 8, "Consec Loss", text_color=color.gray,  text_size=size.small)
-    table.cell(t, 1, 8, str.tostring(consecLosses) + (cooldownActive ? " BRAKE" : " OK"),
+    table.cell(t, 0, 9, "Vol Floor",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9, volOK ? "OK" : "LOW VOL",
+         text_color=volOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 10, "Consec Loss", text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(consecLosses) + (cooldownActive ? " BRAKE" : " OK"),
          text_color=cooldownActive ? color.red : color.green, text_size=size.small)
-    table.cell(t, 0, 9, "TP1 Hit",    text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 9, strategy.position_size != 0 ? (tp1Hit ? "YES — TRAILING" : "NO") : "—",
+    table.cell(t, 0, 11, "TP1 Hit",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, strategy.position_size != 0 ? (tp1Hit ? "YES — TRAILING" : "NO") : "—",
          text_color=tp1Hit and strategy.position_size != 0 ? color.green : color.gray, text_size=size.small)
-    table.cell(t, 0, 10, "PB Count",  text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 10, hullBull ? str.tostring(pbCountBull) + "/" + str.tostring(maxPBPerTrend) :
+    table.cell(t, 0, 12, "PB Count",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 12, hullBull ? str.tostring(pbCountBull) + "/" + str.tostring(maxPBPerTrend) :
          str.tostring(pbCountBear) + "/" + str.tostring(maxPBPerTrend),
          text_color=color.white, text_size=size.small)
-    table.cell(t, 0, 11, "Position",  text_color=color.gray,   text_size=size.small)
-    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+    table.cell(t, 0, 13, "Position",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 13, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
          text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
          text_size=size.small)
