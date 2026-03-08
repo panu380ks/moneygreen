@@ -1,0 +1,460 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Hull Suite Strategy v8 — 1-Minute Scalp, London Session
+// Based on InSilico's Hull Ma Pack, converted by DashTrader
+// v8: Same logic as v7, completely re-tuned for 1-minute timeframe
+// Key changes from v7:
+//   - Hull length 55→20 (responsive to 1-min micro-trends)
+//   - EMA pullback 21→9 (micro pullbacks)
+//   - ADX 18→25 flip, 22→30 PB (filter 1-min noise)
+//   - RSI 70/30→65/35 (tighter exhaustion on 1-min)
+//   - SL wider: 1.5→2.5 flip, 1.0→1.5 PB (survive noise)
+//   - TP wider: 3.0→4.0 flip, 2.0→3.0 PB (compensate wider SL)
+//   - Trail 1.2→2.0 (wider for 1-min swings)
+//   - Session 0800-1500 (peak London only)
+//   - Skip first 5 bars (5 min) at session open
+//   - Pullback needs 5+ bars trend (not 3)
+//   - Cooldown 15 bars (15 min) after 2 losses
+//   - Vol floor 0.85 (aggressive noise filter)
+//   - TP1 exit 60% (secure more profit on 1-min)
+//   - Max PB 1 per trend (conservative on 1-min)
+
+//@version=6
+strategy("Hull Suite — London v8 1m", overlay=true, pyramiding=0,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, calc_on_order_fills=false, slippage=3,
+     commission_type=strategy.commission.percent, commission_value=0.005)
+
+// ═══════════════════════════════════════════════════════════════
+// DIRECTION
+// ═══════════════════════════════════════════════════════════════
+
+strat_dir_input = input.string("long", "Strategy Direction", options=["long", "short", "all"], group="Direction")
+strat_dir_value = strat_dir_input == "long" ? strategy.direction.long : strat_dir_input == "short" ? strategy.direction.short : strategy.direction.all
+strategy.risk.allow_entry_in(strat_dir_value)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST PERIOD
+// ═══════════════════════════════════════════════════════════════
+
+testStartYear  = input.int(2016, "Backtest Start Year", group="Backtest")
+testStartMonth = input.int(1, "Backtest Start Month", group="Backtest")
+testStartDay   = input.int(1, "Backtest Start Day", group="Backtest")
+testStopYear   = input.int(2030, "Backtest Stop Year", group="Backtest")
+testStopMonth  = input.int(12, "Backtest Stop Month", group="Backtest")
+testStopDay    = input.int(30, "Backtest Stop Day", group="Backtest")
+
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+testPeriodStop  = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+testPeriod()    => time >= testPeriodStart and time <= testPeriodStop
+
+// ═══════════════════════════════════════════════════════════════
+// HULL MA INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+src         = input(close, title="Source")
+modeSwitch  = input.string("Hma", "Hull Variation", options=["Hma", "Thma", "Ehma"], group="Hull MA")
+length      = input.int(20, "Length (20=1m scalp, 55=1H swing)", group="Hull MA",
+     tooltip="20 on 1-min = ~20 min trend detection, responsive without overfit")
+switchColor = input.bool(true, "Color Hull according to trend?", group="Hull MA")
+candleCol   = input.bool(false, "Color candles based on Hull's Trend?", group="Hull MA")
+visualSwitch   = input.bool(true, "Show as a Band?", group="Hull MA")
+thicknesSwitch = input.int(1, "Line Thickness", group="Hull MA")
+transpSwitch   = input.int(40, "Band Transparency", step=5, group="Hull MA")
+
+// ═══════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ═══════════════════════════════════════════════════════════════
+
+useSession = input.bool(true, "Session Filter", group="Session",
+     tooltip="Only enter trades during active session hours")
+sessionStr = input.session("0800-1500", "Session Window (UTC)", group="Session",
+     tooltip="0800-1500 = peak London liquidity, avoids open/close volatility spikes")
+closeAtEnd = input.bool(true, "Close Positions at Session End", group="Session",
+     tooltip="Auto-close all open positions when session ends")
+sessionTZ  = input.string("UTC", "Session Timezone",
+     options=["UTC", "Europe/London", "America/New_York"], group="Session")
+
+inSession        = not useSession or not na(time(timeframe.period, sessionStr, sessionTZ))
+wasInSession     = not na(time(timeframe.period, sessionStr, sessionTZ)[1])
+sessionJustEnded = useSession and wasInSession and not inSession
+
+// Skip first N bars of session — London open fakeouts (5 bars = 5 min on 1-min TF)
+skipBars = input.int(5, "Skip Bars at Session Open", minval=1, maxval=15, group="Session",
+     tooltip="Skip first N bars after session open to avoid fakeout spikes")
+sessionJustStarted = inSession and not inSession[1]
+var int sessionStartBar = 0
+if sessionJustStarted
+    sessionStartBar := bar_index
+notFirstBars = bar_index >= sessionStartBar + skipBars
+
+// ═══════════════════════════════════════════════════════════════
+// TREND FILTERS
+// ═══════════════════════════════════════════════════════════════
+
+use200EMA = input.bool(true, "EMA 200 Trend Gate", group="Filters",
+     tooltip="On 1-min, EMA 200 = ~3.3 hours — intraday trend direction")
+useHTF    = input.bool(true, "Daily EMA 50 HTF Trend Gate", group="Filters",
+     tooltip="Longs only above daily EMA 50, shorts only below — big picture filter")
+htfEmaLen = input.int(50, "HTF EMA Length", group="Filters")
+useADX    = input.bool(true, "ADX Trend Strength Filter", group="Filters",
+     tooltip="Only trade when ADX confirms a real micro-trend, not noise")
+adxLen    = input.int(14, "ADX Length", group="Filters")
+adxMinFlip = input.float(25.0, "Min ADX for Flip Entries", step=1.0, group="Filters",
+     tooltip="25 = strong trend required on 1-min to filter noise flips")
+adxMinPB   = input.float(30.0, "Min ADX for Pullback Entries", step=1.0, group="Filters",
+     tooltip="30 = very strong trend for pullback re-entries on 1-min")
+useRSI    = input.bool(true, "RSI Exhaustion Filter", group="Filters",
+     tooltip="Skip entries at overbought/oversold extremes — tighter on 1-min")
+rsiLen    = input.int(14, "RSI Length", group="Filters")
+rsiOB     = input.float(65.0, "RSI Overbought", step=1.0, group="Filters",
+     tooltip="65 on 1-min — RSI moves fast, catch exhaustion earlier")
+rsiOS     = input.float(35.0, "RSI Oversold", step=1.0, group="Filters",
+     tooltip="35 on 1-min — catch oversold earlier")
+useVolFloor = input.bool(true, "ATR Volatility Floor", group="Filters",
+     tooltip="Skip entries when ATR is below average — critical on 1-min to avoid dead zones")
+volFloorMult = input.float(0.85, "Vol Floor Multiplier", step=0.05, group="Filters",
+     tooltip="0.85 = aggressive filter, ATR must be near its average — skip flat periods")
+volFloorLen  = input.int(30, "Vol Floor Lookback", group="Filters",
+     tooltip="30 bars = 30 min lookback on 1-min")
+
+// Pullback EMA — faster for 1-min micro-pullbacks
+pbEmaLen = input.int(9, "Pullback EMA Length", group="Filters",
+     tooltip="EMA 9 on 1-min = ~9 min mean reversion level")
+
+ema200 = ta.ema(close, 200)
+emaPB  = ta.ema(close, pbEmaLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+rsiVal = ta.rsi(close, rsiLen)
+
+// Daily EMA 50 — higher timeframe trend filter
+dailyEma50 = request.security(syminfo.tickerid, "D", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_on)
+htfLongOK  = not useHTF or close > dailyEma50
+htfShortOK = not useHTF or close < dailyEma50
+
+above200 = not use200EMA or close > ema200
+below200 = not use200EMA or close < ema200
+adxFlipOK = not useADX or adxVal >= adxMinFlip
+adxPBOK   = not useADX or adxVal >= adxMinPB
+
+// RSI filter: skip longs when overbought, skip shorts when oversold
+rsiLongOK  = not useRSI or rsiVal < rsiOB
+rsiShortOK = not useRSI or rsiVal > rsiOS
+
+// ═══════════════════════════════════════════════════════════════
+// RISK MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
+
+atrLen        = input.int(14, "ATR Length", group="Risk")
+atrMultSLFlip = input.float(2.5, "SL ATR Mult (Flip)", step=0.1, group="Risk",
+     tooltip="2.5x ATR — wider SL to survive 1-min noise spikes")
+atrMultTPFlip = input.float(4.0, "TP1 ATR Mult (Flip)", step=0.1, group="Risk",
+     tooltip="R:R = 1.6:1 for flip entries — need wider TP to compensate wider SL")
+atrMultSLPB   = input.float(1.5, "SL ATR Mult (Pullback)", step=0.1, group="Risk",
+     tooltip="1.5x ATR for pullbacks — tighter since entering at micro support/resistance")
+atrMultTPPB   = input.float(3.0, "TP1 ATR Mult (Pullback)", step=0.1, group="Risk",
+     tooltip="R:R = 2.0:1 for pullback entries")
+atrMultTrail  = input.float(2.0, "Trailing Stop ATR Multiplier", step=0.1, group="Risk",
+     tooltip="2.0x ATR trail — wider for 1-min noise, locks profit without premature exit")
+tp1Pct        = input.float(60.0, "TP1 Exit %", step=5.0, group="Risk",
+     tooltip="60% — secure more profit at TP1 since 1-min trends reverse fast")
+useCooldown   = input.bool(true, "Consecutive Loss Brake", group="Risk")
+coolBars      = input.int(15, "Cooldown Bars After Consecutive Losses", minval=1, maxval=30, group="Risk",
+     tooltip="15 bars = 15 min cooldown on 1-min — let noise pass")
+maxConsecLoss = input.int(2, "Consecutive Losses to Trigger Brake", minval=1, maxval=5, group="Risk")
+usePullback   = input.bool(true, "Pullback Re-Entries", group="Risk",
+     tooltip="Re-enter on EMA pullback bounces during strong Hull trend")
+maxPBPerTrend = input.int(1, "Max Pullbacks per Hull Trend", minval=1, maxval=3, group="Risk",
+     tooltip="1 per trend — conservative on 1-min, trends are short-lived")
+
+atrVal = ta.atr(atrLen)
+
+// ATR volatility floor — skip low-vol consolidation
+atrAvg = ta.sma(atrVal, volFloorLen)
+volOK  = not useVolFloor or atrVal >= atrAvg * volFloorMult
+
+// ═══════════════════════════════════════════════════════════════
+// CONSECUTIVE LOSS TRACKING
+// ═══════════════════════════════════════════════════════════════
+
+var int lastExitBar    = -999
+var float lastExitPL   = 0.0
+var int consecLosses   = 0
+
+wasInPos   = strategy.position_size[1] != 0
+justExited = wasInPos and strategy.position_size == 0
+
+if justExited
+    lastExitBar  := bar_index
+    lastExitPL   := strategy.netprofit - strategy.netprofit[1]
+    if lastExitPL < 0
+        consecLosses := consecLosses + 1
+    else
+        consecLosses := 0
+
+cooldownActive = useCooldown and consecLosses >= maxConsecLoss and (bar_index - lastExitBar) <= coolBars
+cooldownOK     = not cooldownActive
+
+// ═══════════════════════════════════════════════════════════════
+// HULL MA FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+HMA(_src, _length) =>
+    ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+
+EHMA(_src, _length) =>
+    ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+
+THMA(_src, _length) =>
+    ta.wma(ta.wma(_src, _length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+
+Mode(modeSwitch, src, len) =>
+    modeSwitch == "Hma"  ? HMA(src, len) :
+      modeSwitch == "Ehma" ? EHMA(src, len) :
+      modeSwitch == "Thma" ? THMA(src, len / 2) : na
+
+// ═══════════════════════════════════════════════════════════════
+// HULL OUTPUT
+// ═══════════════════════════════════════════════════════════════
+
+HULL  = Mode(modeSwitch, src, length)
+MHULL = HULL[0]
+SHULL = HULL[2]
+
+hullBull = HULL > HULL[2]
+hullBear = HULL < HULL[2]
+
+hullColor = switchColor ? (hullBull ? #00ff00 : #ff0000) : #ff9800
+
+// Hull slope acceleration: trend must be gaining momentum for pullback entries
+hullSlopeNow  = HULL - HULL[2]
+hullSlopePrev = HULL[2] - HULL[4]
+hullAccelBull = hullSlopeNow > hullSlopePrev  // Bullish trend accelerating
+hullAccelBear = hullSlopeNow < hullSlopePrev  // Bearish trend accelerating
+
+// ═══════════════════════════════════════════════════════════════
+// PULLBACK TRACKING — Max 1 per Hull trend on 1-min
+// ═══════════════════════════════════════════════════════════════
+
+var int pbCountBull = 0
+var int pbCountBear = 0
+
+// Reset pullback count on Hull flip
+if hullBull and not hullBull[1]
+    pbCountBull := 0
+if hullBear and not hullBear[1]
+    pbCountBear := 0
+
+pbBullAllowed = pbCountBull < maxPBPerTrend
+pbBearAllowed = pbCountBear < maxPBPerTrend
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ═══════════════════════════════════════════════════════════════
+
+// Signal 1: Hull flip with confirmation candle
+// Hull flipped on PREVIOUS bar, current bar closes in direction = confirmed
+longFlip  = hullBull[1] and not hullBull[2] and hullBull and close > open
+shortFlip = hullBear[1] and not hullBear[2] and hullBear and close < open
+
+// Signal 2: Pullback re-entry during STRONG Hull trend
+// On 1-min: require 5+ bars of trend (not 3) for stronger confirmation
+pullbackLong  = usePullback and hullBull and hullBull[1] and hullBull[2] and hullBull[3] and hullBull[4] and
+     low[1] <= emaPB[1] and close > emaPB and close > open and
+     strategy.position_size == 0 and
+     adxPBOK and diPlus > diMinus and hullAccelBull and pbBullAllowed
+
+pullbackShort = usePullback and hullBear and hullBear[1] and hullBear[2] and hullBear[3] and hullBear[4] and
+     high[1] >= emaPB[1] and close < emaPB and close < open and
+     strategy.position_size == 0 and
+     adxPBOK and diMinus > diPlus and hullAccelBear and pbBearAllowed
+
+// Combined signals
+longEntry  = (longFlip and adxFlipOK or pullbackLong) and inSession and notFirstBars and above200 and htfLongOK and rsiLongOK and volOK and cooldownOK and testPeriod()
+shortEntry = (shortFlip and adxFlipOK or pullbackShort) and inSession and notFirstBars and below200 and htfShortOK and rsiShortOK and volOK and cooldownOK and testPeriod()
+
+isPullbackEntry = pullbackLong or pullbackShort
+
+// Track pullback counts
+if longEntry and pullbackLong
+    pbCountBull := pbCountBull + 1
+if shortEntry and pullbackShort
+    pbCountBear := pbCountBear + 1
+
+// ═══════════════════════════════════════════════════════════════
+// POSITION TRACKING FOR TRAILING STOP
+// ═══════════════════════════════════════════════════════════════
+
+var float entryPrice   = na
+var float entrySL      = na
+var float entryTP1     = na
+var float entryATR     = na
+var float trailHigh    = na
+var float trailLow     = na
+var bool  tp1Hit       = false
+var bool  isLong       = false
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE TRADES
+// ═══════════════════════════════════════════════════════════════
+
+if longEntry
+    slMult     = isPullbackEntry ? atrMultSLPB : atrMultSLFlip
+    tpMult     = isPullbackEntry ? atrMultTPPB : atrMultTPFlip
+    entryPrice := close
+    entryATR   := atrVal
+    entrySL    := close - atrVal * slMult
+    entryTP1   := close + atrVal * tpMult
+    trailHigh  := close
+    tp1Hit     := false
+    isLong     := true
+    strategy.entry("buy", strategy.long)
+    strategy.exit("buy_tp1", "buy", stop=entrySL, limit=entryTP1, qty_percent=tp1Pct)
+
+if shortEntry
+    slMult     = isPullbackEntry ? atrMultSLPB : atrMultSLFlip
+    tpMult     = isPullbackEntry ? atrMultTPPB : atrMultTPFlip
+    entryPrice := close
+    entryATR   := atrVal
+    entrySL    := close + atrVal * slMult
+    entryTP1   := close - atrVal * tpMult
+    trailLow   := close
+    tp1Hit     := false
+    isLong     := false
+    strategy.entry("sell", strategy.short)
+    strategy.exit("sell_tp1", "sell", stop=entrySL, limit=entryTP1, qty_percent=tp1Pct)
+
+// Track swing high/low for trailing stop
+if strategy.position_size > 0
+    trailHigh := math.max(nz(trailHigh, high), high)
+if strategy.position_size < 0
+    trailLow := math.min(nz(trailLow, low), low)
+
+// Detect TP1 hit — switch to trailing stop for remainder
+if strategy.position_size > 0 and not tp1Hit
+    if high >= entryTP1
+        tp1Hit := true
+        trailStop = trailHigh - entryATR * atrMultTrail
+        strategy.exit("buy_trail", "buy", stop=trailStop)
+
+if strategy.position_size < 0 and not tp1Hit
+    if low <= entryTP1
+        tp1Hit := true
+        trailStop = trailLow + entryATR * atrMultTrail
+        strategy.exit("sell_trail", "sell", stop=trailStop)
+
+// Update trailing stop each bar after TP1
+if strategy.position_size > 0 and tp1Hit
+    trailStop = trailHigh - entryATR * atrMultTrail
+    strategy.exit("buy_trail", "buy", stop=trailStop)
+
+if strategy.position_size < 0 and tp1Hit
+    trailStop = trailLow + entryATR * atrMultTrail
+    strategy.exit("sell_trail", "sell", stop=trailStop)
+
+// Hull flip exit (backup)
+if strategy.position_size > 0 and hullBear
+    strategy.close("buy", comment="Hull Flip")
+
+if strategy.position_size < 0 and hullBull
+    strategy.close("sell", comment="Hull Flip")
+
+// Close at session end
+if closeAtEnd and sessionJustEnded and strategy.position_size != 0
+    strategy.close_all(comment="Session Close")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+Fi1 = plot(MHULL, title="MHULL", color=hullColor, linewidth=thicknesSwitch)
+Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=hullColor, linewidth=thicknesSwitch)
+fill(Fi1, Fi2, title="Band Filler", color=color.new(hullColor, transpSwitch))
+
+plot(use200EMA ? ema200 : na, "EMA 200", color=color.new(#ffffff, 30), linewidth=2)
+plot(useHTF ? dailyEma50 : na, "Daily EMA 50", color=color.new(#ff9800, 30), linewidth=2)
+plot(emaPB, "EMA PB", color=color.new(#2196f3, 40), linewidth=1)
+
+barcolor(candleCol ? (switchColor ? hullColor : na) : na)
+
+// Session background
+bgcolor(useSession and inSession ? color.new(#2196f3, 93) : na, title="Session Window")
+
+// Entry markers
+plotshape(longEntry and longFlip, "Long Flip", shape.arrowup, location.belowbar,
+     color=color.new(#00e676, 0), size=size.normal, text="BUY")
+plotshape(shortEntry and shortFlip, "Short Flip", shape.arrowdown, location.abovebar,
+     color=color.new(#ff5252, 0), size=size.normal, text="SELL")
+
+// Pullback re-entry markers
+plotshape(longEntry and pullbackLong, "Long Pullback", shape.triangleup, location.belowbar,
+     color=color.new(#00e676, 0), size=size.small, text="PB")
+plotshape(shortEntry and pullbackShort, "Short Pullback", shape.triangledown, location.abovebar,
+     color=color.new(#ff5252, 0), size=size.small, text="PB")
+
+// Trailing stop level
+plot(strategy.position_size > 0 and tp1Hit ? trailHigh - entryATR * atrMultTrail : na,
+     "Long Trail", color=color.new(#ff9800, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and tp1Hit ? trailLow + entryATR * atrMultTrail : na,
+     "Short Trail", color=color.new(#ff9800, 0), style=plot.style_linebr, linewidth=1)
+
+// SL level
+plot(strategy.position_size > 0 and not tp1Hit ? entrySL : na,
+     "Long SL", color=color.new(#ff5252, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and not tp1Hit ? entrySL : na,
+     "Short SL", color=color.new(#ff5252, 0), style=plot.style_linebr, linewidth=1)
+
+// TP1 level
+plot(strategy.position_size > 0 and not tp1Hit ? entryTP1 : na,
+     "Long TP1", color=color.new(#00e676, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and not tp1Hit ? entryTP1 : na,
+     "Short TP1", color=color.new(#00e676, 0), style=plot.style_linebr, linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "STRATEGY",  text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "Hull London v8 1m", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1, "Hull",       text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 1, hullBull ? "BULL" : "BEAR",
+         text_color=hullBull ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "Session",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 2, inSession ? "ACTIVE" : "CLOSED",
+         text_color=inSession ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 3, "200 EMA",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 3, close > ema200 ? "ABOVE" : "BELOW",
+         text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 4, "D EMA 50",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 4, close > dailyEma50 ? "ABOVE" : "BELOW",
+         text_color=close > dailyEma50 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "ADX",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(adxVal, "#.0") + (adxFlipOK ? " OK" : " LOW"),
+         text_color=adxFlipOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6, "RSI",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(rsiVal, "#.0"),
+         text_color=rsiVal > rsiOB ? color.red : rsiVal < rsiOS ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 7, "DI+/DI-",   text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(diPlus, "#.0") + "/" + str.tostring(diMinus, "#.0"),
+         text_color=diPlus > diMinus ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 8, "ATR",        text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 8, str.tostring(atrVal, "#.00000"),
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 9, "Vol Floor",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 9, volOK ? "OK" : "LOW VOL",
+         text_color=volOK ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 10, "Consec Loss", text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(consecLosses) + (cooldownActive ? " BRAKE" : " OK"),
+         text_color=cooldownActive ? color.red : color.green, text_size=size.small)
+    table.cell(t, 0, 11, "TP1 Hit",    text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 11, strategy.position_size != 0 ? (tp1Hit ? "YES — TRAILING" : "NO") : "—",
+         text_color=tp1Hit and strategy.position_size != 0 ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 12, "PB Count",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 12, hullBull ? str.tostring(pbCountBull) + "/" + str.tostring(maxPBPerTrend) :
+         str.tostring(pbCountBear) + "/" + str.tostring(maxPBPerTrend),
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 13, "Position",  text_color=color.gray,   text_size=size.small)
+    table.cell(t, 1, 13, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT",
+         text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray,
+         text_size=size.small)
