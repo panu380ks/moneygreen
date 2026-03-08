@@ -1,33 +1,34 @@
 // This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
-// Hull Suite — London v9 (1-Min Scalper)
-// Simplified: Hull flip + price above/below slow EMA for trend + trailing stop
-// No more over-filtering — balanced between v7 (too many trades) and v8 (zero trades)
+// Hull Suite — London v10 (1-Min Scalper)
+// GUARANTEED TRADES: Hull direction = position direction
+// When Hull turns up → long, when Hull turns down → short
+// All optional filters default OFF so you get trades immediately
 
 //@version=6
-strategy("Hull Suite — London v9 (1min)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.cash_per_order, commission_value=0.0, slippage=1, calc_on_every_tick=false, max_bars_back=500)
+strategy("Hull Suite — London v10 (1min)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.cash_per_order, commission_value=0.0, slippage=1, calc_on_every_tick=false, max_bars_back=500)
 
 // ─── INPUTS ───────────────────────────────────────────────────────────────────
 
-// Hull MA (signal generator)
+// Hull MA
 grp_hull = "Hull Suite"
-hullLength    = input.int(20,       "Hull Length",       minval=4,  group=grp_hull, tooltip="20 balances speed vs noise on 1min")
+hullLength    = input.int(16,       "Hull Length",       minval=4,  group=grp_hull, tooltip="16 is responsive on 1min")
 hullSrc       = input.source(close, "Hull Source",       group=grp_hull)
 hullModeIdx   = input.int(0,        "Hull Mode (0=HMA, 1=EHMA, 2=THMA)", minval=0, maxval=2, group=grp_hull)
-
-// Trend EMA (on-chart, replaces slow Hull — much simpler)
-grp_trend = "Trend Filter"
-trendEmaLen   = input.int(100,     "Trend EMA Length",    group=grp_trend, tooltip="100 EMA on 1min = smooth trend direction")
-useTrendEma   = input.bool(true,   "Use Trend EMA",       group=grp_trend, tooltip="Price must be on correct side of EMA")
 
 // Session Filter
 grp_sess = "Session Filter"
 useSess       = input.bool(true,   "Use Session Filter",  group=grp_sess)
 sessStart     = input.session("0200-1700", "Trading Session (UTC)", group=grp_sess)
 
-// ADX Filter (light)
-grp_adx = "ADX Filter"
-useAdx        = input.bool(true,   "Use ADX Filter",      group=grp_adx)
+// Optional: Trend EMA (OFF by default)
+grp_trend = "Trend Filter (optional)"
+useTrendEma   = input.bool(false,  "Use Trend EMA",       group=grp_trend, tooltip="Turn ON to filter trades with EMA direction")
+trendEmaLen   = input.int(50,      "Trend EMA Length",    group=grp_trend)
+
+// Optional: ADX (OFF by default)
+grp_adx = "ADX Filter (optional)"
+useAdx        = input.bool(false,  "Use ADX Filter",      group=grp_adx)
 adxLen        = input.int(14,      "ADX Length",           group=grp_adx)
 adxThresh     = input.float(15.0,  "ADX Threshold",       group=grp_adx, step=0.5)
 
@@ -35,15 +36,15 @@ adxThresh     = input.float(15.0,  "ADX Threshold",       group=grp_adx, step=0.
 grp_risk = "Risk Management"
 atrLen        = input.int(14,      "ATR Length",              group=grp_risk)
 atrMultSL     = input.float(1.5,   "ATR Stop Loss Multi",    group=grp_risk, step=0.1)
-atrMultTP     = input.float(3.0,   "ATR Take Profit Multi",  group=grp_risk, step=0.1, tooltip="1:2 R:R")
+atrMultTP     = input.float(3.0,   "ATR Take Profit Multi",  group=grp_risk, step=0.1)
 useTrailing   = input.bool(true,   "Use Trailing Stop",      group=grp_risk)
-trailAtrMult  = input.float(1.0,   "Trail Activation (ATR x)", group=grp_risk, step=0.1, tooltip="Trail activates after price moves this far in profit")
-trailOffset   = input.float(0.5,   "Trail Distance (ATR x)",   group=grp_risk, step=0.1, tooltip="How close the trail follows price")
+trailAtrMult  = input.float(1.0,   "Trail Activation (ATR x)", group=grp_risk, step=0.1)
+trailOffset   = input.float(0.5,   "Trail Distance (ATR x)",   group=grp_risk, step=0.1)
 
 // Cooldown
 grp_cool = "Cooldown"
 useCooldown   = input.bool(true,   "Use Cooldown",        group=grp_cool)
-cooldownBars  = input.int(8,       "Cooldown Bars",        group=grp_cool, minval=1, maxval=60)
+cooldownBars  = input.int(5,       "Cooldown Bars",        group=grp_cool, minval=1, maxval=60)
 
 // ─── HULL MOVING AVERAGE ──────────────────────────────────────────────────────
 
@@ -76,7 +77,7 @@ hullFlipBear = hullBear and hullBull[1]
 hullColor = hullBull ? color.new(color.lime, 0) : color.new(color.red, 0)
 plot(hullVal, "Hull MA", color=hullColor, linewidth=2)
 
-// ─── TREND EMA ────────────────────────────────────────────────────────────────
+// ─── OPTIONAL TREND EMA ──────────────────────────────────────────────────────
 
 trendEma = ta.ema(close, trendEmaLen)
 plot(useTrendEma ? trendEma : na, "Trend EMA", color=color.new(color.white, 30), linewidth=1)
@@ -89,7 +90,7 @@ trendBearOk = not useTrendEma or close < trendEma
 inSession = not useSess or not na(time(timeframe.period, sessStart))
 bgcolor(inSession ? color.new(color.blue, 95) : na, title="Session BG")
 
-// ─── ADX ──────────────────────────────────────────────────────────────────────
+// ─── OPTIONAL ADX ─────────────────────────────────────────────────────────────
 
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 adxOk = not useAdx or adxVal >= adxThresh
@@ -110,7 +111,8 @@ else if strategy.position_size == 0
 cooldownOk = not useCooldown or barsSinceExit >= cooldownBars
 
 // ─── ENTRY CONDITIONS ─────────────────────────────────────────────────────────
-// Simple: Hull flips + price on correct side of trend EMA + ADX shows trend + session open
+// Core: Hull flips direction → enter trade
+// Only session + cooldown are active by default
 
 longCond  = hullFlipBull and inSession and trendBullOk and adxOk and cooldownOk
 shortCond = hullFlipBear and inSession and trendBearOk and adxOk and cooldownOk
@@ -138,49 +140,73 @@ if canShort
     else
         strategy.exit("Short Exit", "Short", stop=slPrice, limit=tpPrice)
 
+// ─── FLIP EXIT: Hull reverses → close position immediately ──────────────────
+// This prevents holding losers when Hull flips against you
+
+if strategy.position_size > 0 and hullFlipBear
+    strategy.close("Long", comment="Hull Flip Exit")
+
+if strategy.position_size < 0 and hullFlipBull
+    strategy.close("Short", comment="Hull Flip Exit")
+
 // ─── EXIT ON SESSION CLOSE ────────────────────────────────────────────────────
 
 if not inSession and inSession[1]
     if strategy.position_size != 0
         strategy.close_all(comment="Session End")
 
+// ─── DEBUG: Count blocked signals ───────────────────────────────────────────
+// This helps you see WHY signals are being blocked
+
+var int totalFlips    = 0
+var int blockedFlips  = 0
+
+if hullFlipBull or hullFlipBear
+    totalFlips += 1
+
+if (hullFlipBull and not canLong) or (hullFlipBear and not canShort)
+    blockedFlips += 1
+
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 
-var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.gray)
+var table dash = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.gray)
 
 if barstate.islast
     table.cell(dash, 0, 0, "STRATEGY",    text_color=color.white,  text_size=size.small)
-    table.cell(dash, 1, 0, "Hull London v9", text_color=color.yellow, text_size=size.small)
+    table.cell(dash, 1, 0, "Hull v10", text_color=color.yellow, text_size=size.small)
 
     table.cell(dash, 0, 1, "Hull",         text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 1, hullBull ? "BULL" : "BEAR", text_color=hullBull ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 1, 1, hullBull ? "BULL ▲" : "BEAR ▼", text_color=hullBull ? color.lime : color.red, text_size=size.small)
 
-    table.cell(dash, 0, 2, "Trend EMA",    text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 2, close > trendEma ? "ABOVE" : "BELOW", text_color=close > trendEma ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 2, "Session",      text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, inSession ? "OPEN" : "CLOSED", text_color=inSession ? color.lime : color.red, text_size=size.small)
 
-    table.cell(dash, 0, 3, "Session",      text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 3, inSession ? "OPEN" : "CLOSED", text_color=inSession ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 3, "Cooldown",     text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, cooldownOk ? "READY" : str.tostring(cooldownBars - barsSinceExit) + " bars", text_color=cooldownOk ? color.lime : color.orange, text_size=size.small)
 
-    table.cell(dash, 0, 4, "ADX",          text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 4, str.tostring(adxVal, "#.#") + (adxOk ? " OK" : " LOW"), text_color=adxOk ? color.lime : color.orange, text_size=size.small)
+    table.cell(dash, 0, 4, "Trend EMA",    text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, useTrendEma ? (close > trendEma ? "ABOVE" : "BELOW") : "OFF", text_color=useTrendEma ? (close > trendEma ? color.lime : color.red) : color.gray, text_size=size.small)
 
-    table.cell(dash, 0, 5, "ATR",          text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 5, str.tostring(atrVal, "#.#####"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 5, "ADX",          text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, useAdx ? (str.tostring(adxVal, "#.#") + (adxOk ? " OK" : " LOW")) : "OFF", text_color=useAdx ? (adxOk ? color.lime : color.orange) : color.gray, text_size=size.small)
 
-    table.cell(dash, 0, 6, "Cooldown",     text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 6, cooldownOk ? "READY" : str.tostring(cooldownBars - barsSinceExit) + " bars", text_color=cooldownOk ? color.lime : color.orange, text_size=size.small)
+    table.cell(dash, 0, 6, "ATR",          text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(atrVal, "#.#####"), text_color=color.white, text_size=size.small)
 
-    table.cell(dash, 0, 7, "DI+/DI-",     text_color=color.white, text_size=size.small)
-    table.cell(dash, 1, 7, str.tostring(diPlus, "#.#") + "/" + str.tostring(diMinus, "#.#"), text_color=diPlus > diMinus ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 7, "Total Flips",  text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(totalFlips), text_color=color.white, text_size=size.small)
 
-    table.cell(dash, 0, 8, "Position",     text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 8, "Blocked",      text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, str.tostring(blockedFlips), text_color=blockedFlips > 0 ? color.orange : color.lime, text_size=size.small)
+
+    table.cell(dash, 0, 9, "Position",     text_color=color.white, text_size=size.small)
     posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
     posColor = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
-    table.cell(dash, 1, 8, posText, text_color=posColor, text_size=size.small)
+    table.cell(dash, 1, 9, posText, text_color=posColor, text_size=size.small)
 
 // ─── PLOT SIGNALS ─────────────────────────────────────────────────────────────
 
 plotshape(canLong,  "Buy",  shape.labelup,   location.belowbar, color.lime, text="BUY",  textcolor=color.white, size=size.small)
 plotshape(canShort, "Sell", shape.labeldown,  location.abovebar, color.red,  text="SELL", textcolor=color.white, size=size.small)
-plotshape(hullFlipBull and not canLong,  "Flip Up (filtered)",   shape.triangleup,   location.belowbar, color.new(color.lime, 70), size=size.tiny)
-plotshape(hullFlipBear and not canShort, "Flip Down (filtered)", shape.triangledown, location.abovebar, color.new(color.red, 70),  size=size.tiny)
+plotshape(hullFlipBull and not canLong,  "Flip Up (blocked)",   shape.triangleup,   location.belowbar, color.new(color.lime, 70), size=size.tiny)
+plotshape(hullFlipBear and not canShort, "Flip Down (blocked)", shape.triangledown, location.abovebar, color.new(color.red, 70),  size=size.tiny)
