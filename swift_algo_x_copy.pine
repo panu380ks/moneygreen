@@ -28,8 +28,10 @@ showSL        = input.bool(true, "Show Stop Loss Lines", group=GRP_SIGNAL)
 labelSize     = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=GRP_SIGNAL)
 
 // TP / SL
-tpMultiplier  = input.float(2.0, "TP ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
-slMultiplier  = input.float(1.0, "SL ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+tpMultiplier  = input.float(4.0, "TP ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+slMultiplier  = input.float(1.5, "SL ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+useTrailStop  = input.bool(true, "Use Trailing Stop",                       group=GRP_TP, tooltip="Trail stop loss behind price as trade moves in your favor")
+trailATRMult  = input.float(2.0, "Trail ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
 
 // Dashboard
 showDashboard  = input.bool(true, "Show Trend Dashboard", group=GRP_DASH)
@@ -104,6 +106,12 @@ htfBullish  = htfClose > htfEma
 htfBearish  = htfClose < htfEma
 
 // ============================================================================
+// CANDLE COLOR FILTER
+// ============================================================================
+greenCandle = close > open
+redCandle   = close < open
+
+// ============================================================================
 // SIGNAL GENERATION
 // ============================================================================
 rawBuy  = direction == 1 and direction[1] == -1
@@ -112,19 +120,19 @@ rawSell = direction == -1 and direction[1] == 1
 // Volume confirmation
 volOk = volume >= volThreshold or volume >= ta.sma(volume, 20)
 
-// Confirmed signals (trend + volume)
-buySignal  = rawBuy  and htfBullish and volOk
-sellSignal = rawSell and htfBearish and volOk
+// Confirmed signals (trend + volume + candle color)
+buySignal  = rawBuy  and htfBullish and volOk and greenCandle
+sellSignal = rawSell and htfBearish and volOk and redCandle
 
 // Fallback: raw signals when no HTF confirmation but strong volume
-buyFallback  = rawBuy  and not buySignal  and volume > ta.sma(volume, 20) * 1.5
-sellFallback = rawSell and not sellSignal and volume > ta.sma(volume, 20) * 1.5
+buyFallback  = rawBuy  and not buySignal  and volume > ta.sma(volume, 20) * 1.5 and greenCandle
+sellFallback = rawSell and not sellSignal and volume > ta.sma(volume, 20) * 1.5 and redCandle
 
 finalBuy  = buySignal  or buyFallback
 finalSell = sellSignal or sellFallback
 
 // ============================================================================
-// TAKE PROFIT & STOP LOSS
+// POSITION TRACKING — HOLD UNTIL TP/SL (NO FLIPPING)
 // ============================================================================
 var float longTP  = na
 var float longSL  = na
@@ -133,44 +141,48 @@ var float shortSL = na
 var bool  inLong  = false
 var bool  inShort = false
 
-if finalBuy
-    inLong  := true
-    inShort := false
-    longTP  := close + atr * tpMultiplier
-    longSL  := close - atr * slMultiplier
-    shortTP := na
-    shortSL := na
+// Only enter when flat (no open position)
+canEnterLong  = finalBuy  and not inLong and not inShort
+canEnterShort = finalSell and not inLong and not inShort
 
-if finalSell
-    inShort := true
-    inLong  := false
-    shortTP := close - atr * tpMultiplier
-    shortSL := close + atr * slMultiplier
-    longTP  := na
-    longSL  := na
+// Trailing stop: move SL in favor as price moves
+if useTrailStop and inLong and not na(longSL)
+    newTrailSL = close - atr * trailATRMult
+    if newTrailSL > longSL
+        longSL := newTrailSL
 
+if useTrailStop and inShort and not na(shortSL)
+    newTrailSL = close + atr * trailATRMult
+    if newTrailSL < shortSL
+        shortSL := newTrailSL
+
+// Detect TP/SL hits
 longTPHit  = inLong  and not na(longTP)  and high >= longTP
 shortTPHit = inShort and not na(shortTP) and low  <= shortTP
 longSLHit  = inLong  and not na(longSL)  and low  <= longSL
 shortSLHit = inShort and not na(shortSL) and high >= shortSL
 
-if longTPHit
+// Close on TP or SL — go flat
+if longTPHit or longSLHit
     longTP := na
     longSL := na
-
-if shortTPHit
-    shortTP := na
-    shortSL := na
-
-if longSLHit
-    longSL := na
-    longTP := na
     inLong := false
 
-if shortSLHit
-    shortSL := na
+if shortTPHit or shortSLHit
     shortTP := na
+    shortSL := na
     inShort := false
+
+// Open new positions only when flat
+if canEnterLong
+    inLong  := true
+    longTP  := close + atr * tpMultiplier
+    longSL  := close - atr * slMultiplier
+
+if canEnterShort
+    inShort := true
+    shortTP := close - atr * tpMultiplier
+    shortSL := close + atr * slMultiplier
 
 // ============================================================================
 // PLOTTING
@@ -186,11 +198,11 @@ plot(showSL and inShort ? shortSL : na, "Short SL", color=color.new(color.red, 4
 plot(showTP and inLong  ? longTP  : na, "Long TP",  color=color.new(color.green, 40),  style=plot.style_linebr, linewidth=1)
 plot(showTP and inShort ? shortTP : na, "Short TP", color=color.new(color.purple, 40), style=plot.style_linebr, linewidth=1)
 
-// Buy / Sell labels
-if showBuy and finalBuy
+// Buy / Sell labels (only when actually entering)
+if showBuy and canEnterLong
     label.new(bar_index, low, "Buy", style=label.style_label_up, color=color.green, textcolor=color.white, size=lblSize)
 
-if showSell and finalSell
+if showSell and canEnterShort
     label.new(bar_index, high, "Sell", style=label.style_label_down, color=color.red, textcolor=color.white, size=lblSize)
 
 // TP hit labels
@@ -201,7 +213,7 @@ if showTP and shortTPHit
     label.new(bar_index, low, "Short TP", style=label.style_label_up, color=color.new(color.purple, 20), textcolor=color.white, size=lblSize)
 
 // Entry zone highlight
-bgcolor(finalBuy ? color.new(color.green, 88) : finalSell ? color.new(color.red, 88) : na)
+bgcolor(canEnterLong ? color.new(color.green, 88) : canEnterShort ? color.new(color.red, 88) : na)
 
 // ============================================================================
 // BACKTESTING ENGINE
@@ -214,19 +226,11 @@ var float bestWinPct  = 0.0
 var int   tradeDir    = 0   // 1 = long, -1 = short, 0 = flat
 var float entryPrice  = na
 
-if finalBuy and tradeDir != 1
-    if tradeDir == -1 and not na(entryPrice)
-        totalTrades += 1
-        if entryPrice > close
-            wins += 1
+if canEnterLong
     tradeDir   := 1
     entryPrice := close
 
-if finalSell and tradeDir != -1
-    if tradeDir == 1 and not na(entryPrice)
-        totalTrades += 1
-        if close > entryPrice
-            wins += 1
+if canEnterShort
     tradeDir   := -1
     entryPrice := close
 
@@ -239,6 +243,16 @@ if longTPHit and tradeDir == 1
 if shortTPHit and tradeDir == -1
     totalTrades += 1
     wins        += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if longSLHit and tradeDir == 1
+    totalTrades += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if shortSLHit and tradeDir == -1
+    totalTrades += 1
     tradeDir    := 0
     entryPrice  := na
 
@@ -328,8 +342,8 @@ if showDashboard and barstate.islast
 // ============================================================================
 // ALERTS
 // ============================================================================
-alertcondition(finalBuy,    "Buy Signal",       "Swift Algo X — Buy Signal")
-alertcondition(finalSell,   "Sell Signal",       "Swift Algo X — Sell Signal")
+alertcondition(canEnterLong,  "Buy Signal",       "Swift Algo X — Buy Signal")
+alertcondition(canEnterShort, "Sell Signal",       "Swift Algo X — Sell Signal")
 alertcondition(longTPHit,   "Long TP Hit",       "Swift Algo X — Long TP Reached")
 alertcondition(shortTPHit,  "Short TP Hit",      "Swift Algo X — Short TP Reached")
 alertcondition(longSLHit,   "Long SL Hit",       "Swift Algo X — Long Stop Loss Hit")
