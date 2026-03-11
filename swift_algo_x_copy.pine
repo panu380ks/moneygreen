@@ -1,0 +1,336 @@
+//@version=5
+indicator("Swift Algo X Copy", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+string GRP_CORE   = "Core Settings"
+string GRP_SIGNAL = "Signal Settings"
+string GRP_TP     = "Take Profit / Stop Loss"
+string GRP_DASH   = "Dashboard"
+string GRP_STYLE  = "Style"
+
+// Core — matches visible params: 1D 2 1 4 1 300 15M Small 5000
+sensitivity   = input.timeframe("D",   "Indicator Sensitivity",          group=GRP_CORE, tooltip="Higher timeframe for trend context. Pair: 1m→15m, 5m→1H, 15m→4H, 1H→1D, 4H→1W")
+multiplier    = input.float(2.0,       "Multiplier",        minval=0.1, step=0.5, group=GRP_CORE)
+period        = input.int(1,           "Period",            minval=1,              group=GRP_CORE)
+atrLength     = input.int(4,           "ATR Length",        minval=1,              group=GRP_CORE)
+volDriftLen   = input.int(1,           "Volume Drift Length",minval=1,             group=GRP_CORE)
+lookback      = input.int(300,         "Lookback Bars",     minval=50,             group=GRP_CORE)
+mtfTimeframe  = input.timeframe("15",  "MTF Timeframe",                            group=GRP_CORE)
+volThreshold  = input.int(5000,        "Volume Threshold",  minval=100,            group=GRP_CORE)
+
+// Signal
+showBuy       = input.bool(true, "Show Buy Signals",     group=GRP_SIGNAL)
+showSell      = input.bool(true, "Show Sell Signals",    group=GRP_SIGNAL)
+showTP        = input.bool(true, "Show Take Profit",     group=GRP_SIGNAL)
+showSL        = input.bool(true, "Show Stop Loss Lines", group=GRP_SIGNAL)
+labelSize     = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=GRP_SIGNAL)
+
+// TP / SL
+tpMultiplier  = input.float(2.0, "TP ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+slMultiplier  = input.float(1.0, "SL ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+
+// Dashboard
+showDashboard  = input.bool(true, "Show Trend Dashboard", group=GRP_DASH)
+showBacktest   = input.bool(true, "Show Backtest Panel",  group=GRP_DASH)
+
+// ============================================================================
+// HELPER: LABEL SIZE
+// ============================================================================
+lblSize = switch labelSize
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+
+// ============================================================================
+// VOLUME-DRIFT MODEL
+// ============================================================================
+// Computes a volume-weighted directional pressure metric,
+// measures momentum via dual EMA spread, normalizes by its
+// own stdev, rescales by ATR, and projects onto high/low.
+
+volUp   = volume * (close > open ? 1 : close < open ? 0 : 0.5)
+volDown = volume * (close < open ? 1 : close > open ? 0 : 0.5)
+
+// Net volume pressure
+netPressure = volUp - volDown
+cumPressure = math.sum(netPressure, volDriftLen > 1 ? volDriftLen : 1)
+
+// Dual EMA spread of pressure
+pressEmaFast = ta.ema(cumPressure, 3)
+pressEmaSlow = ta.ema(cumPressure, 8)
+pressSpread  = pressEmaFast - pressEmaSlow
+
+// Normalize by rolling stdev
+pressStdev   = ta.stdev(pressSpread, 20)
+normPressure = pressStdev != 0 ? pressSpread / pressStdev : 0
+
+// Scale into price units via ATR
+atr          = ta.atr(math.max(atrLength, 1))
+drift        = normPressure * atr * 0.5
+
+// Projected reference level
+projHigh = high + drift
+projLow  = low  + drift
+
+// ============================================================================
+// ADAPTIVE TRAILING BANDS (built on projected level, not raw price)
+// ============================================================================
+basis       = math.avg(projHigh, projLow)
+bandOffset  = atr * multiplier
+
+upperBand   = basis + bandOffset
+lowerBand   = basis - bandOffset
+
+var float trailUpper = na
+var float trailLower = na
+var int   direction  = 1
+
+trailUpper := na(trailUpper[1]) ? upperBand : upperBand < trailUpper[1] or close[1] > trailUpper[1] ? upperBand : trailUpper[1]
+trailLower := na(trailLower[1]) ? lowerBand : lowerBand > trailLower[1] or close[1] < trailLower[1] ? lowerBand : trailLower[1]
+
+direction := na(direction[1]) ? 1 : direction[1] == -1 and close > trailUpper[1] ? 1 : direction[1] == 1 and close < trailLower[1] ? -1 : direction[1]
+
+trailLine = direction == 1 ? trailLower : trailUpper
+
+// ============================================================================
+// HIGHER-TIMEFRAME TREND FILTER
+// ============================================================================
+htfClose    = request.security(syminfo.tickerid, sensitivity, close)
+htfEma      = request.security(syminfo.tickerid, sensitivity, ta.ema(close, 21))
+htfBullish  = htfClose > htfEma
+htfBearish  = htfClose < htfEma
+
+// ============================================================================
+// SIGNAL GENERATION
+// ============================================================================
+rawBuy  = direction == 1 and direction[1] == -1
+rawSell = direction == -1 and direction[1] == 1
+
+// Volume confirmation
+volOk = volume >= volThreshold or volume >= ta.sma(volume, 20)
+
+// Confirmed signals (trend + volume)
+buySignal  = rawBuy  and htfBullish and volOk
+sellSignal = rawSell and htfBearish and volOk
+
+// Fallback: raw signals when no HTF confirmation but strong volume
+buyFallback  = rawBuy  and not buySignal  and volume > ta.sma(volume, 20) * 1.5
+sellFallback = rawSell and not sellSignal and volume > ta.sma(volume, 20) * 1.5
+
+finalBuy  = buySignal  or buyFallback
+finalSell = sellSignal or sellFallback
+
+// ============================================================================
+// TAKE PROFIT & STOP LOSS
+// ============================================================================
+var float longTP  = na
+var float longSL  = na
+var float shortTP = na
+var float shortSL = na
+var bool  inLong  = false
+var bool  inShort = false
+
+if finalBuy
+    inLong  := true
+    inShort := false
+    longTP  := close + atr * tpMultiplier
+    longSL  := close - atr * slMultiplier
+    shortTP := na
+    shortSL := na
+
+if finalSell
+    inShort := true
+    inLong  := false
+    shortTP := close - atr * tpMultiplier
+    shortSL := close + atr * slMultiplier
+    longTP  := na
+    longSL  := na
+
+longTPHit  = inLong  and not na(longTP)  and high >= longTP
+shortTPHit = inShort and not na(shortTP) and low  <= shortTP
+longSLHit  = inLong  and not na(longSL)  and low  <= longSL
+shortSLHit = inShort and not na(shortSL) and high >= shortSL
+
+if longTPHit
+    longTP := na
+    longSL := na
+
+if shortTPHit
+    shortTP := na
+    shortSL := na
+
+if longSLHit
+    longSL := na
+    longTP := na
+    inLong := false
+
+if shortSLHit
+    shortSL := na
+    shortTP := na
+    inShort := false
+
+// ============================================================================
+// PLOTTING
+// ============================================================================
+
+// Trailing band line
+trailColor = direction == 1 ? color.new(color.aqua, 0) : color.new(color.red, 0)
+plot(trailLine, "Trailing Band", color=trailColor, linewidth=2)
+
+// TP / SL levels
+plot(showSL and inLong  ? longSL  : na, "Long SL",  color=color.new(color.red, 40),    style=plot.style_linebr, linewidth=1)
+plot(showSL and inShort ? shortSL : na, "Short SL", color=color.new(color.red, 40),    style=plot.style_linebr, linewidth=1)
+plot(showTP and inLong  ? longTP  : na, "Long TP",  color=color.new(color.green, 40),  style=plot.style_linebr, linewidth=1)
+plot(showTP and inShort ? shortTP : na, "Short TP", color=color.new(color.purple, 40), style=plot.style_linebr, linewidth=1)
+
+// Buy / Sell labels
+if showBuy and finalBuy
+    label.new(bar_index, low, "Buy", style=label.style_label_up, color=color.green, textcolor=color.white, size=lblSize)
+
+if showSell and finalSell
+    label.new(bar_index, high, "Sell", style=label.style_label_down, color=color.red, textcolor=color.white, size=lblSize)
+
+// TP hit labels
+if showTP and longTPHit
+    label.new(bar_index, high, "Long TP", style=label.style_label_down, color=color.new(color.blue, 20), textcolor=color.white, size=lblSize)
+
+if showTP and shortTPHit
+    label.new(bar_index, low, "Short TP", style=label.style_label_up, color=color.new(color.purple, 20), textcolor=color.white, size=lblSize)
+
+// Entry zone highlight
+bgcolor(finalBuy ? color.new(color.green, 88) : finalSell ? color.new(color.red, 88) : na)
+
+// ============================================================================
+// BACKTESTING ENGINE
+// ============================================================================
+var int   totalTrades = 0
+var int   wins        = 0
+var float bestWinPct  = 0.0
+
+// Track trades for current settings
+var int   tradeDir    = 0   // 1 = long, -1 = short, 0 = flat
+var float entryPrice  = na
+
+if finalBuy and tradeDir != 1
+    if tradeDir == -1 and not na(entryPrice)
+        totalTrades += 1
+        if entryPrice > close
+            wins += 1
+    tradeDir   := 1
+    entryPrice := close
+
+if finalSell and tradeDir != -1
+    if tradeDir == 1 and not na(entryPrice)
+        totalTrades += 1
+        if close > entryPrice
+            wins += 1
+    tradeDir   := -1
+    entryPrice := close
+
+if longTPHit and tradeDir == 1
+    totalTrades += 1
+    wins        += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if shortTPHit and tradeDir == -1
+    totalTrades += 1
+    wins        += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+currentWinPct = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
+
+// Simple best-setting approximation (track rolling best)
+bestWinPct := math.max(bestWinPct, currentWinPct)
+
+// ============================================================================
+// BACKTESTING DASHBOARD (top-right)
+// ============================================================================
+if showBacktest and barstate.islast
+    var table btPanel = table.new(position.top_right, 2, 6, border_width=1)
+
+    table.cell(btPanel, 0, 0, "Backtesting",        bgcolor=color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 0, "Dashboard",           bgcolor=color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+
+    table.cell(btPanel, 0, 1, "Metrics",             bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 1, "Win %",               bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+
+    table.cell(btPanel, 0, 2, "Current Setting",     bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 2, str.tostring(currentWinPct, "#.##") + "%", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+    table.cell(btPanel, 0, 3, "Backtest Setting",    bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 3, str.tostring(bestWinPct, "#.##") + "%",    bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+    table.cell(btPanel, 0, 4, "Multiplier",          bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 4, str.tostring(multiplier),                  bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+    table.cell(btPanel, 0, 5, "Period",              bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 5, str.tostring(period),                      bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+// ============================================================================
+// MULTI-TIMEFRAME TREND DASHBOARD (bottom-right)
+// ============================================================================
+f_trendData(tf) =>
+    [reqC, reqH, reqL, reqATR, reqVol] = request.security(syminfo.tickerid, tf, [close, high, low, ta.atr(14), volume])
+    reqEMA = request.security(syminfo.tickerid, tf, ta.ema(close, 21))
+
+    trendDir  = reqC > reqEMA ? 1 : -1
+    atrRatio  = reqATR / reqC * 100
+    strength  = atrRatio > 2.0 ? "High" : atrRatio > 1.0 ? "Medium" : "Low"
+    isRanging = (reqH - reqL) < reqATR * 0.5
+    [trendDir, strength, isRanging]
+
+if showDashboard and barstate.islast
+    var table dash = table.new(position.bottom_right, 5, 10, border_width=1)
+
+    // Header row
+    table.cell(dash, 0, 0, "Timeframe", bgcolor=color.new(color.teal, 50),   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 0, "Trend",     bgcolor=color.new(color.teal, 50),   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 0, "Strength",  bgcolor=color.new(color.orange, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 0, "Ranging",   bgcolor=color.new(color.yellow, 50), text_color=color.white, text_size=size.tiny)
+
+    tfLabels = array.from("1M", "5M", "15M", "30M", "1H", "4H", "1D", "1W")
+    tfValues = array.from("1",  "5",  "15",  "30",  "60", "240","D",  "W")
+
+    bullCount = 0
+    bearCount = 0
+
+    for i = 0 to 7
+        [tDir, str_val, ranging] = f_trendData(array.get(tfValues, i))
+
+        trendClr    = tDir == 1 ? color.new(color.red, 30) : color.new(color.red, 30)
+        trendClr2   = tDir == 1 ? color.new(color.green, 30) : color.new(color.red, 30)
+        strengthClr = str_val == "High" ? color.new(color.green, 30) : str_val == "Medium" ? color.new(color.orange, 30) : color.new(color.red, 30)
+        rangingClr  = ranging ? color.new(color.green, 30) : color.new(color.red, 30)
+
+        if tDir == 1
+            bullCount += 1
+        else
+            bearCount += 1
+
+        table.cell(dash, 0, i + 1, array.get(tfLabels, i), bgcolor=color.new(color.gray, 70),  text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, i + 1, tDir == 1 ? "▲" : "▼", bgcolor=trendClr2,                    text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 2, i + 1, str_val,                 bgcolor=strengthClr,                  text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 3, i + 1, ranging ? "●" : "●",     bgcolor=rangingClr,                   text_color=color.white, text_size=size.tiny)
+
+    // Overall row
+    midCount   = 8 - bullCount - bearCount
+    overallClr = bullCount > bearCount ? color.new(color.green, 30) : color.new(color.red, 30)
+    table.cell(dash, 0, 9, "Overall", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 9, "(" + str.tostring(bullCount) + "/" + str.tostring(bearCount) + ")", bgcolor=overallClr, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 9, "Mid (" + str.tostring(bullCount) + "/" + str.tostring(bearCount) + "/" + str.tostring(8 - bullCount - bearCount) + ")", bgcolor=color.new(color.orange, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 9, "(" + str.tostring(bullCount) + "/" + str.tostring(bearCount) + ")", bgcolor=overallClr, text_color=color.white, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(finalBuy,    "Buy Signal",       "Swift Algo X — Buy Signal")
+alertcondition(finalSell,   "Sell Signal",       "Swift Algo X — Sell Signal")
+alertcondition(longTPHit,   "Long TP Hit",       "Swift Algo X — Long TP Reached")
+alertcondition(shortTPHit,  "Short TP Hit",      "Swift Algo X — Short TP Reached")
+alertcondition(longSLHit,   "Long SL Hit",       "Swift Algo X — Long Stop Loss Hit")
+alertcondition(shortSLHit,  "Short SL Hit",      "Swift Algo X — Short Stop Loss Hit")
