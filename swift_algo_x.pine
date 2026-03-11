@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("Swift Algo X Replica", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
 
 // ============================================================================
@@ -149,10 +149,10 @@ if finalSell
     longTP  := na
     longSL  := na
 
-longTPHit  = inLong  and not na(longTP)  and high >= longTP
-shortTPHit = inShort and not na(shortTP) and low  <= shortTP
-longSLHit  = inLong  and not na(longSL)  and low  <= longSL
-shortSLHit = inShort and not na(shortSL) and high >= shortSL
+longTPHit  = inLong  and (not na(longTP))  and high >= longTP
+shortTPHit = inShort and (not na(shortTP)) and low  <= shortTP
+longSLHit  = inLong  and (not na(longSL))  and low  <= longSL
+shortSLHit = inShort and (not na(shortSL)) and high >= shortSL
 
 if longTPHit
     longTP := na
@@ -242,7 +242,7 @@ if shortTPHit and tradeDir == -1
     tradeDir    := 0
     entryPrice  := na
 
-currentWinPct = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
+currentWinPct = totalTrades > 0 ? (wins * 1.0 / totalTrades) * 100.0 : 0.0
 
 // Simple best-setting approximation (track rolling best)
 bestWinPct := math.max(bestWinPct, currentWinPct)
