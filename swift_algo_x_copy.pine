@@ -10,15 +10,15 @@ string GRP_TP     = "Take Profit / Stop Loss"
 string GRP_DASH   = "Dashboard"
 string GRP_STYLE  = "Style"
 
-// Core — matches visible params: 1D 2 1 4 1 300 15M Small 5000
-sensitivity   = input.timeframe("D",   "Indicator Sensitivity",          group=GRP_CORE, tooltip="Higher timeframe for trend context. Pair: 1m→15m, 5m→1H, 15m→4H, 1H→1D, 4H→1W")
-multiplier    = input.float(2.0,       "Multiplier",        minval=0.1, step=0.5, group=GRP_CORE)
-period        = input.int(1,           "Period",            minval=1,              group=GRP_CORE)
-atrLength     = input.int(4,           "ATR Length",        minval=1,              group=GRP_CORE)
-volDriftLen   = input.int(1,           "Volume Drift Length",minval=1,             group=GRP_CORE)
-lookback      = input.int(300,         "Lookback Bars",     minval=50,             group=GRP_CORE)
-mtfTimeframe  = input.timeframe("15",  "MTF Timeframe",                            group=GRP_CORE)
-volThreshold  = input.int(5000,        "Volume Threshold",  minval=100,            group=GRP_CORE)
+// Core — optimized for 1H chart
+sensitivity   = input.timeframe("D",   "Indicator Sensitivity",          group=GRP_CORE, tooltip="Higher timeframe for trend context. 1H→1D recommended")
+multiplier    = input.float(1.5,       "Multiplier",        minval=0.1, step=0.5, group=GRP_CORE)
+period        = input.int(2,           "Period",            minval=1,              group=GRP_CORE)
+atrLength     = input.int(14,          "ATR Length",        minval=1,              group=GRP_CORE)
+volDriftLen   = input.int(3,           "Volume Drift Length",minval=1,             group=GRP_CORE)
+lookback      = input.int(200,         "Lookback Bars",     minval=50,             group=GRP_CORE)
+mtfTimeframe  = input.timeframe("240", "MTF Timeframe",                            group=GRP_CORE)
+volThreshold  = input.int(15000,       "Volume Threshold",  minval=100,            group=GRP_CORE)
 
 // Signal
 showBuy       = input.bool(true, "Show Buy Signals",     group=GRP_SIGNAL)
@@ -28,10 +28,10 @@ showSL        = input.bool(true, "Show Stop Loss Lines", group=GRP_SIGNAL)
 labelSize     = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=GRP_SIGNAL)
 
 // TP / SL
-tpMultiplier  = input.float(4.0, "TP ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
-slMultiplier  = input.float(1.5, "SL ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+tpMultiplier  = input.float(3.0, "TP ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+slMultiplier  = input.float(1.0, "SL ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
 useTrailStop  = input.bool(true, "Use Trailing Stop",                       group=GRP_TP, tooltip="Trail stop loss behind price as trade moves in your favor")
-trailATRMult  = input.float(2.0, "Trail ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
+trailATRMult  = input.float(1.5, "Trail ATR Multiplier", minval=0.5, step=0.5, group=GRP_TP)
 
 // Dashboard
 showDashboard  = input.bool(true, "Show Trend Dashboard", group=GRP_DASH)
