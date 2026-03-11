@@ -1,0 +1,177 @@
+//@version=5
+indicator("Signum AutoTrading Duplicate", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+multiplier    = input.float(6.0, "Multiplier", minval=0.1, step=0.5)
+period        = input.int(1, "Period", minval=1)
+atrLen        = input.int(14, "ATR Length", minval=1)
+emaFastLen    = input.int(9, "Fast EMA Length", minval=1)
+emaSlowLen    = input.int(21, "Slow EMA Length", minval=1)
+emaTrendLen   = input.int(50, "Trend EMA Length", minval=1)
+
+showBuySell   = input.bool(true, "Show Buy/Sell Signals")
+showTP        = input.bool(true, "Show Take Profit Signals")
+showDashboard = input.bool(true, "Show Dashboard")
+
+// ============================================================================
+// SUPERTREND CALCULATION
+// ============================================================================
+atr = ta.atr(atrLen) * multiplier
+
+upperBand = hl2 + atr
+lowerBand = hl2 - atr
+
+var float finalUpper = na
+var float finalLower = na
+var int direction    = 1
+
+finalUpper := na(finalUpper[1]) ? upperBand : (upperBand < finalUpper[1] or close[1] > finalUpper[1]) ? upperBand : finalUpper[1]
+finalLower := na(finalLower[1]) ? lowerBand : (lowerBand > finalLower[1] or close[1] < finalLower[1]) ? lowerBand : finalLower[1]
+
+direction := na(direction[1]) ? 1 : direction[1] == -1 and close > finalUpper[1] ? 1 : direction[1] == 1 and close < finalLower[1] ? -1 : direction[1]
+
+supertrend = direction == 1 ? finalLower : finalUpper
+
+// ============================================================================
+// MOVING AVERAGES
+// ============================================================================
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+
+// ============================================================================
+// SIGNAL LOGIC
+// ============================================================================
+// Buy: Supertrend flips bullish + price above trend EMA
+// Sell: Supertrend flips bearish + price below trend EMA
+buySignal  = direction == 1 and direction[1] == -1
+sellSignal = direction == -1 and direction[1] == 1
+
+// Trend-confirmed signals
+trendBuy  = buySignal and close > emaTrend
+trendSell = sellSignal and close < emaTrend
+
+// Take profit levels based on ATR
+atrTP       = ta.atr(atrLen)
+longTPLevel  = close + atrTP * multiplier
+shortTPLevel = close - atrTP * multiplier
+
+var float activeLongTP  = na
+var float activeShortTP = na
+var bool  inLong        = false
+var bool  inShort       = false
+
+if trendBuy
+    inLong        := true
+    inShort       := false
+    activeLongTP  := longTPLevel
+    activeShortTP := na
+
+if trendSell
+    inShort       := true
+    inLong        := false
+    activeShortTP := shortTPLevel
+    activeLongTP  := na
+
+// TP hit detection
+longTPHit  = inLong and not na(activeLongTP) and high >= activeLongTP
+shortTPHit = inShort and not na(activeShortTP) and low <= activeShortTP
+
+if longTPHit
+    activeLongTP := na
+
+if shortTPHit
+    activeShortTP := na
+
+// ============================================================================
+// PLOTTING
+// ============================================================================
+
+// Supertrend line
+stColor = direction == 1 ? color.new(color.aqua, 0) : color.new(color.red, 0)
+plot(supertrend, "Supertrend", color=stColor, linewidth=2)
+
+// EMAs
+plot(emaFast,  "Fast EMA",  color=color.new(color.aqua, 30), linewidth=1)
+plot(emaSlow,  "Slow EMA",  color=color.new(color.orange, 30), linewidth=1)
+plot(emaTrend, "Trend EMA", color=color.new(color.white, 50), linewidth=1)
+
+// Buy / Sell labels
+if showBuySell and trendBuy
+    label.new(bar_index, low, "Buy", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if showBuySell and trendSell
+    label.new(bar_index, high, "Sell", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// Take profit labels
+if showTP and longTPHit
+    label.new(bar_index, high, "Long TP", style=label.style_label_down, color=color.new(color.purple, 20), textcolor=color.white, size=size.small)
+
+if showTP and shortTPHit
+    label.new(bar_index, low, "Short TP", style=label.style_label_up, color=color.new(color.purple, 20), textcolor=color.white, size=size.small)
+
+// ============================================================================
+// BACKGROUND ZONES (entry highlight)
+// ============================================================================
+bgcolor(trendBuy ? color.new(color.green, 85) : trendSell ? color.new(color.red, 85) : na)
+
+// ============================================================================
+// MULTI-TIMEFRAME DASHBOARD
+// ============================================================================
+if showDashboard and barstate.islast
+    var table dashboard = table.new(position.bottom_right, 5, 9, border_width=1)
+
+    f_trend(_close, _emaLen) =>
+        _ema = ta.ema(_close, _emaLen)
+        _close > _ema ? 1 : -1
+
+    f_strength(_close, _atrLen) =>
+        _atr   = ta.atr(_atrLen)
+        _ratio = _atr / _close * 100
+        _ratio > 2.0 ? "High" : _ratio > 1.0 ? "Medium" : "Low"
+
+    f_ranging(_high, _low, _atrLen) =>
+        _atr   = ta.atr(_atrLen)
+        _range = _high - _low
+        _range < _atr * 0.5
+
+    // Header
+    table.cell(dashboard, 0, 0, "Timeframe", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 0, "Trend",     bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 2, 0, "Strength",  bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 0, "Ranging",   bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+
+    tfLabels = array.from("1M", "5M", "15M", "30M", "1H", "4H", "1D", "1W")
+    tfValues = array.from("1",  "5",  "15",  "30",  "60", "240","D",  "W")
+
+    for i = 0 to 7
+        tf = array.get(tfValues, i)
+
+        [reqClose, reqHigh, reqLow, reqAtr] = request.security(syminfo.tickerid, tf, [close, high, low, ta.atr(atrLen)])
+
+        reqEma    = request.security(syminfo.tickerid, tf, ta.ema(close, emaTrendLen))
+        trendDir  = reqClose > reqEma ? 1 : -1
+        atrRatio  = reqAtr / reqClose * 100
+        strength  = atrRatio > 2.0 ? "High" : atrRatio > 1.0 ? "Medium" : "Low"
+        rangeVal  = (reqHigh - reqLow) < reqAtr * 0.5
+
+        trendClr    = trendDir == 1 ? color.green : color.red
+        strengthClr = strength == "High" ? color.green : strength == "Medium" ? color.orange : color.red
+        rangingClr  = rangeVal ? color.green : color.red
+
+        trendTxt = trendDir == 1 ? "Bull" : "Bear"
+
+        table.cell(dashboard, 0, i + 1, array.get(tfLabels, i), bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+        table.cell(dashboard, 1, i + 1, trendTxt,               bgcolor=trendClr,                   text_color=color.white, text_size=size.tiny)
+        table.cell(dashboard, 2, i + 1, strength,               bgcolor=strengthClr,                text_color=color.white, text_size=size.tiny)
+        table.cell(dashboard, 3, i + 1, rangeVal ? "Yes" : "No",bgcolor=rangingClr,                 text_color=color.white, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(trendBuy,   "Buy Signal",      "Buy signal triggered")
+alertcondition(trendSell,  "Sell Signal",      "Sell signal triggered")
+alertcondition(longTPHit,  "Long TP Hit",      "Long take profit reached")
+alertcondition(shortTPHit, "Short TP Hit",     "Short take profit reached")
