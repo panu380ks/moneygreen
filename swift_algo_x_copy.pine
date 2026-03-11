@@ -135,7 +135,7 @@ finalBuy  = buySignal  or buyFallback
 finalSell = sellSignal or sellFallback
 
 // ============================================================================
-// POSITION TRACKING — HOLD UNTIL TP/SL (NO FLIPPING)
+// POSITION TRACKING — ALLOWS FLIPPING (sell closes long & opens short, etc.)
 // ============================================================================
 var float longTP  = na
 var float longSL  = na
@@ -144,9 +144,9 @@ var float shortSL = na
 var bool  inLong  = false
 var bool  inShort = false
 
-// Only enter when flat (no open position)
-canEnterLong  = finalBuy  and not inLong and not inShort
-canEnterShort = finalSell and not inLong and not inShort
+// Allow entry when flat OR when opposite signal flips the position
+canEnterLong  = finalBuy  and not inLong
+canEnterShort = finalSell and not inShort
 
 // Trailing stop: move SL in favor as price moves
 if useTrailStop and inLong and not na(longSL)
@@ -176,7 +176,19 @@ if shortTPHit or shortSLHit
     shortSL := na
     inShort := false
 
-// Open new positions only when flat
+// Flip: sell signal closes long, then opens short
+if canEnterShort and inLong
+    longTP  := na
+    longSL  := na
+    inLong  := false
+
+// Flip: buy signal closes short, then opens long
+if canEnterLong and inShort
+    shortTP := na
+    shortSL := na
+    inShort := false
+
+// Open new positions (now flat after any flip above)
 if canEnterLong
     inLong  := true
     longTP  := close + atr * tpMultiplier
