@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("Swift Algo X Copy", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
 
 // ============================================================================
@@ -112,21 +112,24 @@ greenCandle = close > open
 redCandle   = close < open
 
 // ============================================================================
-// SIGNAL GENERATION
+// SIGNAL GENERATION — candle color transition triggers
 // ============================================================================
-rawBuy  = direction == 1 and direction[1] == -1
-rawSell = direction == -1 and direction[1] == 1
+// Buy when candle turns green (previous was red/doji, current is green)
+candleTurnedGreen = greenCandle and not greenCandle[1]
+// Sell when candle turns red (previous was green/doji, current is red)
+candleTurnedRed   = redCandle and not redCandle[1]
 
-// Volume confirmation
-volOk = volume >= volThreshold or volume >= ta.sma(volume, 20)
+// Use trailing band direction as confirmation bias, not as gate
+bandBullish = direction == 1
+bandBearish = direction == -1
 
-// Confirmed signals (trend + volume + candle color)
-buySignal  = rawBuy  and htfBullish and volOk and greenCandle
-sellSignal = rawSell and htfBearish and volOk and redCandle
+// Primary signals: candle color turn + band agrees
+buySignal  = candleTurnedGreen and bandBullish
+sellSignal = candleTurnedRed   and bandBearish
 
-// Fallback: raw signals when no HTF confirmation but strong volume
-buyFallback  = rawBuy  and not buySignal  and volume > ta.sma(volume, 20) * 1.5 and greenCandle
-sellFallback = rawSell and not sellSignal and volume > ta.sma(volume, 20) * 1.5 and redCandle
+// Fallback: candle color turn even without band — don't miss signals
+buyFallback  = candleTurnedGreen and not buySignal
+sellFallback = candleTurnedRed   and not sellSignal
 
 finalBuy  = buySignal  or buyFallback
 finalSell = sellSignal or sellFallback
