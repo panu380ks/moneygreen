@@ -1,0 +1,231 @@
+//@version=6
+indicator("MoneyGreen Buy/Sell", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// COPY-PASTE READY — Buy & Sell Signals with TP/SL
+// ============================================================================
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────────
+string GRP1 = "Trend"
+string GRP2 = "Signals"
+string GRP3 = "TP / SL"
+
+htfTF         = input.timeframe("D",   "HTF for Trend",                     group=GRP1)
+emaFastLen    = input.int(9,           "Fast EMA",          minval=3,       group=GRP1)
+emaSlowLen    = input.int(21,          "Slow EMA",          minval=5,       group=GRP1)
+atrLen        = input.int(14,          "ATR Length",         minval=5,       group=GRP1)
+bandMult      = input.float(1.5,       "Band Multiplier",   minval=0.5, step=0.5, group=GRP1)
+
+cooldown      = input.int(5,           "Min Bars Between Signals", minval=1, group=GRP2)
+bodyPct       = input.float(40.0,      "Min Candle Body %",  minval=10, maxval=90, step=5, group=GRP2, tooltip="Reject weak/doji candles")
+consolThresh  = input.float(0.5,       "Consolidation Threshold (x ATR)", minval=0.1, step=0.1, group=GRP2)
+consolBars    = input.int(10,          "Consolidation Lookback", minval=3, group=GRP2)
+rsiLen        = input.int(14,          "RSI Length",         minval=5,       group=GRP2)
+rsiOB         = input.int(75,          "RSI Overbought",     minval=60,     group=GRP2)
+rsiOS         = input.int(25,          "RSI Oversold",       minval=10,     group=GRP2)
+
+tpMult        = input.float(3.0,       "TP (x ATR)",         minval=0.5, step=0.5, group=GRP3)
+slMult        = input.float(1.0,       "SL (x ATR)",         minval=0.5, step=0.5, group=GRP3)
+useTrail      = input.bool(true,       "Trailing Stop",                     group=GRP3)
+trailMult     = input.float(1.5,       "Trail (x ATR)",      minval=0.5, step=0.5, group=GRP3)
+
+// ─── CORE CALCULATIONS ─────────────────────────────────────────────────────
+atr      = ta.atr(atrLen)
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+rsi      = ta.rsi(close, rsiLen)
+
+// Volume pressure
+volUp       = volume * (close > open ? 1.0 : close < open ? 0.0 : 0.5)
+volDown     = volume * (close < open ? 1.0 : close > open ? 0.0 : 0.5)
+cumPress    = math.sum(volUp - volDown, 3)
+pressFast   = ta.ema(cumPress, 3)
+pressSlow   = ta.ema(cumPress, 8)
+pressSpread = pressFast - pressSlow
+pressStdev  = ta.stdev(pressSpread, 20)
+normPress   = pressStdev != 0 ? pressSpread / pressStdev : 0.0
+drift       = normPress * atr * 0.5
+
+// Adaptive trailing bands
+basis      = math.avg(high + drift, low + drift)
+upperBand  = basis + atr * bandMult
+lowerBand  = basis - atr * bandMult
+
+var float trailUpper = na
+var float trailLower = na
+var int   bandDir    = 1
+
+trailUpper := na(trailUpper[1]) ? upperBand : upperBand < trailUpper[1] or close[1] > trailUpper[1] ? upperBand : trailUpper[1]
+trailLower := na(trailLower[1]) ? lowerBand : lowerBand > trailLower[1] or close[1] < trailLower[1] ? lowerBand : trailLower[1]
+bandDir    := na(bandDir[1]) ? 1 : bandDir[1] == -1 and close > trailUpper[1] ? 1 : bandDir[1] == 1 and close < trailLower[1] ? -1 : bandDir[1]
+
+trailLine = bandDir == 1 ? trailLower : trailUpper
+
+// HTF trend
+htfClose   = request.security(syminfo.tickerid, htfTF, close)
+htfEma     = request.security(syminfo.tickerid, htfTF, ta.ema(close, 21))
+htfBull    = htfClose > htfEma
+htfBear    = htfClose < htfEma
+
+// Consolidation
+rangeH = ta.highest(high, consolBars)
+rangeL = ta.lowest(low, consolBars)
+isChop = (rangeH - rangeL) < (atr * consolThresh * consolBars / 3)
+
+// ─── SIGNAL FILTERS ────────────────────────────────────────────────────────
+greenBar    = close > open
+redBar      = close < open
+turned_green = greenBar and not greenBar[1]
+turned_red   = redBar  and not redBar[1]
+
+breakHigh   = close > high[1]
+breakLow    = close < low[1]
+
+candleBody  = math.abs(close - open)
+candleRange = high - low
+strongBody  = candleRange > 0 ? (candleBody / candleRange) * 100 >= bodyPct : false
+
+var int lastBuyBar  = 0
+var int lastSellBar = 0
+
+// ─── BUY / SELL CONDITIONS ─────────────────────────────────────────────────
+buySignal = turned_green and breakHigh
+    and bandDir == 1
+    and htfBull
+    and emaFast > emaSlow
+    and rsi < rsiOB
+    and normPress > 0
+    and volume >= ta.sma(volume, 20) * 0.8
+    and strongBody
+    and not isChop
+    and (bar_index - lastBuyBar > cooldown)
+
+sellSignal = turned_red and breakLow
+    and bandDir == -1
+    and htfBear
+    and emaFast < emaSlow
+    and rsi > rsiOS
+    and normPress < 0
+    and volume >= ta.sma(volume, 20) * 0.8
+    and strongBody
+    and not isChop
+    and (bar_index - lastSellBar > cooldown)
+
+if buySignal
+    lastBuyBar := bar_index
+if sellSignal
+    lastSellBar := bar_index
+
+// ─── POSITION & TP/SL TRACKING ────────────────────────────────────────────
+var bool  inLong  = false,  var bool  inShort = false
+var float longTP  = na,     var float longSL  = na
+var float shortTP = na,     var float shortSL = na
+
+// Trail stop
+if useTrail and inLong and not na(longSL)
+    longSL := math.max(longSL, close - atr * trailMult)
+if useTrail and inShort and not na(shortSL)
+    shortSL := math.min(shortSL, close + atr * trailMult)
+
+// Check TP/SL hits
+longTPHit  = inLong  and not na(longTP)  and high >= longTP
+shortTPHit = inShort and not na(shortTP) and low  <= shortTP
+longSLHit  = inLong  and not na(longSL)  and low  <= longSL
+shortSLHit = inShort and not na(shortSL) and high >= shortSL
+
+// Exit logic
+if longTPHit or longSLHit
+    longTP := na, longSL := na, inLong := false
+if shortTPHit or shortSLHit
+    shortTP := na, shortSL := na, inShort := false
+
+// Flip: close opposite position first
+if sellSignal and inLong
+    longTP := na, longSL := na, inLong := false
+if buySignal and inShort
+    shortTP := na, shortSL := na, inShort := false
+
+// New entries
+canBuy  = buySignal  and not inLong
+canSell = sellSignal and not inShort
+
+if canBuy
+    inLong := true
+    longTP := close + atr * tpMult
+    longSL := close - atr * slMult
+if canSell
+    inShort := true
+    shortTP := close - atr * tpMult
+    shortSL := close + atr * slMult
+
+// ─── PLOTS ─────────────────────────────────────────────────────────────────
+plot(trailLine, "Trail", color=bandDir == 1 ? color.aqua : color.red, linewidth=2)
+plot(emaFast, "EMA Fast", color=color.new(color.yellow, 60), linewidth=1)
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 60), linewidth=1)
+
+plot(inLong  ? longTP  : na, "Long TP",  color=color.new(color.green, 40),  style=plot.style_linebr)
+plot(inLong  ? longSL  : na, "Long SL",  color=color.new(color.red, 40),    style=plot.style_linebr)
+plot(inShort ? shortTP : na, "Short TP", color=color.new(color.purple, 40), style=plot.style_linebr)
+plot(inShort ? shortSL : na, "Short SL", color=color.new(color.red, 40),    style=plot.style_linebr)
+
+// Labels
+if canBuy
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+if canSell
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+if longTPHit
+    label.new(bar_index, high, "TP", style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.tiny)
+if shortTPHit
+    label.new(bar_index, low, "TP", style=label.style_label_up, color=color.purple, textcolor=color.white, size=size.tiny)
+
+bgcolor(canBuy ? color.new(color.green, 90) : canSell ? color.new(color.red, 90) : na)
+
+// ─── BACKTEST STATS ────────────────────────────────────────────────────────
+var int trades = 0, var int wins = 0
+var int tDir = 0, var float entry = na
+
+if longTPHit and tDir == 1
+    trades += 1, wins += 1, tDir := 0, entry := na
+if shortTPHit and tDir == -1
+    trades += 1, wins += 1, tDir := 0, entry := na
+if longSLHit and tDir == 1
+    trades += 1, tDir := 0, entry := na
+if shortSLHit and tDir == -1
+    trades += 1, tDir := 0, entry := na
+if canSell and tDir == 1
+    trades += 1
+    if not na(entry) and close > entry
+        wins += 1
+    tDir := -1, entry := close
+else if canBuy and tDir == -1
+    trades += 1
+    if not na(entry) and close < entry
+        wins += 1
+    tDir := 1, entry := close
+if canBuy and tDir <= 0 and not (canSell and tDir == 1)
+    tDir := 1, entry := close
+if canSell and tDir >= 0 and not (canBuy and tDir == -1)
+    tDir := -1, entry := close
+
+winPct = trades > 0 ? (wins / trades) * 100 : 0.0
+
+if barstate.islast
+    var table t = table.new(position.top_right, 2, 4, border_width=1)
+    table.cell(t, 0, 0, "Trades",  bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 0, str.tostring(trades), bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 1, "Wins",    bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 1, str.tostring(wins),   bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 2, "Win %",   bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(winPct, "#.##") + "%", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 3, "Status",  bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    statusTxt = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    statusClr = inLong ? color.green : inShort ? color.red : color.gray
+    table.cell(t, 1, 3, statusTxt, bgcolor=color.new(statusClr, 40), text_color=color.white, text_size=size.tiny)
+
+// ─── ALERTS ────────────────────────────────────────────────────────────────
+alertcondition(canBuy,      "Buy",       "MoneyGreen BUY  — {{ticker}} @ {{close}}")
+alertcondition(canSell,     "Sell",      "MoneyGreen SELL — {{ticker}} @ {{close}}")
+alertcondition(longTPHit,   "Long TP",   "MoneyGreen Long TP hit")
+alertcondition(shortTPHit,  "Short TP",  "MoneyGreen Short TP hit")
+alertcondition(longSLHit,   "Long SL",   "MoneyGreen Long SL hit")
+alertcondition(shortSLHit,  "Short SL",  "MoneyGreen Short SL hit")
