@@ -1,0 +1,220 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © MoneyGreen
+
+//@version=5
+strategy("MoneyGreen Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, pyramiding=0)
+
+// ─── INPUTS ───────────────────────────────────────────────────────────────────
+grp_trend   = "Trend Detection"
+trendLen    = input.int(20, "Trend Lookback Length", minval=5, group=grp_trend, tooltip="Number of bars to determine swing highs/lows for trend")
+swingLen    = input.int(5, "Swing Detection Length", minval=2, group=grp_trend, tooltip="Pivot length for identifying swing points")
+
+grp_filter  = "Signal Filtering"
+minMoveATR  = input.float(1.5, "Min Move Size (x ATR)", minval=0.5, step=0.1, group=grp_filter, tooltip="Minimum move size as multiple of ATR to qualify as a signal. Higher = fewer signals, only big moves")
+atrLen      = input.int(14, "ATR Length", minval=5, group=grp_filter)
+consolThresh = input.float(0.5, "Consolidation Threshold (x ATR)", minval=0.1, step=0.1, group=grp_filter, tooltip="If price range over lookback is below this x ATR, market is consolidating — no signals")
+consolLookback = input.int(10, "Consolidation Lookback", minval=3, group=grp_filter, tooltip="Number of bars to measure consolidation range")
+cooldownBars = input.int(5, "Min Bars Between Signals", minval=1, group=grp_filter, tooltip="Minimum bars between same-direction signals to avoid clustering")
+
+grp_risk    = "Risk Management"
+useTP       = input.bool(true, "Use Take Profit", group=grp_risk)
+tpATR       = input.float(2.0, "Take Profit (x ATR)", minval=0.5, step=0.1, group=grp_risk, tooltip="Take profit distance as multiple of ATR")
+useSL       = input.bool(true, "Use Stop Loss", group=grp_risk)
+slATR       = input.float(1.0, "Stop Loss (x ATR)", minval=0.5, step=0.1, group=grp_risk, tooltip="Stop loss distance as multiple of ATR")
+useTrail    = input.bool(false, "Use Trailing Stop", group=grp_risk)
+trailATR    = input.float(1.5, "Trailing Stop (x ATR)", minval=0.5, step=0.1, group=grp_risk, tooltip="Trailing stop distance as multiple of ATR")
+exitOnTrendChange = input.bool(true, "Close on Trend Change", group=grp_risk, tooltip="Close position when trend flips against you")
+
+grp_visual  = "Visuals"
+showTrend   = input.bool(true, "Show Trend Background", group=grp_visual)
+showConsol  = input.bool(true, "Show Consolidation Zones", group=grp_visual)
+showSLTP    = input.bool(true, "Show SL/TP Lines", group=grp_visual)
+
+// ─── ATR ──────────────────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+
+// ─── SWING HIGH / LOW DETECTION ───────────────────────────────────────────────
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh  = na
+var float prevSwingHigh  = na
+var float lastSwingLow   = na
+var float prevSwingLow   = na
+
+if not na(swingHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := swingHigh
+
+if not na(swingLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := swingLow
+
+// ─── TREND DETERMINATION ──────────────────────────────────────────────────────
+higherHighs = not na(prevSwingHigh) and lastSwingHigh > prevSwingHigh
+higherLows  = not na(prevSwingLow) and lastSwingLow > prevSwingLow
+lowerHighs  = not na(prevSwingHigh) and lastSwingHigh < prevSwingHigh
+lowerLows   = not na(prevSwingLow) and lastSwingLow < prevSwingLow
+
+var int trendState = 0  // 1 = up, -1 = down, 0 = neutral
+
+if higherHighs and higherLows
+    trendState := 1
+else if lowerHighs and lowerLows
+    trendState := -1
+else if (higherHighs and lowerLows) or (lowerHighs and higherLows)
+    trendState := 0
+
+// ─── CONSOLIDATION DETECTION ──────────────────────────────────────────────────
+rangeHigh = ta.highest(high, consolLookback)
+rangeLow  = ta.lowest(low, consolLookback)
+priceRange = rangeHigh - rangeLow
+isConsolidating = priceRange < (atr * consolThresh * consolLookback / 3)
+
+// ─── MOVE SIZE MEASUREMENT ────────────────────────────────────────────────────
+var float moveStart = close
+var int   moveDir   = 0
+
+currentMove = math.abs(close - moveStart)
+isSignificantMove = currentMove > (atr * minMoveATR)
+
+dirUp   = close > open and close > close[1]
+dirDown = close < open and close < close[1]
+
+if dirUp and moveDir != 1
+    moveStart := low
+    moveDir   := 1
+else if dirDown and moveDir != -1
+    moveStart := high
+    moveDir   := -1
+
+// ─── SIGNAL COOLDOWN ─────────────────────────────────────────────────────────
+var int lastBuyBar  = 0
+var int lastSellBar = 0
+
+buyCooldownOk  = bar_index - lastBuyBar  > cooldownBars
+sellCooldownOk = bar_index - lastSellBar > cooldownBars
+
+// ─── SIGNAL GENERATION ────────────────────────────────────────────────────────
+bullishCandle = close > open and close > high[1] * 0.998
+bearishCandle = close < open and close < low[1] * 1.002
+
+var float recentLow  = low
+var float recentHigh = high
+
+if low < recentLow
+    recentLow := low
+if high > recentHigh
+    recentHigh := high
+
+if trendState == 1 and trendState[1] != 1
+    recentHigh := high
+    recentLow  := low
+if trendState == -1 and trendState[1] != -1
+    recentHigh := high
+    recentLow  := low
+
+pullbackFromHigh = recentHigh - low
+pullbackFromLow  = high - recentLow
+
+buySignal  = trendState == 1 and not isConsolidating and pullbackFromHigh > (atr * minMoveATR) and bullishCandle and buyCooldownOk
+sellSignal = trendState == -1 and not isConsolidating and pullbackFromLow > (atr * minMoveATR) and bearishCandle and sellCooldownOk
+
+if buySignal
+    lastBuyBar := bar_index
+    recentLow  := low
+    recentHigh := high
+
+if sellSignal
+    lastSellBar := bar_index
+    recentLow   := low
+    recentHigh  := high
+
+// ─── STRATEGY ENTRIES & EXITS ─────────────────────────────────────────────────
+// Close opposite position and enter new one
+if buySignal
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Close Short")
+    tpPrice = useTP ? close + atr * tpATR : na
+    slPrice = useSL ? close - atr * slATR : na
+    strategy.entry("Long", strategy.long, comment="Buy")
+    if useTP or useSL
+        strategy.exit("Long Exit", "Long", limit=tpPrice, stop=slPrice, trail_points=useTrail ? atr * trailATR / syminfo.mintick : na, trail_offset=useTrail ? atr * trailATR / syminfo.mintick : na)
+
+if sellSignal
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Close Long")
+    tpPrice = useTP ? close - atr * tpATR : na
+    slPrice = useSL ? close + atr * slATR : na
+    strategy.entry("Short", strategy.short, comment="Sell")
+    if useTP or useSL
+        strategy.exit("Short Exit", "Short", limit=tpPrice, stop=slPrice, trail_points=useTrail ? atr * trailATR / syminfo.mintick : na, trail_offset=useTrail ? atr * trailATR / syminfo.mintick : na)
+
+// Close on trend change
+if exitOnTrendChange
+    if strategy.position_size > 0 and trendState == -1
+        strategy.close("Long", comment="Trend Flip")
+    if strategy.position_size < 0 and trendState == 1
+        strategy.close("Short", comment="Trend Flip")
+
+// ─── PLOTTING ─────────────────────────────────────────────────────────────────
+plotshape(buySignal, title="Buy", text="Buy", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.normal)
+plotshape(sellSignal, title="Sell", text="Sell", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+
+// Trend background
+trendColor = showTrend ? (trendState == 1 ? color.new(color.green, 92) : trendState == -1 ? color.new(color.red, 92) : na) : na
+bgcolor(trendColor, title="Trend Background")
+
+// Consolidation background
+consolColor = showConsol and isConsolidating ? color.new(color.yellow, 90) : na
+bgcolor(consolColor, title="Consolidation Zone")
+
+// SL/TP lines on active position
+var line slLine = na
+var line tpLine = na
+
+if showSLTP and barstate.islast
+    if strategy.position_size > 0
+        entryPrice = strategy.position_avg_price
+        line.delete(slLine)
+        line.delete(tpLine)
+        if useSL
+            slLine := line.new(bar_index - 10, entryPrice - atr * slATR, bar_index + 10, entryPrice - atr * slATR, color=color.red, style=line.style_dashed, width=1)
+        if useTP
+            tpLine := line.new(bar_index - 10, entryPrice + atr * tpATR, bar_index + 10, entryPrice + atr * tpATR, color=color.green, style=line.style_dashed, width=1)
+    else if strategy.position_size < 0
+        entryPrice = strategy.position_avg_price
+        line.delete(slLine)
+        line.delete(tpLine)
+        if useSL
+            slLine := line.new(bar_index - 10, entryPrice + atr * slATR, bar_index + 10, entryPrice + atr * slATR, color=color.red, style=line.style_dashed, width=1)
+        if useTP
+            tpLine := line.new(bar_index - 10, entryPrice - atr * tpATR, bar_index + 10, entryPrice - atr * tpATR, color=color.green, style=line.style_dashed, width=1)
+    else
+        line.delete(slLine)
+        line.delete(tpLine)
+
+// ─── INFO TABLE ───────────────────────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    trendText  = trendState == 1 ? "UPTREND" : trendState == -1 ? "DOWNTREND" : "NEUTRAL"
+    trendClr   = trendState == 1 ? color.green : trendState == -1 ? color.red : color.yellow
+    consolText = isConsolidating ? "YES — NO SIGNALS" : "NO"
+    consolClr  = isConsolidating ? color.yellow : color.green
+    posText    = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posClr     = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+
+    table.cell(infoTable, 0, 0, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, trendText, text_color=trendClr, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Consolidating", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, consolText, text_color=consolClr, text_size=size.small)
+    table.cell(infoTable, 0, 2, "Position", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, posText, text_color=posClr, text_size=size.small)
+    table.cell(infoTable, 0, 3, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(atr, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 4, "Min Move", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(atr * minMoveATR, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 5, "Net P&L", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.green : color.red, text_size=size.small)
