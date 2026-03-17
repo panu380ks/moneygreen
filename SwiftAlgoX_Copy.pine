@@ -36,19 +36,23 @@ startHour      = input.int(8,       "Start Hour (0-23)",        minval=0, maxval
 startMinute    = input.int(30,      "Start Minute (0-59)",      minval=0, maxval=59, group=GRP_TIME)
 timeZone       = input.string("America/New_York", "Time Zone",  group=GRP_TIME, options=["America/New_York","America/Chicago","America/Denver","America/Los_Angeles","UTC","Europe/London","Europe/Berlin","Asia/Tokyo","Asia/Hong_Kong","Asia/Kolkata"])
 // Signal Quality Filters
-useHTFFilter   = input.bool(true,  "Require HTF Trend Alignment",  group=GRP_FILTER, tooltip="Only buy when daily trend is bullish, only sell when bearish")
-useVolFilter   = input.bool(true,  "Require Volume Confirmation",  group=GRP_FILTER, tooltip="Signal bar volume must be above average")
-volAvgLen      = input.int(20,     "Volume Average Length",         minval=5,  group=GRP_FILTER)
-volMultReq     = input.float(1.0,  "Min Volume Multiple",          minval=0.5, step=0.1, group=GRP_FILTER, tooltip="Signal bar volume must be >= this x average volume")
-useRSIFilter   = input.bool(true,  "Use RSI Confirmation",         group=GRP_FILTER, tooltip="Avoid buying overbought / selling oversold")
-rsiLen         = input.int(14,     "RSI Length",                    minval=5,  group=GRP_FILTER)
-rsiOB          = input.int(70,     "RSI Overbought",               minval=60, maxval=90, group=GRP_FILTER)
-rsiOS          = input.int(30,     "RSI Oversold",                  minval=10, maxval=40, group=GRP_FILTER)
-useConsolFilter = input.bool(true, "Skip Consolidation Signals",   group=GRP_FILTER, tooltip="No signals when price is in a tight range")
-consolATR      = input.float(0.5,  "Consolidation Threshold (x ATR)", minval=0.1, step=0.1, group=GRP_FILTER)
-consolBars     = input.int(10,     "Consolidation Lookback Bars",  minval=3, group=GRP_FILTER)
-cooldownBars   = input.int(3,      "Min Bars Between Signals",     minval=1, group=GRP_FILTER, tooltip="Prevent rapid signal clustering")
-candleBodyPct  = input.float(40.0, "Min Candle Body % of Range",   minval=10.0, maxval=90.0, step=5.0, group=GRP_FILTER, tooltip="Reject weak doji-like candles. Higher = require more conviction")
+useHTFFilter    = input.bool(true,  "Require HTF Trend Alignment",    group=GRP_FILTER, tooltip="Only buy when daily trend is bullish, only sell when bearish")
+useEMAFilter    = input.bool(true,  "Require EMA Trend Confirmation", group=GRP_FILTER, tooltip="Buy only above EMA, sell only below EMA")
+emaFastLen      = input.int(9,      "Fast EMA Length",                minval=3,  group=GRP_FILTER)
+emaSlowLen      = input.int(21,     "Slow EMA Length",                minval=5,  group=GRP_FILTER)
+useVolFilter    = input.bool(true,  "Require Volume Confirmation",    group=GRP_FILTER, tooltip="Signal bar volume must be above average")
+volAvgLen       = input.int(20,     "Volume Average Length",          minval=5,  group=GRP_FILTER)
+volMultReq      = input.float(0.8,  "Min Volume Multiple",           minval=0.5, step=0.1, group=GRP_FILTER, tooltip="Signal bar volume must be >= this x average volume")
+usePressFilter  = input.bool(true,  "Require Volume Pressure Agree", group=GRP_FILTER, tooltip="Volume drift pressure must agree with signal direction")
+useRSIFilter    = input.bool(true,  "Use RSI Confirmation",          group=GRP_FILTER, tooltip="Avoid buying overbought / selling oversold")
+rsiLen          = input.int(14,     "RSI Length",                     minval=5,  group=GRP_FILTER)
+rsiOB           = input.int(75,     "RSI Overbought",                minval=60, maxval=90, group=GRP_FILTER)
+rsiOS           = input.int(25,     "RSI Oversold",                  minval=10, maxval=40, group=GRP_FILTER)
+useConsolFilter = input.bool(true,  "Skip Consolidation Signals",    group=GRP_FILTER, tooltip="No signals when price is in a tight range")
+consolATR       = input.float(0.5,  "Consolidation Threshold (x ATR)", minval=0.1, step=0.1, group=GRP_FILTER)
+consolBars      = input.int(10,     "Consolidation Lookback Bars",   minval=3, group=GRP_FILTER)
+cooldownBars    = input.int(5,      "Min Bars Between Signals",      minval=1, group=GRP_FILTER, tooltip="Prevent rapid signal clustering")
+candleBodyPct   = input.float(40.0, "Min Candle Body % of Range",    minval=10.0, maxval=90.0, step=5.0, group=GRP_FILTER, tooltip="Reject doji candles. Higher = require more conviction")
 // Dashboard
 showDashboard  = input.bool(true, "Show Trend Dashboard", group=GRP_DASH)
 showBacktest   = input.bool(true, "Show Backtest Panel",  group=GRP_DASH)
@@ -99,12 +103,19 @@ trailLower := na(trailLower[1]) ? lowerBand : lowerBand > trailLower[1] or close
 direction := na(direction[1]) ? 1 : direction[1] == -1 and close > trailUpper[1] ? 1 : direction[1] == 1 and close < trailLower[1] ? -1 : direction[1]
 trailLine = direction == 1 ? trailLower : trailUpper
 // ============================================================================
-// HIGHER-TIMEFRAME TREND FILTER (now actually used!)
+// HIGHER-TIMEFRAME TREND FILTER
 // ============================================================================
 htfClose    = request.security(syminfo.tickerid, sensitivity, close)
 htfEma      = request.security(syminfo.tickerid, sensitivity, ta.ema(close, 21))
 htfBullish  = htfClose > htfEma
 htfBearish  = htfClose < htfEma
+// ============================================================================
+// EMA TREND CONFIRMATION (current timeframe)
+// ============================================================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaBullish = emaFast > emaSlow
+emaBearish = emaFast < emaSlow
 // ============================================================================
 // RSI
 // ============================================================================
@@ -114,6 +125,11 @@ rsi = ta.rsi(close, rsiLen)
 // ============================================================================
 volAvg      = ta.sma(volume, volAvgLen)
 volConfirm  = not useVolFilter or (volume >= volAvg * volMultReq)
+// ============================================================================
+// VOLUME PRESSURE DIRECTION
+// ============================================================================
+pressureBullish = not usePressFilter or (normPressure > 0)
+pressureBearish = not usePressFilter or (normPressure < 0)
 // ============================================================================
 // CONSOLIDATION DETECTION
 // ============================================================================
@@ -138,12 +154,18 @@ strongCandle = bodyRatio >= candleBodyPct
 // ============================================================================
 // SIGNAL GENERATION — MULTI-CONFIRMATION
 // ============================================================================
-// Base trigger: candle color transition (same as before)
 greenCandle = close > open
 redCandle   = close < open
+
+// Candle color transition (base trigger)
 candleTurnedGreen = greenCandle and not greenCandle[1]
 candleTurnedRed   = redCandle and not redCandle[1]
-// Band direction confirmation (required — no more fallback signals)
+
+// Stronger candle confirmation: close must break previous bar's range
+buyBreakout  = close > high[1]
+sellBreakout = close < low[1]
+
+// Band direction (required — no fallback)
 bandBullish = direction == 1
 bandBearish = direction == -1
 
@@ -151,13 +173,17 @@ bandBearish = direction == -1
 htfBuyOk  = not useHTFFilter or htfBullish
 htfSellOk = not useHTFFilter or htfBearish
 
-// RSI confirmation: don't buy overbought, don't sell oversold
+// EMA trend alignment (current TF)
+emaBuyOk  = not useEMAFilter or emaBullish
+emaSellOk = not useEMAFilter or emaBearish
+
+// RSI: don't buy overbought, don't sell oversold
 rsiBuyOk  = not useRSIFilter or (rsi < rsiOB)
 rsiSellOk = not useRSIFilter or (rsi > rsiOS)
 
-// Combined signal: all filters must agree
-finalBuy  = candleTurnedGreen and bandBullish  and htfBuyOk  and rsiBuyOk  and volConfirm and strongCandle and not isConsolidating and buyCooldownOk  and isTradingTime
-finalSell = candleTurnedRed   and bandBearish  and htfSellOk and rsiSellOk and volConfirm and strongCandle and not isConsolidating and sellCooldownOk and isTradingTime
+// Combined signal: ALL filters must agree for a signal to fire
+finalBuy  = candleTurnedGreen and buyBreakout  and bandBullish and htfBuyOk  and emaBuyOk  and rsiBuyOk  and volConfirm and pressureBullish and strongCandle and not isConsolidating and buyCooldownOk  and isTradingTime
+finalSell = candleTurnedRed   and sellBreakout and bandBearish and htfSellOk and emaSellOk and rsiSellOk and volConfirm and pressureBearish and strongCandle and not isConsolidating and sellCooldownOk and isTradingTime
 
 // Update cooldown on signal fire
 if finalBuy
@@ -220,6 +246,9 @@ plot(showSL and inLong  ? longSL  : na, "Long SL",  color=color.new(color.red, 4
 plot(showSL and inShort ? shortSL : na, "Short SL", color=color.new(color.red, 40),    style=plot.style_linebr, linewidth=1)
 plot(showTP and inLong  ? longTP  : na, "Long TP",  color=color.new(color.green, 40),  style=plot.style_linebr, linewidth=1)
 plot(showTP and inShort ? shortTP : na, "Short TP", color=color.new(color.purple, 40), style=plot.style_linebr, linewidth=1)
+// EMA lines for visual confirmation
+plot(useEMAFilter ? emaFast : na, "Fast EMA", color=color.new(color.yellow, 50), linewidth=1)
+plot(useEMAFilter ? emaSlow : na, "Slow EMA", color=color.new(color.orange, 50), linewidth=1)
 if showBuy and canEnterLong
     label.new(bar_index, low, "Buy", style=label.style_label_up, color=color.green, textcolor=color.white, size=lblSize)
 if showSell and canEnterShort
