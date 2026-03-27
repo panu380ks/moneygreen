@@ -1,6 +1,7 @@
 //@version=6
 indicator("MoneyGreen x Ray Algo", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=300)
-
+// ============================================================================
+// COPY-PASTE READY — Trend Reversal Buy/Sell with Band Cloud
 // ============================================================================
 // INPUTS
 // ============================================================================
@@ -10,7 +11,6 @@ string GRP_TP     = "Take Profit / Stop Loss"
 string GRP_FILTER = "Filters"
 string GRP_VISUAL = "Visuals"
 string GRP_DASH   = "Dashboard"
-
 // Market Structure
 swingLen       = input.int(5,     "Swing Pivot Length",           minval=2, maxval=20,  group=GRP_STRUCT, tooltip="Pivot detection for HH/HL/LH/LL. Higher = fewer pivots, bigger swings")
 confirmBars    = input.int(2,     "CHOCH Confirmation Bars",      minval=1, maxval=5,   group=GRP_STRUCT, tooltip="Bars price must hold beyond structure break to confirm CHOCH")
@@ -20,41 +20,30 @@ showBOS        = input.bool(true, "Show BOS Labels",                            
 showCHOCH      = input.bool(true, "Show CHOCH Labels",                                   group=GRP_STRUCT)
 showOB         = input.bool(true, "Show Order Blocks",                                   group=GRP_STRUCT)
 showReversal   = input.bool(true, "Show Trend Reversal Labels",                          group=GRP_STRUCT)
-
 // Volume Drift Bands
 atrLength      = input.int(14,    "ATR Length",                   minval=1,              group=GRP_BANDS)
 bandMult       = input.float(1.5, "Band Multiplier",             minval=0.5, step=0.5,  group=GRP_BANDS)
 volDriftLen    = input.int(3,     "Volume Drift Length",          minval=1,              group=GRP_BANDS)
-
+showBands      = input.bool(true, "Show Band Cloud",                                     group=GRP_BANDS)
+bandTransp     = input.int(85,    "Band Cloud Transparency",     minval=50, maxval=95,  group=GRP_BANDS)
 // TP / SL
 tpMultiplier   = input.float(3.0, "TP ATR Multiplier",           minval=0.5, step=0.5,  group=GRP_TP)
 slMultiplier   = input.float(1.0, "SL ATR Multiplier",           minval=0.5, step=0.5,  group=GRP_TP)
 useTrailStop   = input.bool(true, "Use Trailing Stop",                                   group=GRP_TP, tooltip="Trail stop loss as trade moves in your favor")
 trailATRMult   = input.float(1.5, "Trail ATR Multiplier",        minval=0.5, step=0.5,  group=GRP_TP)
-
 // Filters
 htfTF          = input.timeframe("D", "HTF for Trend",                                   group=GRP_FILTER)
-useHTFFilter   = input.bool(true, "Require HTF Trend Alignment",                         group=GRP_FILTER)
-useVolFilter   = input.bool(true, "Require Volume Confirmation",                         group=GRP_FILTER)
-volAvgLen      = input.int(20,    "Volume Average Length",        minval=5,              group=GRP_FILTER)
-volMultReq     = input.float(0.8, "Min Volume Multiple",         minval=0.3, step=0.1,  group=GRP_FILTER)
-usePressFilter = input.bool(true, "Require Volume Pressure Agree",                       group=GRP_FILTER)
-useConsolFilter = input.bool(true, "Skip Consolidation",                                 group=GRP_FILTER)
-consolATR      = input.float(0.5, "Consolidation Threshold (x ATR)", minval=0.1, step=0.1, group=GRP_FILTER)
-consolBars     = input.int(10,    "Consolidation Lookback",       minval=3,              group=GRP_FILTER)
+useHTFFilter   = input.bool(false, "Require HTF Trend Alignment",                        group=GRP_FILTER)
 cooldownBars   = input.int(3,     "Min Bars Between Signals",     minval=1,              group=GRP_FILTER)
-
 // Visuals
 showTP         = input.bool(true, "Show TP/SL Lines",                                    group=GRP_VISUAL)
 showEMA        = input.bool(true, "Show EMA Lines",                                      group=GRP_VISUAL)
 emaFastLen     = input.int(9,     "Fast EMA",                     minval=3,              group=GRP_VISUAL)
 emaSlowLen     = input.int(21,    "Slow EMA",                     minval=5,              group=GRP_VISUAL)
 labelSize      = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=GRP_VISUAL)
-
 // Dashboard
 showDashboard  = input.bool(true, "Show Ray Algo Dashboard",                             group=GRP_DASH)
 showBacktest   = input.bool(true, "Show Backtest Panel",                                 group=GRP_DASH)
-
 // ============================================================================
 // LABEL SIZE HELPER
 // ============================================================================
@@ -63,15 +52,12 @@ lblSize = switch labelSize
     "Small"  => size.small
     "Normal" => size.normal
     "Large"  => size.large
-
 // ============================================================================
 // CORE CALCULATIONS
 // ============================================================================
 atr     = ta.atr(atrLength)
 emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
-volAvg  = ta.sma(volume, volAvgLen)
-
 // ============================================================================
 // VOLUME DRIFT MODEL
 // ============================================================================
@@ -85,9 +71,8 @@ pressSpread  = pressEmaFast - pressEmaSlow
 pressStdev   = ta.stdev(pressSpread, 20)
 normPressure = pressStdev != 0 ? pressSpread / pressStdev : 0.0
 drift        = normPressure * atr * 0.5
-
 // ============================================================================
-// ADAPTIVE TRAILING BANDS (MoneyGreen core)
+// ADAPTIVE TRAILING BANDS + CLOUD
 // ============================================================================
 projHigh   = high + drift
 projLow    = low + drift
@@ -95,17 +80,20 @@ basis      = math.avg(projHigh, projLow)
 bandOffset = atr * bandMult
 upperBand  = basis + bandOffset
 lowerBand  = basis - bandOffset
-
 var float trailUpper = na
 var float trailLower = na
 var int   bandDir    = 1
-
 trailUpper := na(trailUpper[1]) ? upperBand : upperBand < trailUpper[1] or close[1] > trailUpper[1] ? upperBand : trailUpper[1]
 trailLower := na(trailLower[1]) ? lowerBand : lowerBand > trailLower[1] or close[1] < trailLower[1] ? lowerBand : trailLower[1]
 bandDir    := na(bandDir[1]) ? 1 : bandDir[1] == -1 and close > trailUpper[1] ? 1 : bandDir[1] == 1 and close < trailLower[1] ? -1 : bandDir[1]
-
 trailLine = bandDir == 1 ? trailLower : trailUpper
-
+// Band cloud plots
+p_upper = plot(showBands ? trailUpper : na, "Upper Band", color=color.new(color.red, 70), linewidth=1)
+p_lower = plot(showBands ? trailLower : na, "Lower Band", color=color.new(color.aqua, 70), linewidth=1)
+p_basis = plot(showBands ? basis : na, "Basis", color=color.new(color.gray, 80), linewidth=1, style=plot.style_circles)
+bullCloud = color.new(color.aqua, bandTransp)
+bearCloud = color.new(color.red, bandTransp)
+fill(p_upper, p_lower, color=bandDir == 1 ? bullCloud : bearCloud, title="Band Cloud")
 // ============================================================================
 // HTF TREND
 // ============================================================================
@@ -113,53 +101,37 @@ htfClose   = request.security(syminfo.tickerid, htfTF, close)
 htfEma     = request.security(syminfo.tickerid, htfTF, ta.ema(close, 21))
 htfBullish = htfClose > htfEma
 htfBearish = htfClose < htfEma
-
 // ============================================================================
 // MARKET STRUCTURE ENGINE (Ray Algo Style)
 // ============================================================================
-// Detect swing pivots
 swingHi = ta.pivothigh(high, swingLen, swingLen)
 swingLo = ta.pivotlow(low, swingLen, swingLen)
-
-// Track last two swing highs and lows
 var float lastSH  = na
 var float prevSH  = na
 var int   lastSHBar = 0
 var float lastSL  = na
 var float prevSL  = na
 var int   lastSLBar = 0
-
-// Market structure state: 1 = bullish, -1 = bearish, 0 = ranging
 var int structureState = 0
 var int prevStructureState = 0
-
-// Track structure breaks
 var bool bosUp   = false
 var bool bosDown = false
 var bool chochUp   = false
 var bool chochDown = false
 var bool trendReversalBull = false
 var bool trendReversalBear = false
-
-// Swing high detected (offset by swingLen bars)
 if not na(swingHi)
     prevSH    := lastSH
     lastSH    := swingHi
     lastSHBar := bar_index - swingLen
-
-// Swing low detected (offset by swingLen bars)
 if not na(swingLo)
     prevSL    := lastSL
     lastSL    := swingLo
     lastSLBar := bar_index - swingLen
-
-// Classify swing points: HH, HL, LH, LL
 isHH = not na(swingHi) and not na(prevSH) and lastSH > prevSH
 isLH = not na(swingHi) and not na(prevSH) and lastSH < prevSH
 isHL = not na(swingLo) and not na(prevSL) and lastSL > prevSL
 isLL = not na(swingLo) and not na(prevSL) and lastSL < prevSL
-
-// Plot structure labels
 if showStructure and isHH
     label.new(bar_index - swingLen, high[swingLen], "[HH]", style=label.style_none, textcolor=color.green, size=size.tiny)
 if showStructure and isLH
@@ -168,46 +140,27 @@ if showStructure and isHL
     label.new(bar_index - swingLen, low[swingLen], "[HL]", style=label.style_none, textcolor=color.green, size=size.tiny)
 if showStructure and isLL
     label.new(bar_index - swingLen, low[swingLen], "[LL]", style=label.style_none, textcolor=color.red, size=size.tiny)
-
 // ============================================================================
 // BOS & CHOCH DETECTION
 // ============================================================================
-// BOS (Break of Structure) = continuation break
-//   In bullish structure: price breaks above last swing high = BOS up (continuation)
-//   In bearish structure: price breaks below last swing low = BOS down (continuation)
-// CHOCH (Change of Character) = reversal break
-//   In bearish structure: price breaks above last swing high = CHOCH up (potential reversal)
-//   In bullish structure: price breaks below last swing low = CHOCH down (potential reversal)
-
-// Reset signals each bar
 bosUp   := false
 bosDown := false
 chochUp   := false
 chochDown := false
 trendReversalBull := false
 trendReversalBear := false
-
-// Check for breaks of structure
-brokeAboveSH = not na(lastSH) and close > lastSH and close[1] <= lastSH
-brokeBelowSL = not na(lastSL) and close < lastSL and close[1] >= lastSL
-
-// Confirmation: price held beyond level for N bars
 var int barsAboveSH = 0
 var int barsBelowSL = 0
-
 if not na(lastSH) and close > lastSH
     barsAboveSH += 1
 else
     barsAboveSH := 0
-
 if not na(lastSL) and close < lastSL
     barsBelowSL += 1
 else
     barsBelowSL := 0
-
 confirmedBreakUp   = barsAboveSH == confirmBars
 confirmedBreakDown = barsBelowSL == confirmBars
-
 if confirmedBreakUp
     if structureState == 1 or structureState == 0
         bosUp := true
@@ -216,7 +169,6 @@ if confirmedBreakUp
         prevStructureState := structureState
         structureState := 1
         trendReversalBull := true
-
 if confirmedBreakDown
     if structureState == -1 or structureState == 0
         bosDown := true
@@ -225,15 +177,12 @@ if confirmedBreakDown
         prevStructureState := structureState
         structureState := -1
         trendReversalBear := true
-
-// Update structure state from swing analysis too
 if isHH and isHL and structureState != 1
     prevStructureState := structureState
     structureState := 1
 if isLH and isLL and structureState != -1
     prevStructureState := structureState
     structureState := -1
-
 // ============================================================================
 // BOS / CHOCH / REVERSAL LABELS
 // ============================================================================
@@ -241,26 +190,21 @@ if showBOS and bosUp
     label.new(bar_index, low, "BOS", style=label.style_label_up, color=color.new(color.green, 40), textcolor=color.white, size=size.tiny)
 if showBOS and bosDown
     label.new(bar_index, high, "BOS", style=label.style_label_down, color=color.new(color.red, 40), textcolor=color.white, size=size.tiny)
-
 if showCHOCH and chochUp
     label.new(bar_index, low, "CHOCH", style=label.style_label_up, color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
 if showCHOCH and chochDown
     label.new(bar_index, high, "CHOCH", style=label.style_label_down, color=color.new(color.orange, 20), textcolor=color.white, size=size.tiny)
-
 if showReversal and trendReversalBull
     label.new(bar_index, low, "Trend\nReversal", style=label.style_label_up, color=color.green, textcolor=color.white, size=lblSize)
     line.new(bar_index, low - atr * 2, bar_index, high + atr * 2, color=color.new(color.green, 50), style=line.style_dashed, width=1)
-
 if showReversal and trendReversalBear
     label.new(bar_index, high, "Trend\nReversal", style=label.style_label_down, color=color.red, textcolor=color.white, size=lblSize)
     line.new(bar_index, low - atr * 2, bar_index, high + atr * 2, color=color.new(color.red, 50), style=line.style_dashed, width=1)
-
 // ============================================================================
 // ORDER BLOCK DETECTION
 // ============================================================================
 var box bullOB = na
 var box bearOB = na
-
 if showOB and trendReversalBull
     obTop = high
     obBot = low
@@ -270,7 +214,6 @@ if showOB and trendReversalBull
             obBot := low[i]
             break
     bullOB := box.new(bar_index - obLookback, obTop, bar_index + 20, obBot, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
-
 if showOB and trendReversalBear
     obTop = high
     obBot = low
@@ -280,52 +223,26 @@ if showOB and trendReversalBear
             obBot := low[i]
             break
     bearOB := box.new(bar_index - obLookback, obTop, bar_index + 20, obBot, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
-    if showOB and not na(bearOB)
+    if not na(bearOB)
         label.new(bar_index, obTop, "BEAR OB++\n" + str.tostring(volume, "#.##"), style=label.style_none, textcolor=color.new(color.red, 30), size=size.tiny)
-
 // ============================================================================
-// FILTERS
+// SIGNAL GENERATION — REVERSAL ONLY
 // ============================================================================
-htfBuyOk       = not useHTFFilter or htfBullish
-htfSellOk      = not useHTFFilter or htfBearish
-volConfirm     = not useVolFilter or (volume >= volAvg * volMultReq)
-pressureBull   = not usePressFilter or (normPressure > 0)
-pressureBear   = not usePressFilter or (normPressure < 0)
-rangeHigh      = ta.highest(high, consolBars)
-rangeLow       = ta.lowest(low, consolBars)
-isConsolidating = useConsolFilter and ((rangeHigh - rangeLow) < atr * consolATR * consolBars / 3)
-
+// RULE: Only buy when trend reverses from SELL (bear→bull)
+//       Only sell when trend reverses from BUY (bull→bear)
+// No continuation signals. No extra filters. Pure reversal.
 var int lastBuyBar  = 0
 var int lastSellBar = 0
 buyCooldownOk  = bar_index - lastBuyBar > cooldownBars
 sellCooldownOk = bar_index - lastSellBar > cooldownBars
-
-// ============================================================================
-// SIGNAL GENERATION — TREND REVERSAL IS THE PRIMARY TRIGGER
-// ============================================================================
-// BUY: Ray Algo detects trend reversal to bullish (was selling, now structure flipped)
-// SELL: Ray Algo detects trend reversal to bearish (was buying, now structure flipped)
-// Secondary: Band direction flip as continuation signal within established trend
-
-// Primary signals: Trend Reversal (CHOCH confirmed)
-reversalBuy  = trendReversalBull and htfBuyOk and volConfirm and pressureBull and not isConsolidating and buyCooldownOk
-reversalSell = trendReversalBear and htfSellOk and volConfirm and pressureBear and not isConsolidating and sellCooldownOk
-
-// Secondary signals: Band flip within confirmed trend direction (continuation entries)
-bandFlipBull = bandDir == 1 and bandDir[1] == -1
-bandFlipBear = bandDir == -1 and bandDir[1] == 1
-contBuy  = bandFlipBull and structureState == 1 and htfBuyOk and volConfirm and pressureBull and not isConsolidating and buyCooldownOk and not trendReversalBull
-contSell = bandFlipBear and structureState == -1 and htfSellOk and volConfirm and pressureBear and not isConsolidating and sellCooldownOk and not trendReversalBear
-
-// Combined
-finalBuy  = reversalBuy or contBuy
-finalSell = reversalSell or contSell
-
+htfBuyOk  = not useHTFFilter or htfBullish
+htfSellOk = not useHTFFilter or htfBearish
+finalBuy  = trendReversalBull and htfBuyOk and buyCooldownOk
+finalSell = trendReversalBear and htfSellOk and sellCooldownOk
 if finalBuy
     lastBuyBar := bar_index
 if finalSell
     lastSellBar := bar_index
-
 // ============================================================================
 // POSITION & TP/SL MANAGEMENT
 // ============================================================================
@@ -335,145 +252,99 @@ var float shortTP = na
 var float shortSL = na
 var bool  inLong  = false
 var bool  inShort = false
-
 canEnterLong  = finalBuy and not inLong
 canEnterShort = finalSell and not inShort
-
-// Trailing stop
 if useTrailStop and inLong and not na(longSL)
     newSL = close - atr * trailATRMult
     if newSL > longSL
         longSL := newSL
-
 if useTrailStop and inShort and not na(shortSL)
     newSL = close + atr * trailATRMult
     if newSL < shortSL
         shortSL := newSL
-
-// Check TP/SL hits
 longTPHit  = inLong and not na(longTP) and high >= longTP
 shortTPHit = inShort and not na(shortTP) and low <= shortTP
 longSLHit  = inLong and not na(longSL) and low <= longSL
 shortSLHit = inShort and not na(shortSL) and high >= shortSL
-
-// Exit on TP/SL
 if longTPHit or longSLHit
     longTP := na
     longSL := na
     inLong := false
-
 if shortTPHit or shortSLHit
     shortTP := na
     shortSL := na
     inShort := false
-
-// Flip: close opposite on reversal
 if canEnterShort and inLong
     longTP := na
     longSL := na
     inLong := false
-
 if canEnterLong and inShort
     shortTP := na
     shortSL := na
     inShort := false
-
-// New entries
 if canEnterLong
     inLong := true
     longTP := close + atr * tpMultiplier
     longSL := close - atr * slMultiplier
-
 if canEnterShort
     inShort := true
     shortTP := close - atr * tpMultiplier
     shortSL := close + atr * slMultiplier
-
 // ============================================================================
 // PLOTTING
 // ============================================================================
 trailColor = bandDir == 1 ? color.new(color.aqua, 0) : color.new(color.red, 0)
 plot(trailLine, "Trailing Band", color=trailColor, linewidth=2)
-
 plot(showEMA ? emaFast : na, "Fast EMA", color=color.new(color.fuchsia, 30), linewidth=1)
 plot(showEMA ? emaSlow : na, "Slow EMA", color=color.new(color.fuchsia, 60), linewidth=1)
-
 plot(showTP and inLong ? longTP : na, "Long TP", color=color.new(color.green, 40), style=plot.style_linebr, linewidth=1)
 plot(showTP and inLong ? longSL : na, "Long SL", color=color.new(color.red, 40), style=plot.style_linebr, linewidth=1)
 plot(showTP and inShort ? shortTP : na, "Short TP", color=color.new(color.purple, 40), style=plot.style_linebr, linewidth=1)
 plot(showTP and inShort ? shortSL : na, "Short SL", color=color.new(color.red, 40), style=plot.style_linebr, linewidth=1)
-
-// Entry labels
 if canEnterLong
-    lbl = reversalBuy ? "Buy" : "Buy"
-    label.new(bar_index, low, lbl, style=label.style_label_up, color=color.green, textcolor=color.white, size=lblSize)
-
+    label.new(bar_index, low, "Buy", style=label.style_label_up, color=color.green, textcolor=color.white, size=lblSize)
 if canEnterShort
-    lbl = reversalSell ? "Sell" : "Sell"
-    label.new(bar_index, high, lbl, style=label.style_label_down, color=color.red, textcolor=color.white, size=lblSize)
-
-// TP hit labels
+    label.new(bar_index, high, "Sell", style=label.style_label_down, color=color.red, textcolor=color.white, size=lblSize)
 if longTPHit
     label.new(bar_index, high, "Long TP", style=label.style_label_down, color=color.new(color.blue, 20), textcolor=color.white, size=size.tiny)
 if shortTPHit
     label.new(bar_index, low, "Short TP", style=label.style_label_up, color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny)
-
-// Background flash on entries
 bgcolor(canEnterLong ? color.new(color.green, 88) : canEnterShort ? color.new(color.red, 88) : na)
-
-// Trend background
 trendBG = structureState == 1 ? color.new(color.green, 95) : structureState == -1 ? color.new(color.red, 95) : na
 bgcolor(trendBG, title="Structure Trend")
-
 // ============================================================================
 // RAY ALGO DASHBOARD (bottom-right)
 // ============================================================================
 trendAge = ta.barssince(structureState != structureState[1])
 atrRatio = atr / close * 100
 volStrength = atrRatio > 2.0 ? "High" : atrRatio > 1.0 ? "Medium" : "Low"
-
 if showDashboard and barstate.islast
     var table rayDash = table.new(position.bottom_right, 2, 8, border_width=1)
     table.cell(rayDash, 0, 0, "RAY ALGO", bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 0, "DASHBOARD", bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
-
-    // H1 Trend
     h1Txt = structureState == 1 ? "BULL" : structureState == -1 ? "BEAR" : "RANGE"
     h1Clr = structureState == 1 ? color.new(color.green, 30) : structureState == -1 ? color.new(color.red, 30) : color.new(color.yellow, 30)
     table.cell(rayDash, 0, 1, "H1 TREND", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 1, h1Txt, bgcolor=h1Clr, text_color=color.white, text_size=size.tiny)
-
-    // Strength
     strClr = volStrength == "High" ? color.new(color.green, 30) : volStrength == "Medium" ? color.new(color.orange, 30) : color.new(color.red, 30)
     table.cell(rayDash, 0, 2, "STRENGTH", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 2, volStrength, bgcolor=strClr, text_color=color.white, text_size=size.tiny)
-
-    // Trend Age
     table.cell(rayDash, 0, 3, "TREND AGE", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 3, str.tostring(trendAge) + " bars", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
-
-    // Volatility
     table.cell(rayDash, 0, 4, "VOLATILITY", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 4, str.tostring(atrRatio, "#.##") + "%", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
-
-    // Band Direction
     bandTxt = bandDir == 1 ? "BULLISH" : "BEARISH"
     bandClr = bandDir == 1 ? color.new(color.aqua, 30) : color.new(color.red, 30)
     table.cell(rayDash, 0, 5, "BAND DIR", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 5, bandTxt, bgcolor=bandClr, text_color=color.white, text_size=size.tiny)
-
-    // Volume Pressure
     pressTxt = normPressure > 1 ? "Strong Buy" : normPressure > 0 ? "Buy" : normPressure < -1 ? "Strong Sell" : "Sell"
     pressClr = normPressure > 0 ? color.new(color.green, 30) : color.new(color.red, 30)
     table.cell(rayDash, 0, 6, "PRESSURE", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 6, pressTxt, bgcolor=pressClr, text_color=color.white, text_size=size.tiny)
-
-    // Position Status
     statusTxt = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
     statusClr = inLong ? color.new(color.green, 30) : inShort ? color.new(color.red, 30) : color.new(color.gray, 30)
     table.cell(rayDash, 0, 7, "POSITION", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
     table.cell(rayDash, 1, 7, statusTxt, bgcolor=statusClr, text_color=color.white, text_size=size.tiny)
-
 // ============================================================================
 // MULTI-TIMEFRAME TREND TABLE (bottom-left)
 // ============================================================================
@@ -485,19 +356,16 @@ f_trendData(tf) =>
     strength  = atrR > 2.0 ? "High" : atrR > 1.0 ? "Medium" : "Low"
     isRanging = (reqH - reqL) < reqATR * 0.5
     [trendDir, strength, isRanging]
-
 if showDashboard and barstate.islast
     var table mtfDash = table.new(position.bottom_left, 4, 10, border_width=1)
     table.cell(mtfDash, 0, 0, "TF", bgcolor=color.new(color.teal, 50), text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 1, 0, "Trend", bgcolor=color.new(color.teal, 50), text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 2, 0, "Strength", bgcolor=color.new(color.orange, 50), text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 3, 0, "Range", bgcolor=color.new(color.yellow, 50), text_color=color.white, text_size=size.tiny)
-
     tfLabels = array.from("1M", "5M", "15M", "30M", "1H", "4H", "1D", "1W")
     tfValues = array.from("1", "5", "15", "30", "60", "240", "D", "W")
     bullCount = 0
     bearCount = 0
-
     for i = 0 to 7
         [tDir, str_val, ranging] = f_trendData(array.get(tfValues, i))
         tClr = tDir == 1 ? color.new(color.green, 30) : color.new(color.red, 30)
@@ -511,13 +379,11 @@ if showDashboard and barstate.islast
         table.cell(mtfDash, 1, i + 1, tDir == 1 ? "BULL" : "BEAR", bgcolor=tClr, text_color=color.white, text_size=size.tiny)
         table.cell(mtfDash, 2, i + 1, str_val, bgcolor=sClr, text_color=color.white, text_size=size.tiny)
         table.cell(mtfDash, 3, i + 1, ranging ? "Range" : "-", bgcolor=rClr, text_color=color.white, text_size=size.tiny)
-
     overallClr = bullCount > bearCount ? color.new(color.green, 30) : color.new(color.red, 30)
     table.cell(mtfDash, 0, 9, "Overall", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 1, 9, str.tostring(bullCount) + "/" + str.tostring(bearCount), bgcolor=overallClr, text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 2, 9, "", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 3, 9, "", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
-
 // ============================================================================
 // BACKTEST STATS
 // ============================================================================
@@ -526,29 +392,24 @@ var int   wins        = 0
 var float bestWinPct  = 0.0
 var int   tradeDir    = 0
 var float entryPrice  = na
-
 if longTPHit and tradeDir == 1
     totalTrades += 1
     wins        += 1
     tradeDir    := 0
     entryPrice  := na
-
 if shortTPHit and tradeDir == -1
     totalTrades += 1
     wins        += 1
     tradeDir    := 0
     entryPrice  := na
-
 if longSLHit and tradeDir == 1
     totalTrades += 1
     tradeDir    := 0
     entryPrice  := na
-
 if shortSLHit and tradeDir == -1
     totalTrades += 1
     tradeDir    := 0
     entryPrice  := na
-
 if canEnterShort and tradeDir == 1
     totalTrades += 1
     if not na(entryPrice) and close > entryPrice
@@ -561,18 +422,14 @@ else if canEnterLong and tradeDir == -1
         wins += 1
     tradeDir   := 1
     entryPrice := close
-
 if canEnterLong and tradeDir <= 0 and not (canEnterShort and tradeDir == 1)
     tradeDir   := 1
     entryPrice := close
-
 if canEnterShort and tradeDir >= 0 and not (canEnterLong and tradeDir == -1)
     tradeDir   := -1
     entryPrice := close
-
 currentWinPct = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
 bestWinPct := math.max(bestWinPct, currentWinPct)
-
 if showBacktest and barstate.islast
     var table btPanel = table.new(position.top_right, 2, 6, border_width=1)
     table.cell(btPanel, 0, 0, "Backtesting", bgcolor=color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
@@ -589,7 +446,6 @@ if showBacktest and barstate.islast
     btStatusClr = inLong ? color.new(color.green, 30) : inShort ? color.new(color.red, 30) : color.new(color.gray, 50)
     table.cell(btPanel, 0, 5, "Position", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
     table.cell(btPanel, 1, 5, btStatusTxt, bgcolor=btStatusClr, text_color=color.white, text_size=size.tiny)
-
 // ============================================================================
 // ALERTS
 // ============================================================================
