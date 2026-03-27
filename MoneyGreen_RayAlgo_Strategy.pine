@@ -1,5 +1,5 @@
 //@version=6
-strategy("MoneyGreen x Ray Algo Strategy", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=300, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_value=0.02, slippage=2)
+indicator("MoneyGreen x Ray Algo", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=300)
 
 // ============================================================================
 // INPUTS
@@ -358,26 +358,22 @@ shortSLHit = inShort and not na(shortSL) and high >= shortSL
 
 // Exit on TP/SL
 if longTPHit or longSLHit
-    strategy.close("Long", comment=longTPHit ? "Long TP" : "Long SL")
     longTP := na
     longSL := na
     inLong := false
 
 if shortTPHit or shortSLHit
-    strategy.close("Short", comment=shortTPHit ? "Short TP" : "Short SL")
     shortTP := na
     shortSL := na
     inShort := false
 
 // Flip: close opposite on reversal
 if canEnterShort and inLong
-    strategy.close("Long", comment="Flip to Short")
     longTP := na
     longSL := na
     inLong := false
 
 if canEnterLong and inShort
-    strategy.close("Short", comment="Flip to Long")
     shortTP := na
     shortSL := na
     inShort := false
@@ -387,13 +383,11 @@ if canEnterLong
     inLong := true
     longTP := close + atr * tpMultiplier
     longSL := close - atr * slMultiplier
-    strategy.entry("Long", strategy.long, comment=reversalBuy ? "REV BUY" : "CONT BUY")
 
 if canEnterShort
     inShort := true
     shortTP := close - atr * tpMultiplier
     shortSL := close + atr * slMultiplier
-    strategy.entry("Short", strategy.short, comment=reversalSell ? "REV SELL" : "CONT SELL")
 
 // ============================================================================
 // PLOTTING
@@ -523,6 +517,78 @@ if showDashboard and barstate.islast
     table.cell(mtfDash, 1, 9, str.tostring(bullCount) + "/" + str.tostring(bearCount), bgcolor=overallClr, text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 2, 9, "", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
     table.cell(mtfDash, 3, 9, "", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+// ============================================================================
+// BACKTEST STATS
+// ============================================================================
+var int   totalTrades = 0
+var int   wins        = 0
+var float bestWinPct  = 0.0
+var int   tradeDir    = 0
+var float entryPrice  = na
+
+if longTPHit and tradeDir == 1
+    totalTrades += 1
+    wins        += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if shortTPHit and tradeDir == -1
+    totalTrades += 1
+    wins        += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if longSLHit and tradeDir == 1
+    totalTrades += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if shortSLHit and tradeDir == -1
+    totalTrades += 1
+    tradeDir    := 0
+    entryPrice  := na
+
+if canEnterShort and tradeDir == 1
+    totalTrades += 1
+    if not na(entryPrice) and close > entryPrice
+        wins += 1
+    tradeDir   := -1
+    entryPrice := close
+else if canEnterLong and tradeDir == -1
+    totalTrades += 1
+    if not na(entryPrice) and close < entryPrice
+        wins += 1
+    tradeDir   := 1
+    entryPrice := close
+
+if canEnterLong and tradeDir <= 0 and not (canEnterShort and tradeDir == 1)
+    tradeDir   := 1
+    entryPrice := close
+
+if canEnterShort and tradeDir >= 0 and not (canEnterLong and tradeDir == -1)
+    tradeDir   := -1
+    entryPrice := close
+
+currentWinPct = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
+bestWinPct := math.max(bestWinPct, currentWinPct)
+
+if showBacktest and barstate.islast
+    var table btPanel = table.new(position.top_right, 2, 6, border_width=1)
+    table.cell(btPanel, 0, 0, "Backtesting", bgcolor=color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 0, "Dashboard", bgcolor=color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 0, 1, "Total Trades", bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 1, str.tostring(totalTrades), bgcolor=color.new(color.gray, 60), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 0, 2, "Wins", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 2, str.tostring(wins), bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 0, 3, "Win %", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 3, str.tostring(currentWinPct, "#.##") + "%", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 0, 4, "Best Win %", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 4, str.tostring(bestWinPct, "#.##") + "%", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    btStatusTxt = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    btStatusClr = inLong ? color.new(color.green, 30) : inShort ? color.new(color.red, 30) : color.new(color.gray, 50)
+    table.cell(btPanel, 0, 5, "Position", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+    table.cell(btPanel, 1, 5, btStatusTxt, bgcolor=btStatusClr, text_color=color.white, text_size=size.tiny)
 
 // ============================================================================
 // ALERTS
