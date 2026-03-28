@@ -1,7 +1,7 @@
 //@version=6
 indicator("MoneyGreen x Ray Algo", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=300)
 // ============================================================================
-// COPY-PASTE READY — Trend Reversal Buy/Sell with Band Cloud
+// COPY-PASTE READY — Optimized Trend Reversal Buy/Sell
 // ============================================================================
 // INPUTS
 // ============================================================================
@@ -12,9 +12,9 @@ string GRP_FILTER = "Filters"
 string GRP_VISUAL = "Visuals"
 string GRP_DASH   = "Dashboard"
 // Market Structure
-swingLen       = input.int(5,     "Swing Pivot Length",           minval=2, maxval=20,  group=GRP_STRUCT, tooltip="Pivot detection for HH/HL/LH/LL. Higher = fewer pivots, bigger swings")
-confirmBars    = input.int(2,     "CHOCH Confirmation Bars",      minval=1, maxval=5,   group=GRP_STRUCT, tooltip="Bars price must hold beyond structure break to confirm CHOCH")
-obLookback     = input.int(10,    "Order Block Lookback",         minval=3, maxval=30,  group=GRP_STRUCT, tooltip="How far back to find the impulse candle for OB zone")
+swingLen       = input.int(5,     "Swing Pivot Length",           minval=2, maxval=20,  group=GRP_STRUCT, tooltip="Pivot detection for HH/HL/LH/LL")
+confirmBars    = input.int(2,     "CHOCH Confirmation Bars",      minval=1, maxval=5,   group=GRP_STRUCT, tooltip="Bars price must hold beyond structure break")
+obLookback     = input.int(10,    "Order Block Lookback",         minval=3, maxval=30,  group=GRP_STRUCT)
 showStructure  = input.bool(true, "Show HH/HL/LH/LL Labels",                            group=GRP_STRUCT)
 showBOS        = input.bool(true, "Show BOS Labels",                                     group=GRP_STRUCT)
 showCHOCH      = input.bool(true, "Show CHOCH Labels",                                   group=GRP_STRUCT)
@@ -26,15 +26,26 @@ bandMult       = input.float(1.5, "Band Multiplier",             minval=0.5, ste
 volDriftLen    = input.int(3,     "Volume Drift Length",          minval=1,              group=GRP_BANDS)
 showBands      = input.bool(true, "Show Band Cloud",                                     group=GRP_BANDS)
 bandTransp     = input.int(85,    "Band Cloud Transparency",     minval=50, maxval=95,  group=GRP_BANDS)
-// TP / SL
-tpMultiplier   = input.float(3.0, "TP ATR Multiplier",           minval=0.5, step=0.5,  group=GRP_TP)
-slMultiplier   = input.float(1.0, "SL ATR Multiplier",           minval=0.5, step=0.5,  group=GRP_TP)
-useTrailStop   = input.bool(true, "Use Trailing Stop",                                   group=GRP_TP, tooltip="Trail stop loss as trade moves in your favor")
-trailATRMult   = input.float(1.5, "Trail ATR Multiplier",        minval=0.5, step=0.5,  group=GRP_TP)
+// TP / SL — balanced ratio for higher win rate
+tpMultiplier   = input.float(2.0, "TP ATR Multiplier",           minval=0.5, step=0.5,  group=GRP_TP)
+slMultiplier   = input.float(1.5, "SL ATR Multiplier",           minval=0.5, step=0.5,  group=GRP_TP)
+useTrailStop   = input.bool(true, "Use Trailing Stop",                                   group=GRP_TP)
+trailATRMult   = input.float(1.0, "Trail ATR Multiplier",        minval=0.5, step=0.5,  group=GRP_TP)
 // Filters
 htfTF          = input.timeframe("D", "HTF for Trend",                                   group=GRP_FILTER)
-useHTFFilter   = input.bool(false, "Require HTF Trend Alignment",                        group=GRP_FILTER)
-cooldownBars   = input.int(3,     "Min Bars Between Signals",     minval=1,              group=GRP_FILTER)
+useHTFFilter   = input.bool(true, "Require HTF Trend Alignment",                         group=GRP_FILTER, tooltip="Only buy in daily uptrend, sell in daily downtrend")
+useBandFilter  = input.bool(true, "Require Band Direction Agree",                        group=GRP_FILTER, tooltip="Band must confirm reversal direction")
+useVolFilter   = input.bool(true, "Require Volume Confirmation",                         group=GRP_FILTER, tooltip="Signal bar volume must be above average")
+volAvgLen      = input.int(20,    "Volume Average Length",        minval=5,              group=GRP_FILTER)
+volMultReq     = input.float(0.8, "Min Volume Multiple",         minval=0.3, step=0.1,  group=GRP_FILTER)
+usePressFilter = input.bool(true, "Require Pressure Agree",                              group=GRP_FILTER, tooltip="Volume pressure must match signal direction")
+useEMAFilter   = input.bool(true, "Require EMA Alignment",                               group=GRP_FILTER, tooltip="Fast EMA above slow for buy, below for sell")
+useBodyFilter  = input.bool(true, "Require Strong Candle Body",                          group=GRP_FILTER, tooltip="Reject weak doji candles")
+bodyPct        = input.float(35.0, "Min Body % of Range",        minval=10, maxval=80, step=5, group=GRP_FILTER)
+useConsolFilter = input.bool(true, "Skip Consolidation",                                 group=GRP_FILTER)
+consolATR      = input.float(0.5, "Consolidation Threshold",     minval=0.1, step=0.1,  group=GRP_FILTER)
+consolBars     = input.int(10,    "Consolidation Lookback",       minval=3,              group=GRP_FILTER)
+cooldownBars   = input.int(5,     "Min Bars Between Signals",     minval=1,              group=GRP_FILTER)
 // Visuals
 showTP         = input.bool(true, "Show TP/SL Lines",                                    group=GRP_VISUAL)
 showEMA        = input.bool(true, "Show EMA Lines",                                      group=GRP_VISUAL)
@@ -58,6 +69,7 @@ lblSize = switch labelSize
 atr     = ta.atr(atrLength)
 emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
+volAvg  = ta.sma(volume, volAvgLen)
 // ============================================================================
 // VOLUME DRIFT MODEL
 // ============================================================================
@@ -87,13 +99,10 @@ trailUpper := na(trailUpper[1]) ? upperBand : upperBand < trailUpper[1] or close
 trailLower := na(trailLower[1]) ? lowerBand : lowerBand > trailLower[1] or close[1] < trailLower[1] ? lowerBand : trailLower[1]
 bandDir    := na(bandDir[1]) ? 1 : bandDir[1] == -1 and close > trailUpper[1] ? 1 : bandDir[1] == 1 and close < trailLower[1] ? -1 : bandDir[1]
 trailLine = bandDir == 1 ? trailLower : trailUpper
-// Band cloud plots
 p_upper = plot(showBands ? trailUpper : na, "Upper Band", color=color.new(color.red, 70), linewidth=1)
 p_lower = plot(showBands ? trailLower : na, "Lower Band", color=color.new(color.aqua, 70), linewidth=1)
 p_basis = plot(showBands ? basis : na, "Basis", color=color.new(color.gray, 80), linewidth=1, style=plot.style_circles)
-bullCloud = color.new(color.aqua, bandTransp)
-bearCloud = color.new(color.red, bandTransp)
-fill(p_upper, p_lower, color=bandDir == 1 ? bullCloud : bearCloud, title="Band Cloud")
+fill(p_upper, p_lower, color=bandDir == 1 ? color.new(color.aqua, bandTransp) : color.new(color.red, bandTransp), title="Band Cloud")
 // ============================================================================
 // HTF TREND
 // ============================================================================
@@ -102,7 +111,7 @@ htfEma     = request.security(syminfo.tickerid, htfTF, ta.ema(close, 21))
 htfBullish = htfClose > htfEma
 htfBearish = htfClose < htfEma
 // ============================================================================
-// MARKET STRUCTURE ENGINE (Ray Algo Style)
+// MARKET STRUCTURE ENGINE
 // ============================================================================
 swingHi = ta.pivothigh(high, swingLen, swingLen)
 swingLo = ta.pivotlow(low, swingLen, swingLen)
@@ -226,19 +235,40 @@ if showOB and trendReversalBear
     if not na(bearOB)
         label.new(bar_index, obTop, "BEAR OB++\n" + str.tostring(volume, "#.##"), style=label.style_none, textcolor=color.new(color.red, 30), size=size.tiny)
 // ============================================================================
-// SIGNAL GENERATION — REVERSAL ONLY
+// SIGNAL FILTERS — ALL CONFIRMATIONS
 // ============================================================================
-// RULE: Only buy when trend reverses from SELL (bear→bull)
-//       Only sell when trend reverses from BUY (bull→bear)
-// No continuation signals. No extra filters. Pure reversal.
+// HTF alignment
+htfBuyOk  = not useHTFFilter or htfBullish
+htfSellOk = not useHTFFilter or htfBearish
+// Band direction must agree
+bandBuyOk  = not useBandFilter or bandDir == 1
+bandSellOk = not useBandFilter or bandDir == -1
+// Volume above average
+volConfirm = not useVolFilter or (volume >= volAvg * volMultReq)
+// Volume pressure direction
+pressBuyOk  = not usePressFilter or normPressure > 0
+pressSellOk = not usePressFilter or normPressure < 0
+// EMA trend alignment
+emaBuyOk  = not useEMAFilter or emaFast > emaSlow
+emaSellOk = not useEMAFilter or emaFast < emaSlow
+// Candle body quality
+candleBody  = math.abs(close - open)
+candleRange = high - low
+bodyOk = not useBodyFilter or (candleRange > 0 and (candleBody / candleRange) * 100 >= bodyPct)
+// Consolidation skip
+rangeHigh = ta.highest(high, consolBars)
+rangeLow  = ta.lowest(low, consolBars)
+isConsol  = useConsolFilter and ((rangeHigh - rangeLow) < atr * consolATR * consolBars / 3)
+// Cooldown
 var int lastBuyBar  = 0
 var int lastSellBar = 0
 buyCooldownOk  = bar_index - lastBuyBar > cooldownBars
 sellCooldownOk = bar_index - lastSellBar > cooldownBars
-htfBuyOk  = not useHTFFilter or htfBullish
-htfSellOk = not useHTFFilter or htfBearish
-finalBuy  = trendReversalBull and htfBuyOk and buyCooldownOk
-finalSell = trendReversalBear and htfSellOk and sellCooldownOk
+// ============================================================================
+// SIGNAL GENERATION — REVERSAL + ALL FILTERS
+// ============================================================================
+finalBuy  = trendReversalBull and htfBuyOk and bandBuyOk and volConfirm and pressBuyOk and emaBuyOk and bodyOk and not isConsol and buyCooldownOk
+finalSell = trendReversalBear and htfSellOk and bandSellOk and volConfirm and pressSellOk and emaSellOk and bodyOk and not isConsol and sellCooldownOk
 if finalBuy
     lastBuyBar := bar_index
 if finalSell
@@ -254,6 +284,7 @@ var bool  inLong  = false
 var bool  inShort = false
 canEnterLong  = finalBuy and not inLong
 canEnterShort = finalSell and not inShort
+// Trailing stop — tighter trail for locking profits
 if useTrailStop and inLong and not na(longSL)
     newSL = close - atr * trailATRMult
     if newSL > longSL
