@@ -83,7 +83,7 @@ vectorLookback         = input.int(3, "Vector Lookback Bars", minval=1, group=GR
 useConsolidationFilter = input.bool(true, "Avoid Consolidation", group=GRP_CONSOL, tooltip="Block signals when market is ranging - uses ADX + BB Squeeze + Range Compression")
 adxLen          = input.int(14, "ADX Length", minval=1, group=GRP_CONSOL)
 adxSmooth       = input.int(14, "ADX Smoothing", minval=1, group=GRP_CONSOL)
-minAdx          = input.float(20.0, "Minimum ADX (Trend Strength)", minval=5.0, step=0.5, group=GRP_CONSOL)
+minAdx          = input.float(15.0, "Minimum ADX (Trend Strength)", minval=5.0, step=0.5, group=GRP_CONSOL)
 bbSqueezePeriod = input.int(20, "BB Squeeze Period", minval=1, group=GRP_CONSOL)
 bbSqueezeKcMult = input.float(1.5, "KC Multiplier for Squeeze", minval=0.1, step=0.1, group=GRP_CONSOL)
 rangeCompLen    = input.int(20, "Range Compression Lookback", minval=1, group=GRP_CONSOL)
@@ -100,7 +100,7 @@ showH1Trend        = input.bool(true, "Show 1H Trend Reader", group=GRP_H1)
 h1Ema1Len          = input.int(8, "1H EMA Fast", minval=1, group=GRP_H1)
 h1Ema2Len          = input.int(21, "1H EMA Mid", minval=1, group=GRP_H1)
 h1Ema3Len          = input.int(55, "1H EMA Slow", minval=1, group=GRP_H1)
-useH1TrendFilter   = input.bool(true, "Use 1H Trend For Entries", group=GRP_H1, tooltip="Only allow longs when 1H bullish, shorts when 1H bearish")
+useH1TrendFilter   = input.bool(false, "Use 1H Trend For Entries", group=GRP_H1, tooltip="Only allow longs when 1H bullish, shorts when 1H bearish")
 
 // Dashboard
 showDashboard = input.bool(true, "Show Dashboard", group=GRP_DASH)
@@ -222,8 +222,8 @@ avgRange        = ta.sma(currentRange, rangeCompLen)
 rangeRatio      = avgRange != 0 ? currentRange / avgRange : 1.0
 rangeCompressed = rangeRatio < rangeCompThresh
 
-// Combined
-isConsolidating  = adxLow or bbSqueeze or rangeCompressed
+// Combined — requires low ADX AND at least one squeeze/compression signal
+isConsolidating  = adxLow and (bbSqueeze or rangeCompressed)
 notConsolidating = not useConsolidationFilter or not isConsolidating
 consolStatusText  = isConsolidating ? (adxLow ? "Low ADX" : bbSqueeze ? "BB Squeeze" : "Compressed") : "Trending"
 consolStatusColor = isConsolidating ? color.new(color.orange, 25) : color.new(color.green, 35)
