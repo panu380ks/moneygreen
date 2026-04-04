@@ -200,8 +200,8 @@ downMove = low[1] - low
 plusDM   = (upMove > downMove and upMove > 0) ? upMove : 0.0
 minusDM  = (downMove > upMove and downMove > 0) ? downMove : 0.0
 trVal    = ta.rma(ta.tr, adxLen)
-plusDI   = trVal != 0 ? 100 * ta.rma(plusDM, adxLen) / trVal : 0
-minusDI  = trVal != 0 ? 100 * ta.rma(minusDM, adxLen) / trVal : 0
+plusDI   = trVal != 0 ? 100.0 * ta.rma(plusDM, adxLen) / trVal : 0.0
+minusDI  = trVal != 0 ? 100.0 * ta.rma(minusDM, adxLen) / trVal : 0.0
 diSum    = plusDI + minusDI
 dx       = diSum == 0 ? 0.0 : 100.0 * math.abs(plusDI - minusDI) / diSum
 adxValue = ta.rma(dx, adxSmooth)
@@ -237,8 +237,8 @@ effectiveCooldown = math.max(0, math.round(cooldownBars * speedMult))
 // Early Momentum EMA Cross
 earlyFast = ta.ema(close, earlyEmaFast)
 earlySlow = ta.ema(close, earlyEmaSlow)
-earlyBullCross = useEarlyMomentum and ta.crossover(earlyFast, earlySlow)
-earlyBearCross = useEarlyMomentum and ta.crossunder(earlyFast, earlySlow)
+earlyBullCross = useEarlyMomentum ? ta.crossover(earlyFast, earlySlow) : false
+earlyBearCross = useEarlyMomentum ? ta.crossunder(earlyFast, earlySlow) : false
 
 // ============================================================================
 // 1H TREND READER (NEW)
