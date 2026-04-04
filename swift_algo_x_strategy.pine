@@ -389,8 +389,8 @@ finalSell = (primarySell or contSell or raySellEntry or earlyBearEntry) and cool
 
 buyLabelText  = "BUY"
 sellLabelText = "SELL"
-buyReasonText = primaryBuy ? "Structure" : contBuy ? "Continuation" : rayBuyEntry ? "RayAlgo" : earlyBuyEntry ? "Early Mom" : "Bull Bias"
-sellReasonText = primarySell ? "Structure" : contSell ? "Continuation" : raySellEntry ? "RayAlgo" : earlyBearEntry ? "Early Mom" : "Bear Bias"
+buyReasonText = primaryBuy ? "Structure" : contBuy ? "Continuation" : rayBuyEntry ? "RayAlgo" : (earlyBuyEntry == true) ? "Early Mom" : "Bull Bias"
+sellReasonText = primarySell ? "Structure" : contSell ? "Continuation" : raySellEntry ? "RayAlgo" : (earlyBearEntry == true) ? "Early Mom" : "Bear Bias"
 
 if finalBuy and not finalSell
     strategy.entry("Long", strategy.long)
